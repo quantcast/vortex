@@ -13,7 +13,7 @@ mod tests {
     use vortex_buffer::Buffer;
     use vortex_buffer::ByteBuffer;
     use vortex_buffer::buffer;
-    use vortex_error::VortexError;
+    use vortex_error::VortexErrorKind;
 
     use crate::IntoArray;
     use crate::VortexSessionExecute;
@@ -39,7 +39,7 @@ mod tests {
         let chunk2 = buffer![4i64, 5, 6].into_array();
         let result = ChunkedArray::try_new(vec![chunk1, chunk2], PType::I32.into());
 
-        assert!(matches!(result, Err(VortexError::MismatchedTypes(_, _, _))));
+        assert_eq!(result.unwrap_err().kind(), VortexErrorKind::MismatchedTypes);
     }
 
     #[test]
@@ -50,7 +50,7 @@ mod tests {
         let decimal_dtype = crate::dtype::DecimalDType::new(10, 2);
         let result = DecimalArray::try_new(buffer, decimal_dtype, validity);
 
-        assert!(matches!(result, Err(VortexError::InvalidArgument(_, _))));
+        assert_eq!(result.unwrap_err().kind(), VortexErrorKind::InvalidArgument);
     }
 
     #[test]
@@ -60,7 +60,7 @@ mod tests {
         let validity = Validity::from_iter([true, false]); // Length 2, buffer is length 3.
         let result = PrimitiveArray::try_new(buffer, validity);
 
-        assert!(matches!(result, Err(VortexError::InvalidArgument(_, _))));
+        assert_eq!(result.unwrap_err().kind(), VortexErrorKind::InvalidArgument);
     }
 
     #[test]
@@ -71,7 +71,7 @@ mod tests {
         let offsets = buffer![0i64, 2, 5].into_array(); // 5 > 3.
         let result = ListArray::try_new(elements, offsets, Validity::NonNullable, &mut ctx);
 
-        assert!(matches!(result, Err(VortexError::InvalidArgument(_, _))));
+        assert_eq!(result.unwrap_err().kind(), VortexErrorKind::InvalidArgument);
     }
 
     #[test]
@@ -80,7 +80,7 @@ mod tests {
         let elements = buffer![1i32, 2, 3, 4, 5].into_array(); // 5 elements.
         let result = FixedSizeListArray::try_new(elements, 2, Validity::NonNullable, 3); // Expects 2 * 3 = 6.
 
-        assert!(matches!(result, Err(VortexError::InvalidArgument(_, _))));
+        assert_eq!(result.unwrap_err().kind(), VortexErrorKind::InvalidArgument);
     }
 
     #[test]
@@ -119,7 +119,7 @@ mod tests {
             &mut array_session().create_execution_ctx(),
         );
 
-        assert!(matches!(result, Err(VortexError::InvalidArgument(_, _))));
+        assert_eq!(result.unwrap_err().kind(), VortexErrorKind::OutOfBounds);
     }
 
     #[test]
@@ -131,7 +131,7 @@ mod tests {
         let names = ["a", "b"];
         let result = StructArray::try_new(names.into(), fields, 3, Validity::NonNullable);
 
-        assert!(matches!(result, Err(VortexError::InvalidArgument(_, _))));
+        assert_eq!(result.unwrap_err().kind(), VortexErrorKind::InvalidArgument);
     }
 
     #[rstest::rstest]
