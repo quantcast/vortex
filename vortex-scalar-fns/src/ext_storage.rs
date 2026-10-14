@@ -1,24 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use vortex_array::ArrayRef;
+use vortex_array::ExecutionCtx;
+use vortex_array::IntoArray;
+use vortex_array::arrays::ConstantArray;
+use vortex_array::arrays::ExtensionArray;
+use vortex_array::arrays::extension::ExtensionArrayExt;
+use vortex_array::dtype::DType;
+use vortex_array::scalar_fn::Arity;
+use vortex_array::scalar_fn::ChildName;
+use vortex_array::scalar_fn::EmptyOptions;
+use vortex_array::scalar_fn::ExecutionArgs;
+use vortex_array::scalar_fn::ScalarFnId;
+use vortex_array::scalar_fn::ScalarFnVTable;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_session::VortexSession;
 use vortex_session::registry::CachedId;
-
-use crate::ArrayRef;
-use crate::ExecutionCtx;
-use crate::IntoArray;
-use crate::arrays::ConstantArray;
-use crate::arrays::ExtensionArray;
-use crate::arrays::extension::ExtensionArrayExt;
-use crate::dtype::DType;
-use crate::scalar_fn::Arity;
-use crate::scalar_fn::ChildName;
-use crate::scalar_fn::EmptyOptions;
-use crate::scalar_fn::ExecutionArgs;
-use crate::scalar_fn::ScalarFnId;
-use crate::scalar_fn::ScalarFnVTable;
 
 /// Extract the storage values from an extension array.
 #[derive(Clone)]
@@ -97,25 +96,25 @@ impl ScalarFnVTable for ExtStorage {
 mod tests {
     use std::sync::LazyLock;
 
+    use vortex_array::IntoArray;
+    use vortex_array::VortexSessionExecute;
+    use vortex_array::arrays::ConstantArray;
+    use vortex_array::arrays::ExtensionArray;
+    use vortex_array::arrays::PrimitiveArray;
+    use vortex_array::assert_arrays_eq;
+    use vortex_array::dtype::DType;
+    use vortex_array::dtype::Nullability;
+    use vortex_array::dtype::PType;
+    use vortex_array::dtype::extension::ExtDTypeRef;
+    use vortex_array::expr::root;
+    use vortex_array::extension::datetime::TimeUnit;
+    use vortex_array::extension::datetime::Timestamp;
+    use vortex_array::scalar::Scalar;
     use vortex_buffer::buffer;
     use vortex_error::VortexResult;
     use vortex_session::VortexSession;
 
-    use crate::IntoArray;
-    use crate::VortexSessionExecute;
-    use crate::arrays::ConstantArray;
-    use crate::arrays::ExtensionArray;
-    use crate::arrays::PrimitiveArray;
-    use crate::assert_arrays_eq;
-    use crate::dtype::DType;
-    use crate::dtype::Nullability;
-    use crate::dtype::PType;
-    use crate::dtype::extension::ExtDTypeRef;
     use crate::expr::ext_storage;
-    use crate::expr::root;
-    use crate::extension::datetime::TimeUnit;
-    use crate::extension::datetime::Timestamp;
-    use crate::scalar::Scalar;
 
     static SESSION: LazyLock<VortexSession> = LazyLock::new(VortexSession::empty);
 
