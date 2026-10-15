@@ -35,9 +35,12 @@ use crate::MAX_POSTSCRIPT_SIZE;
 use crate::VortexFile;
 use crate::footer::Footer;
 use crate::segments::BufferSegmentSource;
+use crate::segments::FileSegmentIo;
 use crate::segments::FileSegmentSource;
 use crate::segments::InitialReadSegmentCache;
 use crate::segments::RequestMetrics;
+use crate::segments::segment_io::Backend;
+use crate::segments::segment_io::FileIo;
 
 const INITIAL_READ_SIZE: usize = MAX_POSTSCRIPT_SIZE as usize + EOF_SIZE;
 
@@ -260,6 +263,11 @@ impl VortexOpenOptions {
         };
         footer.validate_file_size(buffer.len() as u64)?;
 
+        let segment_io = FileSegmentIo::of(&opts.session).register(FileIo::new(
+            footer.segment_specs_with_metadata(),
+            Arc::new(NoOpSegmentCache),
+            Backend::Buffer(buffer.clone()),
+        ));
         let segment_source: Arc<dyn SegmentSource> = Arc::new(BufferSegmentSource::new(
             buffer,
             footer.segment_specs_with_metadata(),
@@ -269,7 +277,9 @@ impl VortexOpenOptions {
         } else {
             Arc::new(HashMap::new())
         };
-        let file = VortexFile::new(footer, segment_source, opts.session).with_metadata(metadata);
+        let file = VortexFile::new(footer, segment_source, opts.session)
+            .with_metadata(metadata)
+            .with_segment_io(segment_io);
         Ok(if cache_layout_reader {
             file.with_caching()
         } else {
@@ -328,12 +338,20 @@ impl VortexOpenOptions {
         let metrics = RequestMetrics::new(metrics_registry.as_ref(), self.labels);
 
         // Create a segment source backed by the VortexRead implementation.
-        let segment_source = Arc::new(SharedSegmentSource::new(FileSegmentSource::open(
+        let file_source = FileSegmentSource::open(
             footer.segment_specs_with_metadata(),
             reader,
             self.session.handle(),
             metrics,
-        )));
+        );
+        // Scans that drive their own reads use the session's segment IO service, which shares
+        // this source's read driver and segment cache.
+        let segment_io = FileSegmentIo::of(&self.session).register(FileIo::new(
+            footer.segment_specs_with_metadata(),
+            Arc::clone(&segment_cache) as _,
+            Backend::Driver(file_source.driver_io()),
+        ));
+        let segment_source = Arc::new(SharedSegmentSource::new(file_source));
 
         // Wrap up the segment source to first resolve segments from the initial read cache.
         let segment_source: Arc<dyn SegmentSource> = Arc::new(SegmentCacheSourceAdapter::new(
@@ -346,8 +364,9 @@ impl VortexOpenOptions {
         } else {
             Arc::new(HashMap::new())
         };
-        let file =
-            VortexFile::new(footer, segment_source, self.session.clone()).with_metadata(metadata);
+        let file = VortexFile::new(footer, segment_source, self.session.clone())
+            .with_metadata(metadata)
+            .with_segment_io(segment_io);
         Ok(if self.cache_layout_reader {
             file.with_caching()
         } else {

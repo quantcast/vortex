@@ -2,8 +2,10 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 mod cache;
-mod source;
+pub(crate) mod segment_io;
+pub(crate) mod source;
 pub(crate) mod writer;
 
 pub use cache::*;
+pub use segment_io::FileSegmentIo;
 pub use source::*;
