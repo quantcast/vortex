@@ -3,6 +3,7 @@
 
 use std::future::poll_fn;
 
+use async_trait::async_trait;
 use futures::future::BoxFuture;
 use rstest::rstest;
 use vortex_array::buffer::BufferHandle;
@@ -10,6 +11,7 @@ use vortex_buffer::Alignment;
 use vortex_buffer::ByteBuffer;
 use vortex_buffer::ByteBufferMut;
 use vortex_error::VortexError;
+use vortex_error::vortex_bail;
 use vortex_io::CoalesceConfig;
 use vortex_io::VortexReadAt;
 use vortex_io::runtime::tokio::TokioRuntime;
@@ -17,6 +19,7 @@ use vortex_io::segments::SegmentKey;
 use vortex_layout::segments::NoOpSegmentCache;
 use vortex_layout::segments::SegmentCache;
 use vortex_layout::segments::SegmentCacheSourceAdapter;
+use vortex_layout::segments::SegmentId;
 use vortex_layout::segments::SharedSegmentSource;
 use vortex_metrics::DefaultMetricsRegistry;
 
@@ -35,12 +38,13 @@ const OFFSETS: [u64; 4] = [0, 16, 32, 128];
 #[derive(Clone)]
 struct RecordingRead {
     bytes: ByteBuffer,
+    coalesce: bool,
     reads: Arc<Mutex<Vec<(u64, usize)>>>,
 }
 
 impl VortexReadAt for RecordingRead {
     fn coalesce_config(&self) -> Option<CoalesceConfig> {
-        Some(CoalesceConfig {
+        self.coalesce.then_some(CoalesceConfig {
             distance: 1024,
             max_size: 1024,
         })
@@ -86,8 +90,16 @@ fn specs() -> Arc<[SegmentSpec]> {
 
 /// A service with one file registered the way `open_read` builds its segment source.
 fn service(cache: Arc<dyn SegmentCache>) -> (FileSegmentIo, RegisteredSource, RecordingRead) {
+    service_with(cache, true)
+}
+
+fn service_with(
+    cache: Arc<dyn SegmentCache>,
+    coalesce: bool,
+) -> (FileSegmentIo, RegisteredSource, RecordingRead) {
     let reader = RecordingRead {
         bytes: bytes(),
+        coalesce,
         reads: Arc::default(),
     };
     let source = SharedSegmentSource::new(FileSegmentSource::open(
@@ -121,6 +133,30 @@ fn expected(segment: usize) -> ByteBuffer {
     bytes().slice(start..start + 16)
 }
 
+/// Waits on `session` until `count` fetches have been reported.
+async fn reported(session: &dyn SegmentIoSession, count: usize) -> VortexResult<Vec<IoOwnerId>> {
+    let mut ready = Vec::new();
+    while ready.len() < count {
+        poll_fn(|cx| session.poll_ready(cx, &mut ready)).await?;
+    }
+    Ok(ready)
+}
+
+/// A cache that misses, and whose lookups are `Pending` on their first poll.
+struct YieldingCache;
+
+#[async_trait]
+impl SegmentCache for YieldingCache {
+    async fn get(&self, _id: SegmentId) -> VortexResult<Option<ByteBuffer>> {
+        tokio::task::yield_now().await;
+        Ok(None)
+    }
+
+    async fn put(&self, _id: SegmentId, _buffer: ByteBuffer) -> VortexResult<()> {
+        Ok(())
+    }
+}
+
 async fn read(handle: &SegmentHandle) -> VortexResult<ByteBuffer> {
     handle
         .bytes()
@@ -148,9 +184,83 @@ async fn a_batch_coalesces_with_its_announcements() -> VortexResult<()> {
     assert_eq!(read(&handles[2]).await?, expected(2));
     assert_eq!(*reader.reads.lock(), vec![(0, 48)]);
 
-    let mut ready = Vec::new();
-    poll_fn(|cx| session.poll_ready(cx, &mut ready)).await?;
-    assert!(ready.iter().all(|owner| *owner == IoOwnerId(7)));
+    assert_eq!(
+        reported(session.as_ref(), 2).await?,
+        vec![IoOwnerId(7), IoOwnerId(7)]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn poll_ready_alone_completes_a_fetch() -> VortexResult<()> {
+    let (service, file, _reader) = service(Arc::new(NoOpSegmentCache));
+    let session = service.session();
+    let handles = session.submit(IoOwnerId(3), &[request(&file, 0, IoIntent::Fetch)])?;
+    assert_eq!(reported(session.as_ref(), 1).await?, vec![IoOwnerId(3)]);
+    let bytes = handles[0]
+        .try_get()
+        .ok_or_else(|| vortex_err!("a reported fetch holds its bytes"))??;
+    assert_eq!(bytes.try_into_host()?.await?, expected(0));
+    Ok(())
+}
+
+#[tokio::test]
+async fn prefetches_start_behind_a_pending_cache() -> VortexResult<()> {
+    // Without coalescing, only the prefetch's own request can read its segment.
+    let (service, file, reader) = service_with(Arc::new(YieldingCache), false);
+    let session = service.session();
+    let _handles = session.submit(
+        IoOwnerId(0),
+        &[
+            request(&file, 3, IoIntent::Prefetch),
+            request(&file, 0, IoIntent::Fetch),
+        ],
+    )?;
+    reported(session.as_ref(), 1).await?;
+    let covers_prefetch = || {
+        reader
+            .reads
+            .lock()
+            .iter()
+            .any(|&(offset, len)| offset <= 128 && offset + len as u64 >= 144)
+    };
+    for _ in 0..1000 {
+        if covers_prefetch() {
+            return Ok(());
+        }
+        tokio::task::yield_now().await;
+    }
+    vortex_bail!("the prefetch was never read: {:?}", reader.reads.lock())
+}
+
+#[rstest]
+#[case::cached(1)]
+#[case::missing(99)]
+#[tokio::test]
+async fn fetches_finished_at_submit_are_reported(#[case] segment: u32) -> VortexResult<()> {
+    let cache = InitialReadSegmentCache {
+        initial: HashMap::from_iter([(SegmentId::from(1), expected(1))]),
+        fallback: Arc::new(NoOpSegmentCache),
+    };
+    let (service, file, _reader) = service(Arc::new(cache));
+    let session = service.session();
+    let handles = session.submit(IoOwnerId(5), &[request(&file, segment, IoIntent::Fetch)])?;
+    assert!(handles[0].try_get().is_some());
+    assert_eq!(reported(session.as_ref(), 1).await?, vec![IoOwnerId(5)]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_sessions_announcement_widens_anothers_fetch() -> VortexResult<()> {
+    let (service, file, reader) = service(Arc::new(NoOpSegmentCache));
+    let _announced = service
+        .session()
+        .submit(IoOwnerId(0), &[request(&file, 1, IoIntent::Announce)])?;
+    let fetched = service
+        .session()
+        .submit(IoOwnerId(0), &[request(&file, 0, IoIntent::Fetch)])?;
+    assert_eq!(read(&fetched[0]).await?, expected(0));
+    assert_eq!(*reader.reads.lock(), vec![(0, 32)]);
     Ok(())
 }
 
@@ -227,15 +337,4 @@ fn a_dropped_registration_is_unreadable() -> VortexResult<()> {
     drop(file);
     assert!(service.session().submit(IoOwnerId(0), &[segment]).is_err());
     Ok(())
-}
-
-#[test]
-fn forget_is_never_submitted() {
-    let (service, file) = buffered();
-    assert!(
-        service
-            .session()
-            .submit(IoOwnerId(0), &[request(&file, 0, IoIntent::Forget)])
-            .is_err()
-    );
 }

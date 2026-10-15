@@ -6,8 +6,8 @@
 //! Requests name a segment of a registered source by [`SegmentKey`] and say how much they need it
 //! with an [`IoIntent`]. A [`SegmentIoSession`] registers a whole batch of them before any can be
 //! read, and returns one [`SegmentHandle`] per request. The handle is the request: its bytes
-//! arrive in it, and dropping every handle of a read withdraws the interest and cancels the read
-//! if nothing else wants it.
+//! arrive in it. The session holds fetches and prefetches until they finish; an announcement is
+//! withdrawn by dropping every handle of it.
 //!
 //! A [`SegmentIoService`] serves every registered source. Its sessions share and coalesce reads,
 //! so one session's announcement can widen another session's read.
@@ -51,14 +51,14 @@ impl SegmentKey {
 /// How much a request needs its segment.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum IoIntent {
-    /// Needed now. Fetches are read ahead of prefetches.
+    /// Needed now. Its owner is reported by [`SegmentIoSession::poll_ready`] when it finishes.
+    /// A service may read fetches ahead of prefetches.
     Fetch,
-    /// Needed soon: read it when there is capacity.
+    /// Needed soon: read, but its owner is not reported when it finishes.
     Prefetch,
-    /// May be needed: only widens nearby reads, and is never read on its own.
+    /// May be needed: only widens nearby reads, and is never read on its own. Dropping its
+    /// handles withdraws it.
     Announce,
-    /// No longer needed: withdraws earlier announcements and prefetches of the segment.
-    Forget,
 }
 
 /// One segment a planner or morsel asks for.
@@ -87,7 +87,8 @@ pub type SharedBytes = Shared<BoxFuture<'static, Result<BufferHandle, Arc<Vortex
 /// One registered segment read.
 ///
 /// Clones share the read. The read stays registered while any handle of it, from any session, is
-/// alive; dropping the last one withdraws it, and cancels it if it has not finished.
+/// alive. A session also holds its fetches and prefetches until they finish, so dropping every
+/// handle withdraws a read only when it was announced alone.
 #[derive(Clone)]
 pub struct SegmentHandle {
     bytes: SharedBytes,
@@ -109,7 +110,8 @@ impl SegmentHandle {
         let bytes = futures::future::ready(result.map_err(Arc::new))
             .boxed()
             .shared();
-        // Polling once stores the result, so `try_get` sees it without a waker.
+        // `Shared::peek` only sees a result once a poll has completed the future, so poll it once
+        // here for `try_get` to see it without a waker.
         drop(bytes.clone().now_or_never());
         Self {
             bytes,
@@ -136,17 +138,18 @@ impl SegmentHandle {
 /// to be polled for reads to progress; polling only learns which reads finished.
 pub trait SegmentIoSession: Send + Sync {
     /// Registers the whole batch before any of it can be read, and returns one handle per
-    /// request, in order. Fetches are tracked for [`poll_ready`](Self::poll_ready). A batch never
-    /// holds a `Forget`: callers withdraw interest by dropping handles.
+    /// request, in order. Every fetch is reported by [`poll_ready`](Self::poll_ready) once it
+    /// finishes, including one already finished at submit, such as a cache hit or an error.
     fn submit(
         &self,
         owner: IoOwnerId,
         batch: &[SegmentRequest],
     ) -> VortexResult<Vec<SegmentHandle>>;
 
-    /// Moves the owners of fetches that finished since the last call into `ready`. Returns
-    /// `Pending`, registering `cx` to be woken by the next one, if none have, and fails if no
-    /// fetch is in flight, since nothing would wake the caller.
+    /// Moves the owners of fetches that finished since the last call into `ready`, once per
+    /// fetch, and drives the session's prefetches. Returns `Pending`, registering `cx` to be
+    /// woken by the next one, if none have, and fails if no fetch is in flight, since nothing
+    /// would wake the caller. An owner is reported even if it dropped the fetch's handles.
     fn poll_ready(
         &self,
         cx: &mut Context<'_>,
@@ -194,15 +197,23 @@ impl RegisteredSource {
     }
 }
 
-/// The fetches of one session, waking the session when any of them finishes.
+/// The fetches and prefetches of one session, waking the session when a fetch finishes.
 ///
-/// Sessions keep one of these to implement [`SegmentIoSession::poll_ready`].
+/// Sessions keep one of these to implement [`SegmentIoSession::poll_ready`]. Prefetches are
+/// polled until they finish, so their reads start and their results land in their handles even
+/// though nobody awaits them.
 #[derive(Default)]
 pub struct FetchTracker {
     fetches: FuturesUnordered<Pin<Box<dyn Future<Output = IoOwnerId> + Send>>>,
+    prefetches: FuturesUnordered<SharedBytes>,
 }
 
 impl FetchTracker {
+    /// Tracks a prefetch until it finishes, without reporting it.
+    pub fn track_prefetch(&mut self, handle: &SegmentHandle) {
+        self.prefetches.push(handle.bytes());
+    }
+
     /// Tracks a fetch submitted by `owner`.
     pub fn track(&mut self, owner: IoOwnerId, handle: &SegmentHandle) {
         let bytes = handle.bytes();
@@ -219,6 +230,8 @@ impl FetchTracker {
         cx: &mut Context<'_>,
         ready: &mut Vec<IoOwnerId>,
     ) -> Poll<VortexResult<()>> {
+        // Finished prefetches are dropped; their handles hold the results.
+        while let Poll::Ready(Some(_)) = self.prefetches.poll_next_unpin(cx) {}
         let before = ready.len();
         loop {
             match self.fetches.poll_next_unpin(cx) {
@@ -235,9 +248,10 @@ impl FetchTracker {
         }
     }
 
-    /// Drops every tracked fetch.
+    /// Drops every tracked fetch and prefetch.
     pub fn clear(&mut self) {
         self.fetches.clear();
+        self.prefetches.clear();
     }
 }
 

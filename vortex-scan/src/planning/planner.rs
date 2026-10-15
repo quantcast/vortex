@@ -69,7 +69,8 @@ pub trait Planner: Send {
     fn compute(&mut self) -> VortexResult<PlannerOutput>;
 
     /// The bytes of a segment it fetched, once per fetch. It never has two fetches of one
-    /// segment outstanding.
+    /// segment outstanding. A failed fetch is never delivered: whatever drives it fails the
+    /// scan with the read's error instead.
     fn deliver(&mut self, key: SegmentKey, bytes: BufferHandle);
 }
 

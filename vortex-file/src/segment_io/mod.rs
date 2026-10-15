@@ -10,8 +10,10 @@
 //! - every request calls [`SegmentSource::request`], which for an opened file registers the read
 //!   with its coalescing driver without starting it, so even an announcement can widen a read;
 //! - a fetch or prefetch is then polled once, after the whole batch is registered, which starts
-//!   the read;
-//! - dropping every handle drops the source's request, which withdraws the read.
+//!   the read. The session keeps polling it from `poll_ready` until it finishes, so a read whose
+//!   first poll had to wait, such as on an asynchronous cache lookup, still starts;
+//! - dropping every handle of an announcement drops the source's request, which withdraws the
+//!   read.
 //!
 //! [`VortexFile::segment_source`]: crate::VortexFile::segment_source
 //! [`SegmentSource`]: vortex_layout::segments::SegmentSource
@@ -21,6 +23,7 @@
 // v1 segment sources, so it can be optimised (fetches before prefetches, one scheduler across
 // files) without changing v1.
 
+use std::any::Any;
 use std::fmt;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -35,7 +38,6 @@ use futures::TryFutureExt;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use vortex_error::VortexResult;
-use vortex_error::vortex_bail;
 use vortex_error::vortex_err;
 use vortex_io::segments::FetchTracker;
 use vortex_io::segments::IoIntent;
@@ -60,10 +62,13 @@ pub struct FileSegmentIo(Arc<Registry>);
 
 type Source = Arc<dyn SegmentSource>;
 
+/// Source ids are unique across services, so a key submitted to the wrong service's session is
+/// rejected as unregistered rather than read from another source.
+static NEXT_SOURCE: AtomicU32 = AtomicU32::new(0);
+
 #[derive(Default)]
 struct Registry {
     sources: RwLock<HashMap<SourceId, Weak<dyn SegmentSource>>>,
-    next: AtomicU32,
 }
 
 impl Debug for FileSegmentIo {
@@ -75,11 +80,11 @@ impl Debug for FileSegmentIo {
 }
 
 impl SessionVar for FileSegmentIo {
-    fn as_any(&self) -> &dyn std::any::Any {
+    fn as_any(&self) -> &dyn Any {
         self
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+    fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
 }
@@ -90,12 +95,16 @@ impl FileSegmentIo {
         session.get::<Self>().clone()
     }
 
-    /// Registers `source`. The service reads it while any clone of the registration is alive.
+    /// Registers `source`, usually a [`VortexFile::segment_source`]. New sessions can read it
+    /// while any clone of the registration is alive; a session that has already read it keeps
+    /// it readable for the session's lifetime.
+    ///
+    /// [`VortexFile::segment_source`]: crate::VortexFile::segment_source
     pub fn register(&self, source: Source) -> RegisteredSource {
-        let id = SourceId(self.0.next.fetch_add(1, Ordering::Relaxed));
+        let id = SourceId(NEXT_SOURCE.fetch_add(1, Ordering::Relaxed));
         self.0.sources.write().insert(id, Arc::downgrade(&source));
         let registration = Arc::new(Registration {
-            registry: Arc::downgrade(&self.0),
+            registry: Arc::clone(&self.0),
             id,
             _source: source,
         });
@@ -115,32 +124,37 @@ impl SegmentIoService for FileSegmentIo {
 
 /// Keeps a source registered, and readable, while it lives.
 struct Registration {
-    registry: Weak<Registry>,
+    registry: Arc<Registry>,
     id: SourceId,
     _source: Source,
 }
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        if let Some(registry) = self.registry.upgrade() {
-            registry.sources.write().remove(&self.id);
-        }
+        self.registry.sources.write().remove(&self.id);
     }
 }
 
 /// One scope's reads through a [`FileSegmentIo`].
 struct FileSession {
     registry: Arc<Registry>,
-    /// The sources this session has read, so later requests skip the registry.
-    sources: Mutex<HashMap<SourceId, Source>>,
+    /// The sources this session has read, so later requests skip the registry, each with the
+    /// handle registration that keeps it alive while a handle of it lives.
+    sources: Mutex<HashMap<SourceId, SessionSource>>,
     fetches: Mutex<FetchTracker>,
 }
 
+#[derive(Clone)]
+struct SessionSource {
+    source: Source,
+    keep_alive: Arc<dyn Any + Send + Sync>,
+}
+
 impl FileSession {
-    fn source(&self, id: SourceId) -> VortexResult<Source> {
+    fn source(&self, id: SourceId) -> VortexResult<SessionSource> {
         let mut sources = self.sources.lock();
         if let Some(source) = sources.get(&id) {
-            return Ok(Arc::clone(source));
+            return Ok(source.clone());
         }
         let source = self
             .registry
@@ -149,7 +163,11 @@ impl FileSession {
             .get(&id)
             .and_then(Weak::upgrade)
             .ok_or_else(|| vortex_err!("{id:?} is not registered for segment reads"))?;
-        sources.insert(id, Arc::clone(&source));
+        let source = SessionSource {
+            keep_alive: Arc::new(Arc::clone(&source)),
+            source,
+        };
+        sources.insert(id, source.clone());
         Ok(source)
     }
 }
@@ -164,10 +182,7 @@ impl SegmentIoSession for FileSession {
         let handles = batch
             .iter()
             .map(|request| {
-                if request.intent == IoIntent::Forget {
-                    vortex_bail!("a Forget is withdrawn by dropping handles, not submitted");
-                }
-                let source = self.source(request.key.source)?;
+                let SessionSource { source, keep_alive } = self.source(request.key.source)?;
                 let bytes: SharedBytes = source
                     .request(SegmentId::from(request.key.segment))
                     .map_err(Arc::new)
@@ -177,7 +192,7 @@ impl SegmentIoSession for FileSession {
                     wanted.push(bytes.clone());
                 }
                 // The handle keeps the source alive while its read may be in flight.
-                Ok(SegmentHandle::new(bytes, Arc::new(source)))
+                Ok(SegmentHandle::new(bytes, keep_alive))
             })
             .collect::<VortexResult<Vec<_>>>()?;
         // Every read of the batch is registered before any is started, so the driver can choose
@@ -188,8 +203,10 @@ impl SegmentIoSession for FileSession {
         }
         let mut fetches = self.fetches.lock();
         for (request, handle) in batch.iter().zip(&handles) {
-            if request.intent == IoIntent::Fetch && handle.try_get().is_none() {
-                fetches.track(owner, handle);
+            match request.intent {
+                IoIntent::Fetch => fetches.track(owner, handle),
+                IoIntent::Prefetch if handle.try_get().is_none() => fetches.track_prefetch(handle),
+                IoIntent::Prefetch | IoIntent::Announce => {}
             }
         }
         Ok(handles)
