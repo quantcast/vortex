@@ -5,6 +5,9 @@ use std::future::poll_fn;
 
 use futures::future::BoxFuture;
 use rstest::rstest;
+use vortex_array::buffer::BufferHandle;
+use vortex_buffer::Alignment;
+use vortex_buffer::ByteBuffer;
 use vortex_buffer::ByteBufferMut;
 use vortex_error::VortexError;
 use vortex_io::CoalesceConfig;
@@ -12,9 +15,14 @@ use vortex_io::VortexReadAt;
 use vortex_io::runtime::tokio::TokioRuntime;
 use vortex_io::segments::SegmentKey;
 use vortex_layout::segments::NoOpSegmentCache;
+use vortex_layout::segments::SegmentCache;
+use vortex_layout::segments::SegmentCacheSourceAdapter;
+use vortex_layout::segments::SharedSegmentSource;
 use vortex_metrics::DefaultMetricsRegistry;
 
 use super::*;
+use crate::SegmentSpec;
+use crate::segments::BufferSegmentSource;
 use crate::segments::FileSegmentSource;
 use crate::segments::InitialReadSegmentCache;
 use crate::segments::RequestMetrics;
@@ -76,32 +84,35 @@ fn specs() -> Arc<[SegmentSpec]> {
         .collect()
 }
 
-/// A service with one file registered over a recording reader.
+/// A service with one file registered the way `open_read` builds its segment source.
 fn service(cache: Arc<dyn SegmentCache>) -> (FileSegmentIo, RegisteredSource, RecordingRead) {
     let reader = RecordingRead {
         bytes: bytes(),
         reads: Arc::default(),
     };
-    let source = FileSegmentSource::open(
+    let source = SharedSegmentSource::new(FileSegmentSource::open(
         specs(),
         reader.clone(),
         TokioRuntime::current(),
         RequestMetrics::new(&DefaultMetricsRegistry::default(), vec![]),
-    );
-    let service = FileSegmentIo::default();
-    let registration = service.register(FileIo::new(
-        specs(),
-        cache,
-        Backend::Driver(source.driver_io()),
     ));
+    let service = FileSegmentIo::default();
+    let registration = service.register(Arc::new(SegmentCacheSourceAdapter::new(
+        cache,
+        Arc::new(source),
+    )));
     (service, registration, reader)
 }
 
+/// A service with one in-memory file registered.
+fn buffered() -> (FileSegmentIo, RegisteredSource) {
+    let service = FileSegmentIo::default();
+    let registration = service.register(Arc::new(BufferSegmentSource::new(bytes(), specs())));
+    (service, registration)
+}
+
 fn request(source: &RegisteredSource, segment: u32, intent: IoIntent) -> SegmentRequest {
-    SegmentRequest::new(
-        SegmentKey::new(source.id(), SegmentId::from(segment)),
-        intent,
-    )
+    SegmentRequest::new(SegmentKey::new(source.id(), segment), intent)
 }
 
 /// The bytes of `segment`, as the file holds them.
@@ -198,12 +209,7 @@ async fn cached_segments_are_ready_without_a_read() -> VortexResult<()> {
 
 #[test]
 fn buffered_files_answer_at_submit() -> VortexResult<()> {
-    let service = FileSegmentIo::default();
-    let file = service.register(FileIo::new(
-        specs(),
-        Arc::new(NoOpSegmentCache),
-        Backend::Buffer(bytes()),
-    ));
+    let (service, file) = buffered();
     let handles = service
         .session()
         .submit(IoOwnerId(0), &[request(&file, 2, IoIntent::Fetch)])?;
@@ -216,12 +222,7 @@ fn buffered_files_answer_at_submit() -> VortexResult<()> {
 
 #[test]
 fn a_dropped_registration_is_unreadable() -> VortexResult<()> {
-    let service = FileSegmentIo::default();
-    let file = service.register(FileIo::new(
-        specs(),
-        Arc::new(NoOpSegmentCache),
-        Backend::Buffer(bytes()),
-    ));
+    let (service, file) = buffered();
     let segment = request(&file, 0, IoIntent::Fetch);
     drop(file);
     assert!(service.session().submit(IoOwnerId(0), &[segment]).is_err());
@@ -230,12 +231,7 @@ fn a_dropped_registration_is_unreadable() -> VortexResult<()> {
 
 #[test]
 fn forget_is_never_submitted() {
-    let service = FileSegmentIo::default();
-    let file = service.register(FileIo::new(
-        specs(),
-        Arc::new(NoOpSegmentCache),
-        Backend::Buffer(bytes()),
-    ));
+    let (service, file) = buffered();
     assert!(
         service
             .session()

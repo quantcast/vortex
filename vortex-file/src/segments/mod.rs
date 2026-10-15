@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 mod cache;
-pub(crate) mod source;
+mod source;
 pub(crate) mod writer;
 
 pub use cache::*;

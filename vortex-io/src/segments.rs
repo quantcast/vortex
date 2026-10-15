@@ -13,8 +13,6 @@
 //! so one session's announcement can widen another session's read.
 
 use std::any::Any;
-use std::fmt::Display;
-use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
@@ -30,42 +28,6 @@ use vortex_error::VortexError;
 use vortex_error::VortexResult;
 use vortex_error::vortex_err;
 
-/// Identifier for a single physical segment referenced by a layout.
-///
-/// Segment ids are local to a file or segment source. The file footer maps ids to physical offsets;
-/// custom storage systems may map them to object-store keys or other random-access locations.
-// TODO(ngates): should this be a `[u8]` instead? Allowing for arbitrary segment identifiers?
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SegmentId(u32);
-
-impl From<u32> for SegmentId {
-    fn from(value: u32) -> Self {
-        Self(value)
-    }
-}
-
-impl TryFrom<usize> for SegmentId {
-    type Error = VortexError;
-
-    fn try_from(value: usize) -> Result<Self, Self::Error> {
-        Ok(Self::from(u32::try_from(value)?))
-    }
-}
-
-impl Deref for SegmentId {
-    type Target = u32;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Display for SegmentId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SegmentId({})", self.0)
-    }
-}
-
 /// A source registered with a [`SegmentIoService`], such as one opened file.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SourceId(pub u32);
@@ -75,13 +37,13 @@ pub struct SourceId(pub u32);
 pub struct SegmentKey {
     /// The source the segment belongs to.
     pub source: SourceId,
-    /// The segment within its source.
-    pub segment: SegmentId,
+    /// The segment's id within its source: the value of a `vortex_layout::segments::SegmentId`.
+    pub segment: u32,
 }
 
 impl SegmentKey {
     /// The key of `segment` in `source`.
-    pub fn new(source: SourceId, segment: SegmentId) -> Self {
+    pub fn new(source: SourceId, segment: u32) -> Self {
         Self { source, segment }
     }
 }

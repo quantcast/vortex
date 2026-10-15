@@ -48,12 +48,6 @@ use crate::segments::SegmentSource;
 ///   it through `__getbuffer__`, as `ReadBuffer` does, so Python can keep it without a copy.
 #[async_trait]
 pub trait SegmentCache: Send + Sync {
-    /// Return cached bytes that are available without waiting, or `None`. This must not perform
-    /// IO. Planner-driven scans use it to answer a segment request at submit time.
-    fn get_if_ready(&self, _id: SegmentId) -> Option<ByteBuffer> {
-        None
-    }
-
     /// Return a cached segment, or `None` on cache miss.
     async fn get(&self, id: SegmentId) -> VortexResult<Option<ByteBuffer>>;
     /// Store a segment in the cache.
@@ -189,14 +183,6 @@ pub struct FileSegmentCache {
 
 #[async_trait]
 impl SegmentCache for FileSegmentCache {
-    fn get_if_ready(&self, id: SegmentId) -> Option<ByteBuffer> {
-        self.cache
-            .0
-            .get(&(self.source_id.clone(), id))
-            .now_or_never()
-            .flatten()
-    }
-
     async fn get(&self, id: SegmentId) -> VortexResult<Option<ByteBuffer>> {
         Ok(self.cache.0.get(&(self.source_id.clone(), id)).await)
     }
@@ -243,12 +229,6 @@ impl<C: SegmentCache> InstrumentedSegmentCache<C> {
 
 #[async_trait]
 impl<C: SegmentCache> SegmentCache for InstrumentedSegmentCache<C> {
-    fn get_if_ready(&self, id: SegmentId) -> Option<ByteBuffer> {
-        let segment = self.segment_cache.get_if_ready(id)?;
-        self.hits.add(1);
-        Some(segment)
-    }
-
     async fn get(&self, id: SegmentId) -> VortexResult<Option<ByteBuffer>> {
         let result = self.segment_cache.get(id).await?;
         if result.is_some() {
@@ -322,15 +302,9 @@ mod tests {
         a.put(id, ByteBuffer::copy_from(b"from a")).await?;
         assert_eq!(a.get(id).await?.as_deref(), Some(b"from a".as_slice()));
         assert!(b.get(id).await?.is_none());
-        assert_eq!(a.get_if_ready(id).as_deref(), Some(b"from a".as_slice()));
-        assert!(b.get_if_ready(id).is_none());
 
         // A later view with the same source ID sees what the earlier one stored.
         let a_again = shared.for_file("a");
-        assert_eq!(
-            a_again.get_if_ready(id).as_deref(),
-            Some(b"from a".as_slice())
-        );
         assert_eq!(
             a_again.get(id).await?.as_deref(),
             Some(b"from a".as_slice())
