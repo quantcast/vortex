@@ -34,13 +34,14 @@ use crate::EOF_SIZE;
 use crate::MAX_POSTSCRIPT_SIZE;
 use crate::VortexFile;
 use crate::footer::Footer;
+use crate::segment_io::Backend;
+use crate::segment_io::FileIo;
+use crate::segment_io::FileSegmentIo;
+use crate::segment_io::SegmentDriver;
 use crate::segments::BufferSegmentSource;
-use crate::segments::FileSegmentIo;
 use crate::segments::FileSegmentSource;
 use crate::segments::InitialReadSegmentCache;
 use crate::segments::RequestMetrics;
-use crate::segments::segment_io::Backend;
-use crate::segments::segment_io::FileIo;
 
 const INITIAL_READ_SIZE: usize = MAX_POSTSCRIPT_SIZE as usize + EOF_SIZE;
 
@@ -338,20 +339,30 @@ impl VortexOpenOptions {
         let metrics = RequestMetrics::new(metrics_registry.as_ref(), self.labels);
 
         // Create a segment source backed by the VortexRead implementation.
-        let file_source = FileSegmentSource::open(
+        // Scans that drive their own reads use the session's segment IO service. The file gets a
+        // read driver of its own there, and shares this open's segment cache.
+        let max_alignment = footer
+            .segment_specs_with_metadata()
+            .iter()
+            .map(|spec| spec.alignment)
+            .max()
+            .unwrap_or_else(Alignment::none);
+        let segment_io = FileSegmentIo::of(&self.session).register(FileIo::new(
+            footer.segment_specs_with_metadata(),
+            Arc::clone(&segment_cache) as _,
+            Backend::Driver(Arc::new(SegmentDriver::spawn(
+                reader.clone(),
+                max_alignment,
+                &self.session.handle(),
+                metrics.clone(),
+            ))),
+        ));
+        let segment_source = Arc::new(SharedSegmentSource::new(FileSegmentSource::open(
             footer.segment_specs_with_metadata(),
             reader,
             self.session.handle(),
             metrics,
-        );
-        // Scans that drive their own reads use the session's segment IO service, which shares
-        // this source's read driver and segment cache.
-        let segment_io = FileSegmentIo::of(&self.session).register(FileIo::new(
-            footer.segment_specs_with_metadata(),
-            Arc::clone(&segment_cache) as _,
-            Backend::Driver(file_source.driver_io()),
-        ));
-        let segment_source = Arc::new(SharedSegmentSource::new(file_source));
+        )));
 
         // Wrap up the segment source to first resolve segments from the initial read cache.
         let segment_source: Arc<dyn SegmentSource> = Arc::new(SegmentCacheSourceAdapter::new(
