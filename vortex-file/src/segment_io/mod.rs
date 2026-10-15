@@ -14,6 +14,8 @@
 //! - dropping every handle drops the source's request, which withdraws the read.
 //!
 //! [`VortexFile::segment_source`]: crate::VortexFile::segment_source
+//! [`SegmentSource`]: vortex_layout::segments::SegmentSource
+//! [`SegmentSource::request`]: vortex_layout::segments::SegmentSource::request
 
 // TODO(joe): give this service a read driver of its own instead of reading through the files'
 // v1 segment sources, so it can be optimised (fetches before prefetches, one scheduler across
