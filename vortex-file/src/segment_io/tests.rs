@@ -15,6 +15,7 @@ use vortex_layout::segments::NoOpSegmentCache;
 use vortex_metrics::DefaultMetricsRegistry;
 
 use super::*;
+use crate::segments::FileSegmentSource;
 use crate::segments::InitialReadSegmentCache;
 use crate::segments::RequestMetrics;
 
@@ -81,17 +82,17 @@ fn service(cache: Arc<dyn SegmentCache>) -> (FileSegmentIo, RegisteredSource, Re
         bytes: bytes(),
         reads: Arc::default(),
     };
-    let driver = SegmentDriver::spawn(
+    let source = FileSegmentSource::open(
+        specs(),
         reader.clone(),
-        Alignment::none(),
-        &TokioRuntime::current(),
+        TokioRuntime::current(),
         RequestMetrics::new(&DefaultMetricsRegistry::default(), vec![]),
     );
     let service = FileSegmentIo::default();
     let registration = service.register(FileIo::new(
         specs(),
         cache,
-        Backend::Driver(Arc::new(driver)),
+        Backend::Driver(source.driver_io()),
     ));
     (service, registration, reader)
 }

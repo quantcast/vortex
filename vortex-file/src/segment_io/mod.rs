@@ -21,11 +21,14 @@ use std::sync::Arc;
 use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU32;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
 
 use futures::FutureExt;
+use futures::channel::mpsc;
+use futures::channel::oneshot;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use vortex_array::buffer::BufferHandle;
@@ -52,11 +55,10 @@ use vortex_session::VortexSession;
 use vortex_utils::aliases::hash_map::HashMap;
 
 use crate::SegmentSpec;
-use crate::segment_io::driver::ReadId;
-use crate::segment_io::driver::ReadRange;
-pub(crate) use crate::segment_io::driver::SegmentDriver;
-
-mod driver;
+use crate::read::ReadRequest;
+use crate::read::RequestId;
+use crate::segments::ReadEvent;
+use crate::segments::source::SharedDriver;
 
 /// Serves the segment reads of every file registered in one session.
 #[derive(Clone, Default)]
@@ -133,10 +135,23 @@ impl Drop for Registration {
 
 /// How one registered file answers the segment reads its cache does not.
 pub(crate) enum Backend {
-    /// The file's own read driver, which coalesces and issues its reads.
-    Driver(Arc<SegmentDriver>),
+    /// The file's coalescing read driver.
+    // TODO(joe): give this service a read driver of its own instead of borrowing v1's from
+    // `FileSegmentSource`, so it can be optimised (fetches before prefetches, one scheduler
+    // across files) without changing v1's `ReadEvent` protocol, and started only when a
+    // planner-driven scan first reads from disk.
+    Driver(DriverIo),
     /// The whole file, in memory.
     Buffer(ByteBuffer),
+}
+
+/// The parts of a file's segment source that its reads go through.
+pub(crate) struct DriverIo {
+    pub(crate) events: mpsc::UnboundedSender<ReadEvent>,
+    /// Keeps the driver task running while the file is registered, even if the file's segment
+    /// source is dropped.
+    pub(crate) _driver: SharedDriver,
+    pub(crate) next_id: Arc<AtomicUsize>,
 }
 
 /// A registered file's segments and how to read them.
@@ -164,12 +179,12 @@ impl FileIo {
     }
 
     /// A handle for `segment`. A read that must be marked wanted once the whole batch is
-    /// registered is pushed to `wants`, with whether it is urgent.
+    /// registered is pushed to `wants`.
     fn handle(
         &self,
         segment: SegmentId,
-        want: Option<bool>,
-        wants: &mut Vec<(Arc<Read>, bool)>,
+        want: bool,
+        wants: &mut Vec<Arc<Read>>,
     ) -> VortexResult<SegmentHandle> {
         let spec = self
             .specs
@@ -207,8 +222,8 @@ impl FileIo {
                 read
             }
         };
-        if let Some(urgent) = want {
-            wants.push((Arc::clone(&read), urgent));
+        if want {
+            wants.push(Arc::clone(&read));
         }
         Ok(SegmentHandle::new(read.bytes.clone(), read))
     }
@@ -225,27 +240,33 @@ fn vortex_ensure_in_file(end: usize, len: usize, segment: SegmentId) -> VortexRe
 
 /// One read registered with a file's driver, shared by every handle of its byte range.
 struct Read {
-    id: ReadId,
-    driver: Arc<SegmentDriver>,
-    /// Whether the driver was told the read is wanted, and whether urgently.
+    id: RequestId,
+    /// Whether the driver was told the read is wanted.
     wanted: AtomicBool,
-    urgent: AtomicBool,
     bytes: SharedBytes,
+    events: mpsc::UnboundedSender<ReadEvent>,
 }
 
 impl Read {
     /// Registers a read of `spec` with the driver, without marking it wanted.
     fn register(
-        driver: &Arc<SegmentDriver>,
+        driver: &DriverIo,
         spec: &SegmentSpec,
         segment: SegmentId,
         cache: Arc<dyn SegmentCache>,
     ) -> VortexResult<Self> {
-        let (id, receiver) = driver.register(ReadRange {
-            offset: spec.offset,
-            len: spec.length as usize,
-            alignment: spec.alignment,
-        })?;
+        let id = driver.next_id.fetch_add(1, Ordering::Relaxed);
+        let (callback, receiver) = oneshot::channel();
+        driver
+            .events
+            .unbounded_send(ReadEvent::Request(ReadRequest {
+                id,
+                offset: spec.offset,
+                length: spec.length as usize,
+                alignment: spec.alignment,
+                callback,
+            }))
+            .map_err(|err| vortex_err!("the file's read driver has stopped: {err}"))?;
         let bytes = async move {
             let bytes = receiver
                 .await
@@ -262,20 +283,18 @@ impl Read {
         .shared();
         Ok(Self {
             id,
-            driver: Arc::clone(driver),
             wanted: AtomicBool::new(false),
-            urgent: AtomicBool::new(false),
             bytes,
+            events: driver.events.clone(),
         })
     }
 
-    /// Tells the driver the read is wanted, so it starts the read if it has not already. An
-    /// urgent want upgrades an earlier background one.
-    fn want(&self, urgent: bool) -> VortexResult<()> {
-        let first = !self.wanted.swap(true, Ordering::Relaxed);
-        let upgrade = urgent && !self.urgent.swap(true, Ordering::Relaxed);
-        if first || upgrade {
-            self.driver.want(self.id, urgent)?;
+    /// Tells the driver the read is wanted, so it starts the read if it has not already.
+    fn want(&self) -> VortexResult<()> {
+        if !self.wanted.swap(true, Ordering::Relaxed) {
+            self.events
+                .unbounded_send(ReadEvent::Polled(self.id))
+                .map_err(|err| vortex_err!("the file's read driver has stopped: {err}"))?;
         }
         Ok(())
     }
@@ -285,7 +304,7 @@ impl Drop for Read {
     fn drop(&mut self) {
         if self.bytes.peek().is_none() {
             // The last handle is gone before the read finished.
-            self.driver.withdraw(self.id);
+            drop(self.events.unbounded_send(ReadEvent::Dropped(self.id)));
         }
     }
 }
@@ -329,19 +348,17 @@ impl SegmentIoSession for FileSession {
                 if request.intent == IoIntent::Forget {
                     vortex_bail!("a Forget is withdrawn by dropping handles, not submitted");
                 }
-                let want = match request.intent {
-                    IoIntent::Fetch => Some(true),
-                    IoIntent::Prefetch => Some(false),
-                    IoIntent::Announce | IoIntent::Forget => None,
-                };
-                self.file(request.key.source)?
-                    .handle(request.key.segment, want, &mut wants)
+                self.file(request.key.source)?.handle(
+                    request.key.segment,
+                    request.intent != IoIntent::Announce,
+                    &mut wants,
+                )
             })
             .collect::<VortexResult<Vec<_>>>()?;
         // Every read of the batch is registered before any is wanted, so the driver can choose
         // physical reads with the whole batch in view.
-        for (read, urgent) in wants {
-            read.want(urgent)?;
+        for read in wants {
+            read.want()?;
         }
         let mut fetches = self.fetches.lock();
         for (request, handle) in batch.iter().zip(&handles) {
