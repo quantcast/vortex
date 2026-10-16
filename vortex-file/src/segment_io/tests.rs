@@ -15,7 +15,7 @@ use vortex_error::vortex_bail;
 use vortex_io::CoalesceConfig;
 use vortex_io::VortexReadAt;
 use vortex_io::runtime::tokio::TokioRuntime;
-use vortex_io::segments::SegmentKey;
+use vortex_io::segments::IoKey;
 use vortex_layout::segments::NoOpSegmentCache;
 use vortex_layout::segments::SegmentCache;
 use vortex_layout::segments::SegmentCacheSourceAdapter;
@@ -109,22 +109,25 @@ fn service_with(
         RequestMetrics::new(&DefaultMetricsRegistry::default(), vec![]),
     ));
     let service = FileSegmentIo::default();
-    let registration = service.register(Arc::new(SegmentCacheSourceAdapter::new(
-        cache,
-        Arc::new(source),
-    )));
+    let registration = service.register(
+        Arc::new(SegmentCacheSourceAdapter::new(cache, Arc::new(source))),
+        FILE_LEN as u64,
+    );
     (service, registration, reader)
 }
 
 /// A service with one in-memory file registered.
 fn buffered() -> (FileSegmentIo, RegisteredSource) {
     let service = FileSegmentIo::default();
-    let registration = service.register(Arc::new(BufferSegmentSource::new(bytes(), specs())));
+    let registration = service.register(
+        Arc::new(BufferSegmentSource::new(bytes(), specs())),
+        FILE_LEN as u64,
+    );
     (service, registration)
 }
 
-fn request(source: &RegisteredSource, segment: u32, intent: IoIntent) -> SegmentRequest {
-    SegmentRequest::new(SegmentKey::new(source.id(), segment), intent)
+fn request(source: &RegisteredSource, segment: u32, intent: IoIntent) -> IoRequest {
+    IoRequest::new(IoKey::segment(source.id(), segment), intent)
 }
 
 /// The bytes of `segment`, as the file holds them.
@@ -157,11 +160,12 @@ impl SegmentCache for YieldingCache {
     }
 }
 
-async fn read(handle: &SegmentHandle) -> VortexResult<ByteBuffer> {
+async fn read(handle: &IoHandle) -> VortexResult<ByteBuffer> {
     handle
-        .bytes()
+        .result()
         .await
         .map_err(VortexError::from)?
+        .into_bytes()?
         .try_into_host()?
         .await
 }
@@ -200,7 +204,7 @@ async fn poll_ready_alone_completes_a_fetch() -> VortexResult<()> {
     let bytes = handles[0]
         .try_get()
         .ok_or_else(|| vortex_err!("a reported fetch holds its bytes"))??;
-    assert_eq!(bytes.try_into_host()?.await?, expected(0));
+    assert_eq!(bytes.into_bytes()?.try_into_host()?.await?, expected(0));
     Ok(())
 }
 
@@ -312,7 +316,7 @@ async fn cached_segments_are_ready_without_a_read() -> VortexResult<()> {
     let bytes = handles[0]
         .try_get()
         .ok_or_else(|| vortex_err!("a cached segment is ready at submit"))??;
-    assert_eq!(bytes.try_into_host_sync()?, expected(1));
+    assert_eq!(bytes.into_bytes()?.try_into_host_sync()?, expected(1));
     assert!(reader.reads.lock().is_empty());
     Ok(())
 }
@@ -326,7 +330,30 @@ fn buffered_files_answer_at_submit() -> VortexResult<()> {
     let bytes = handles[0]
         .try_get()
         .ok_or_else(|| vortex_err!("a buffered segment is ready at submit"))??;
-    assert_eq!(bytes.try_into_host_sync()?, expected(2));
+    assert_eq!(bytes.into_bytes()?.try_into_host_sync()?, expected(2));
+    Ok(())
+}
+
+#[rstest]
+#[case::fetch(IoIntent::Fetch)]
+#[case::announce(IoIntent::Announce)]
+#[tokio::test]
+async fn sizes_answer_at_submit_without_a_read(#[case] intent: IoIntent) -> VortexResult<()> {
+    let (service, file, reader) = service(Arc::new(NoOpSegmentCache));
+    let session = service.session();
+    let handles = session.submit(
+        IoOwnerId(4),
+        &[IoRequest::new(IoKey::size(file.id()), intent)],
+    )?;
+    let size = handles[0]
+        .try_get()
+        .ok_or_else(|| vortex_err!("a size is ready at submit"))??
+        .size()?;
+    assert_eq!(size, FILE_LEN as u64);
+    if intent == IoIntent::Fetch {
+        assert_eq!(reported(session.as_ref(), 1).await?, vec![IoOwnerId(4)]);
+    }
+    assert!(reader.reads.lock().is_empty());
     Ok(())
 }
 

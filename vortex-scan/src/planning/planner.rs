@@ -6,10 +6,10 @@
 use std::fmt;
 use std::ops::Range;
 
-use vortex_array::buffer::BufferHandle;
 use vortex_error::VortexResult;
-use vortex_io::segments::SegmentKey;
-use vortex_io::segments::SegmentRequest;
+use vortex_io::segments::IoKey;
+use vortex_io::segments::IoRequest;
+use vortex_io::segments::SourceResult;
 
 use crate::planning::morsel::Morsel;
 
@@ -49,7 +49,7 @@ pub enum PlannerOutput {
     /// A CPU-only checkpoint; the driver requeues the planner.
     Continue,
     /// Requests the planner publishes: fetches it needs, and optional hints.
-    NeedsIO(Vec<SegmentRequest>),
+    NeedsIO(Vec<IoRequest>),
     /// A child planner, with the scope it is responsible for.
     Planner(WorkScope, Box<dyn Planner>),
     /// A morsel authorised to produce arrays for the scope.
@@ -68,10 +68,10 @@ pub trait Planner: Send {
     /// Advances CPU work. Only called when [`state`](Self::state) is `NeedsCompute`.
     fn compute(&mut self) -> VortexResult<PlannerOutput>;
 
-    /// The bytes of a segment it fetched, once per fetch. It never has two fetches of one
-    /// segment outstanding. A failed fetch is never delivered: whatever drives it fails the
-    /// scan with the read's error instead.
-    fn deliver(&mut self, key: SegmentKey, bytes: BufferHandle);
+    /// The result of a read it fetched, once per fetch: a segment's bytes or a source's size. It
+    /// never has two fetches of one key outstanding. A failed fetch is never delivered: whatever
+    /// drives it fails the scan with the read's error instead.
+    fn deliver(&mut self, key: IoKey, result: SourceResult);
 }
 
 impl fmt::Debug for PlannerOutput {
