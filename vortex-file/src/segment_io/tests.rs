@@ -255,7 +255,7 @@ async fn fetches_finished_at_submit_are_reported(#[case] segment: u32) -> Vortex
 }
 
 #[tokio::test]
-async fn one_sessions_announcement_widens_anothers_fetch() -> VortexResult<()> {
+async fn an_announcement_widens_another_sessions_fetch() -> VortexResult<()> {
     let (service, file, reader) = service(Arc::new(NoOpSegmentCache));
     let _announced = service
         .session()
