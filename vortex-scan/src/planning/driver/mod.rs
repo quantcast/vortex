@@ -33,17 +33,17 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use vortex_array::ArrayRef;
-use vortex_array::buffer::BufferHandle;
 use vortex_error::VortexError;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_err;
-use vortex_io::segments::IoIntent;
-use vortex_io::segments::IoOwnerId;
 use vortex_io::segments::IoHandle;
-use vortex_io::segments::SegmentIoSession;
+use vortex_io::segments::IoIntent;
 use vortex_io::segments::IoKey;
+use vortex_io::segments::IoOwnerId;
 use vortex_io::segments::IoRequest;
+use vortex_io::segments::SegmentIoSession;
+use vortex_io::segments::SourceResult;
 use vortex_utils::aliases::hash_map::HashMap;
 use vortex_utils::aliases::hash_set::HashSet;
 
@@ -113,7 +113,7 @@ struct Work {
     hints: Vec<IoHandle>,
 }
 
-type FetchResult = Result<BufferHandle, Arc<VortexError>>;
+type FetchResult = Result<SourceResult, Arc<VortexError>>;
 
 impl Work {
     fn priority(&self) -> Vec<u64> {
@@ -143,12 +143,12 @@ impl Work {
         let mut cx = Context::from_waker(Waker::noop());
         while let Poll::Ready(Some((key, result))) = self.fetches.poll_next_unpin(&mut cx) {
             self.outstanding.remove(&key);
-            let bytes = result.map_err(|error| {
+            let result = result.map_err(|error| {
                 VortexError::from(error).with_context(format!("reading {key:?}"))
             })?;
             match &mut self.item {
-                Item::Planner(planner) => planner.deliver(key, bytes),
-                Item::Morsel(morsel) => morsel.deliver(key, bytes),
+                Item::Planner(planner) => planner.deliver(key, result),
+                Item::Morsel(morsel) => morsel.deliver(key, result),
             }
         }
         Ok(())
@@ -496,7 +496,7 @@ impl Run {
             let key = request.key;
             work.fetches.push(
                 async move {
-                    let result = handle.bytes().await;
+                    let result = handle.result().await;
                     // The handle keeps the read registered until it is delivered.
                     drop(handle);
                     (key, result)

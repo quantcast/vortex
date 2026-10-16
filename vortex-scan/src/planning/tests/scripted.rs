@@ -27,13 +27,15 @@ use vortex_buffer::ByteBuffer;
 use vortex_error::VortexError;
 use vortex_error::VortexResult;
 use vortex_error::vortex_err;
-use vortex_io::segments::IoIntent;
-use vortex_io::segments::IoOwnerId;
 use vortex_io::segments::IoHandle;
-use vortex_io::segments::SegmentIoSession;
+use vortex_io::segments::IoIntent;
 use vortex_io::segments::IoKey;
+use vortex_io::segments::IoOwnerId;
 use vortex_io::segments::IoRequest;
+use vortex_io::segments::SegmentIoSession;
 use vortex_io::segments::SegmentSourceId;
+use vortex_io::segments::SourceRequest;
+use vortex_io::segments::SourceResult;
 use vortex_utils::aliases::hash_map::HashMap;
 
 use crate::planning::morsel::Morsel;
@@ -131,7 +133,7 @@ impl ScriptedPlanner {
 impl ScriptedPlanner {
     fn take_delivery(&mut self, key: IoKey) {
         self.log
-            .push(format!("deliver {} {}", self.name, key.segment));
+            .push(format!("deliver {} {}", self.name, describe(key)));
         let position = self.position;
         if let Some(PlannerStep::Await(keys)) = self.script.get(position)
             && self.pending.is_none()
@@ -152,7 +154,7 @@ impl ScriptedPlanner {
 }
 
 impl Planner for ScriptedPlanner {
-    fn deliver(&mut self, key: IoKey, _bytes: BufferHandle) {
+    fn deliver(&mut self, key: IoKey, _result: SourceResult) {
         self.take_delivery(key);
     }
 
@@ -224,9 +226,9 @@ impl ScriptedMorsel {
 }
 
 impl Morsel for ScriptedMorsel {
-    fn deliver(&mut self, key: IoKey, _bytes: BufferHandle) {
+    fn deliver(&mut self, key: IoKey, _result: SourceResult) {
         self.log
-            .push(format!("deliver {} {}", self.name, key.segment));
+            .push(format!("deliver {} {}", self.name, describe(key)));
         let position = self.position;
         let Some(pending) = self.pending.as_mut() else {
             panic!(
@@ -272,9 +274,17 @@ impl Morsel for ScriptedMorsel {
     }
 }
 
+/// How the log names what `key` reads: a segment's id, or `size`.
+fn describe(key: IoKey) -> String {
+    match key.request {
+        SourceRequest::Segment(segment) => segment.to_string(),
+        SourceRequest::Size => "size".to_string(),
+    }
+}
+
 /// The key of `segment` in the one source the driver tests read.
 pub fn key(segment: u32) -> IoKey {
-    IoKey::new(SegmentSourceId(0), segment)
+    IoKey::segment(SegmentSourceId(0), segment)
 }
 
 /// A fetch of `segment`.
@@ -282,7 +292,7 @@ pub fn fetch(segment: u32) -> IoRequest {
     IoRequest::new(key(segment), IoIntent::Fetch)
 }
 
-type FetchResult = Result<BufferHandle, Arc<VortexError>>;
+type FetchResult = Result<SourceResult, Arc<VortexError>>;
 
 /// Which unfinished fetch the session finishes next.
 #[derive(Clone, Copy, Default)]
@@ -362,11 +372,7 @@ impl RecordingSession {
 }
 
 impl SegmentIoSession for RecordingSession {
-    fn submit(
-        &self,
-        owner: IoOwnerId,
-        batch: &[IoRequest],
-    ) -> VortexResult<Vec<IoHandle>> {
+    fn submit(&self, owner: IoOwnerId, batch: &[IoRequest]) -> VortexResult<Vec<IoHandle>> {
         Ok(batch
             .iter()
             .map(|request| {
@@ -376,7 +382,9 @@ impl SegmentIoSession for RecordingSession {
                 }
                 self.performed.lock().push(request.key);
                 let result = match self.canned.lock().get(&request.key) {
-                    Some(Ok(bytes)) => Ok(BufferHandle::new_host(bytes.clone())),
+                    Some(Ok(bytes)) => {
+                        Ok(SourceResult::Bytes(BufferHandle::new_host(bytes.clone())))
+                    }
                     Some(Err(message)) => Err(Arc::new(vortex_err!("{message}"))),
                     None => Err(Arc::new(vortex_err!(
                         "no canned answer for {:?}",

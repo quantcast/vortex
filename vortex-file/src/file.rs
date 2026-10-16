@@ -30,8 +30,8 @@ use vortex_utils::aliases::hash_map::HashMap;
 
 use crate::FileStatistics;
 use crate::footer::Footer;
-use crate::segment_io::FileSegmentIo;
 use crate::pruning::can_prune_file_stats;
+use crate::segment_io::FileSegmentIo;
 use crate::v2::FileStatsLayoutReader;
 
 /// Represents a Vortex file, providing access to its metadata and content.
@@ -243,7 +243,10 @@ impl VortexFile {
         ScanFile {
             layout: Arc::clone(self.footer.layout()),
             locations,
-            segment_io: FileSegmentIo::of(&self.session).register(Arc::clone(&self.segment_source)),
+            // The file's size is unknown when it was opened with a cached footer, and the V2 scan
+            // only reads segments.
+            segment_io: FileSegmentIo::of(&self.session)
+                .register(Arc::clone(&self.segment_source), None),
         }
     }
 

@@ -5,11 +5,11 @@ use vortex_array::IntoArray;
 use vortex_array::arrays::ChunkedArray;
 use vortex_array::dtype::DType;
 use vortex_error::VortexExpect;
-use vortex_error::vortex_panic;
 use vortex_error::VortexResult;
-use vortex_array::buffer::BufferHandle;
 use vortex_error::vortex_bail;
+use vortex_error::vortex_panic;
 use vortex_io::segments::IoKey;
+use vortex_io::segments::SourceResult;
 use vortex_scan::planning::morsel::Morsel;
 use vortex_scan::planning::morsel::MorselOutput;
 use vortex_scan::planning::planner::Planner;
@@ -39,7 +39,7 @@ impl ProjectionPlanner {
 }
 
 impl Planner for ProjectionPlanner {
-    fn deliver(&mut self, key: IoKey, _bytes: BufferHandle) {
+    fn deliver(&mut self, key: IoKey, _result: SourceResult) {
         vortex_panic!("ProjectionPlanner: delivery of {key:?}, though it never fetches");
     }
 
@@ -107,9 +107,9 @@ impl ProjectionMorsel {
 }
 
 impl Morsel for ProjectionMorsel {
-    fn deliver(&mut self, key: IoKey, bytes: BufferHandle) {
+    fn deliver(&mut self, key: IoKey, result: SourceResult) {
         if let Some(adaptor) = self.adaptor.as_mut() {
-            adaptor.set_segment(key, bytes);
+            adaptor.set_result(key, result);
         }
     }
 

@@ -17,6 +17,8 @@ use vortex_io::segments::IoIntent;
 use vortex_io::segments::IoKey;
 use vortex_io::segments::IoRequest;
 use vortex_io::segments::SegmentSourceId;
+use vortex_io::segments::SourceRequest;
+use vortex_io::segments::SourceResult;
 use vortex_scan::planning::planner::State;
 
 use crate::plan::physical::pipeline::ReadId;
@@ -66,7 +68,11 @@ pub(super) struct ScanAdaptor {
 
 impl ScanAdaptor {
     /// Wraps a scan of the file registered as `source`.
-    pub(super) fn new(scan: Scan, locations: Arc<[SegmentLocation]>, source: SegmentSourceId) -> Self {
+    pub(super) fn new(
+        scan: Scan,
+        locations: Arc<[SegmentLocation]>,
+        source: SegmentSourceId,
+    ) -> Self {
         Self {
             scan,
             pending: None,
@@ -156,7 +162,7 @@ impl ScanAdaptor {
         let reads = self.outstanding.entry(*segment_id).or_default();
         if reads.is_empty() {
             batch.push(IoRequest::new(
-                IoKey::new(self.source, *segment_id),
+                IoKey::segment(self.source, *segment_id),
                 IoIntent::Fetch,
             ));
         }
@@ -167,17 +173,23 @@ impl ScanAdaptor {
     /// Hands a delivered segment to every scan read waiting for it. The driver only delivers
     /// fetches this adaptor published, so anything else is a driver bug. Bytes the scan cannot
     /// take fail the owner's next compute.
-    pub(super) fn set_segment(&mut self, key: IoKey, bytes: BufferHandle) {
-        let segment_id = SegmentId::from(key.segment);
-        let Some(reads) = self.outstanding.remove(&key.segment) else {
+    pub(super) fn set_result(&mut self, key: IoKey, result: SourceResult) {
+        let SourceRequest::Segment(segment) = key.request else {
+            vortex_panic!("ScanAdaptor: delivery of {key:?}, though it only fetches segments");
+        };
+        let segment_id = SegmentId::from(segment);
+        let Some(reads) = self.outstanding.remove(&segment) else {
             vortex_panic!("ScanAdaptor: delivery of {key:?}, which is not outstanding");
         };
-        for read in reads {
-            if let Err(error) = self.deliver(read, segment_id, bytes.clone())
-                && self.failed.is_none()
-            {
-                self.failed = Some(error.with_context(format!("delivering segment {segment_id}")));
-            }
+        let delivered = result.into_bytes().and_then(|bytes| {
+            reads
+                .into_iter()
+                .try_for_each(|read| self.deliver(read, segment_id, bytes.clone()))
+        });
+        if let Err(error) = delivered
+            && self.failed.is_none()
+        {
+            self.failed = Some(error.with_context(format!("delivering segment {segment_id}")));
         }
     }
 

@@ -143,10 +143,7 @@ fn needs_io_delivers_every_request_in_order() -> VortexResult<()> {
     let source = source();
     let root = ScriptedPlanner::boxed(
         "root",
-        vec![
-            PlannerStep::Io(vec![fetch(1), fetch(0)]),
-            PlannerStep::Done,
-        ],
+        vec![PlannerStep::Io(vec![fetch(1), fetch(0)]), PlannerStep::Done],
         &log,
     );
     let batches = driver(&source).run(root)?;
@@ -224,10 +221,7 @@ fn io_failure_propagates_after_two_performs() -> VortexResult<()> {
     source.fail(1, "disk on fire");
     let root = ScriptedPlanner::boxed(
         "root",
-        vec![
-            PlannerStep::Io(vec![fetch(0), fetch(1)]),
-            PlannerStep::Done,
-        ],
+        vec![PlannerStep::Io(vec![fetch(0), fetch(1)]), PlannerStep::Done],
         &log,
     );
     let err = driver(&source).run(root).err().map(|e| e.to_string());
@@ -245,10 +239,7 @@ fn completions_out_of_order_within_one_batch() -> VortexResult<()> {
     let source = lifo_source();
     let root = ScriptedPlanner::boxed(
         "root",
-        vec![
-            PlannerStep::Io(vec![fetch(0), fetch(1)]),
-            PlannerStep::Done,
-        ],
+        vec![PlannerStep::Io(vec![fetch(0), fetch(1)]), PlannerStep::Done],
         &log,
     );
     driver(&source).run(root)?;
@@ -279,11 +270,7 @@ fn completions_out_of_order_across_parked_items() -> VortexResult<()> {
             vec![PlannerStep::Io(vec![fetch(segment)]), PlannerStep::Done],
         )
     };
-    let root = ScriptedPlanner::boxed(
-        "root",
-        vec![child(0), child(1), PlannerStep::Done],
-        &log,
-    );
+    let root = ScriptedPlanner::boxed("root", vec![child(0), child(1), PlannerStep::Done], &log);
     driver(&source).run(root)?;
     let deliveries: Vec<_> = log
         .events()
@@ -584,10 +571,7 @@ fn cancel_drops_a_roots_work_and_its_session() -> VortexResult<()> {
         drain(&mut run)?,
         vec!["batch RootId(1) 2..4", "done RootId(1)", "idle"]
     );
-    assert!(
-        !log.events()
-            .contains(&"deliver cancelled 0".to_string())
-    );
+    assert!(!log.events().contains(&"deliver cancelled 0".to_string()));
     Ok(())
 }
 
