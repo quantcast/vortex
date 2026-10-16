@@ -5,11 +5,11 @@ use vortex_array::IntoArray;
 use vortex_array::arrays::ChunkedArray;
 use vortex_array::dtype::DType;
 use vortex_error::VortexExpect;
+use vortex_error::vortex_panic;
 use vortex_error::VortexResult;
+use vortex_array::buffer::BufferHandle;
 use vortex_error::vortex_bail;
-use vortex_io::request::IoConsumer;
-use vortex_io::request::IoRequestId;
-use vortex_io::request::IoResult;
+use vortex_io::segments::SegmentKey;
 use vortex_scan::planning::morsel::Morsel;
 use vortex_scan::planning::morsel::MorselOutput;
 use vortex_scan::planning::planner::Planner;
@@ -38,11 +38,11 @@ impl ProjectionPlanner {
     }
 }
 
-impl IoConsumer for ProjectionPlanner {
-    fn set_io_result(&mut self, _request: IoRequestId, _result: IoResult) {}
-}
-
 impl Planner for ProjectionPlanner {
+    fn deliver(&mut self, key: SegmentKey, _bytes: BufferHandle) {
+        vortex_panic!("ProjectionPlanner: delivery of {key:?}, though it never fetches");
+    }
+
     fn state(&self) -> State {
         if self.work.is_some() {
             State::NeedsCompute
@@ -106,15 +106,13 @@ impl ProjectionMorsel {
     }
 }
 
-impl IoConsumer for ProjectionMorsel {
-    fn set_io_result(&mut self, request: IoRequestId, result: IoResult) {
+impl Morsel for ProjectionMorsel {
+    fn deliver(&mut self, key: SegmentKey, bytes: BufferHandle) {
         if let Some(adaptor) = self.adaptor.as_mut() {
-            adaptor.set_io_result(request, result);
+            adaptor.set_segment(key, bytes);
         }
     }
-}
 
-impl Morsel for ProjectionMorsel {
     fn state(&self) -> State {
         match &self.adaptor {
             _ if self.done => State::Done,
@@ -145,7 +143,7 @@ impl Morsel for ProjectionMorsel {
             )?
             .with_row_offset(plans.row_offset)
             .with_value_cache(plans.values);
-            self.adaptor = Some(ScanAdaptor::new(scan, plans.locations));
+            self.adaptor = Some(ScanAdaptor::new(scan, plans.locations, plans.source));
             return Ok(MorselOutput::Continue);
         };
         if adaptor.state() == State::Done {

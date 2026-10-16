@@ -6,11 +6,16 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::task::Context;
+use std::task::Poll;
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::Int32Type;
+use futures::FutureExt;
+use futures::TryFutureExt;
 use futures::TryStreamExt;
 use futures::stream;
+use parking_lot::Mutex;
 use rstest::rstest;
 use vortex_array::ArrayContext;
 use vortex_array::ArrayRef;
@@ -33,6 +38,16 @@ use vortex_arrow::ArrowSessionExt;
 use vortex_buffer::Alignment;
 use vortex_buffer::Buffer;
 use vortex_error::VortexResult;
+use vortex_io::segments::FetchTracker;
+use vortex_io::segments::IoIntent;
+use vortex_io::segments::IoOwnerId;
+use vortex_io::segments::RegisteredSource;
+use vortex_io::segments::SegmentHandle;
+use vortex_io::segments::SegmentIoService;
+use vortex_io::segments::SegmentIoSession;
+use vortex_io::segments::SegmentRequest;
+use vortex_io::segments::SharedBytes;
+use vortex_io::segments::SourceId;
 use vortex_io::session::RuntimeSessionExt;
 use vortex_scan::strict_sorted_buffer::StrictSortedBuffer;
 use vortex_session::VortexSession;
@@ -138,6 +153,69 @@ fn zoned_table() -> Arc<dyn LayoutStrategy> {
     Arc::new(TableStrategy::new(chunked_flat(), Arc::new(zoned)))
 }
 
+/// Serves segment requests from one [`SegmentSource`], mapping intents as `vortex-file`'s
+/// `FileSegmentIo` does for opened files: every request asks the source, and fetches and
+/// prefetches are polled once the whole batch is registered.
+struct SourceIo(Arc<dyn SegmentSource>);
+
+impl SegmentIoService for SourceIo {
+    fn session(&self) -> Arc<dyn SegmentIoSession> {
+        Arc::new(SourceSession {
+            source: Arc::clone(&self.0),
+            fetches: Mutex::default(),
+        })
+    }
+}
+
+struct SourceSession {
+    source: Arc<dyn SegmentSource>,
+    fetches: Mutex<FetchTracker>,
+}
+
+impl SegmentIoSession for SourceSession {
+    fn submit(
+        &self,
+        owner: IoOwnerId,
+        batch: &[SegmentRequest],
+    ) -> VortexResult<Vec<SegmentHandle>> {
+        let handles: Vec<_> = batch
+            .iter()
+            .map(|request| {
+                let bytes: SharedBytes = self
+                    .source
+                    .request(SegmentId::from(request.key.segment))
+                    .map_err(Arc::new)
+                    .boxed()
+                    .shared();
+                SegmentHandle::new(bytes, Arc::new(()))
+            })
+            .collect();
+        let mut fetches = self.fetches.lock();
+        for (request, handle) in batch.iter().zip(&handles) {
+            match request.intent {
+                IoIntent::Fetch => {
+                    drop(handle.bytes().now_or_never());
+                    fetches.track(owner, handle);
+                }
+                IoIntent::Prefetch => {
+                    drop(handle.bytes().now_or_never());
+                    fetches.track_prefetch(handle);
+                }
+                IoIntent::Announce => {}
+            }
+        }
+        Ok(handles)
+    }
+
+    fn poll_ready(
+        &self,
+        cx: &mut Context<'_>,
+        ready: &mut Vec<IoOwnerId>,
+    ) -> Poll<VortexResult<()>> {
+        self.fetches.lock().poll_ready(cx, ready)
+    }
+}
+
 /// A [`ScanFile`] over test segments. They have no byte offsets, and the scan fetches them by id,
 /// so each location is a placeholder whose offset is its id.
 fn scan_file(segments: &Arc<dyn SegmentSource>, layout: &LayoutRef) -> VortexResult<ScanFile> {
@@ -157,7 +235,11 @@ fn scan_file(segments: &Arc<dyn SegmentSource>, layout: &LayoutRef) -> VortexRes
     Ok(ScanFile {
         layout: Arc::clone(layout),
         locations,
-        segments: Arc::clone(segments),
+        segment_io: RegisteredSource::new(
+            Arc::new(SourceIo(Arc::clone(segments))),
+            SourceId(0),
+            Arc::new(()),
+        ),
     })
 }
 
