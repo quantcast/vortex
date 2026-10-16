@@ -7,7 +7,7 @@
 //! [`SourceRequest`] of it (one of its segments, or its size), and says how much it needs it with
 //! an [`IoIntent`]. One service serves many sources, so one session can read from all of them. A [`SegmentIoSession`] registers a whole batch of them before any can be
 //! read, and returns one [`IoHandle`] per request. The handle is the request: its result
-//! arrive in it. The session holds fetches and prefetches until they finish; an announcement is
+//! arrives in it. The session holds fetches and prefetches until they finish; an announcement is
 //! withdrawn by dropping every handle of it.
 //!
 //! A [`SegmentIoService`] serves every registered source. Its sessions share and coalesce reads,
