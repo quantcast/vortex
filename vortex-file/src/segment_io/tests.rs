@@ -111,7 +111,7 @@ fn service_with(
     let service = FileSegmentIo::default();
     let registration = service.register(
         Arc::new(SegmentCacheSourceAdapter::new(cache, Arc::new(source))),
-        FILE_LEN as u64,
+        Some(FILE_LEN as u64),
     );
     (service, registration, reader)
 }
@@ -121,7 +121,7 @@ fn buffered() -> (FileSegmentIo, RegisteredSource) {
     let service = FileSegmentIo::default();
     let registration = service.register(
         Arc::new(BufferSegmentSource::new(bytes(), specs())),
-        FILE_LEN as u64,
+        Some(FILE_LEN as u64),
     );
     (service, registration)
 }
@@ -363,5 +363,17 @@ fn a_dropped_registration_is_unreadable() -> VortexResult<()> {
     let segment = request(&file, 0, IoIntent::Fetch);
     drop(file);
     assert!(service.session().submit(IoOwnerId(0), &[segment]).is_err());
+    Ok(())
+}
+
+#[test]
+fn an_unknown_size_fails_its_request() -> VortexResult<()> {
+    let service = FileSegmentIo::default();
+    let file = service.register(Arc::new(BufferSegmentSource::new(bytes(), specs())), None);
+    let handles = service.session().submit(
+        IoOwnerId(0),
+        &[IoRequest::new(IoKey::size(file.id()), IoIntent::Fetch)],
+    )?;
+    assert!(handles[0].try_get().is_some_and(|result| result.is_err()));
     Ok(())
 }
