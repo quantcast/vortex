@@ -4,8 +4,9 @@
 //! The session's segment IO service, serving planner-driven scans over files' segment sources.
 //!
 //! A file is registered by its [`SegmentSource`], usually [`VortexFile::segment_source`], and its
-//! size, so segment reads go through the same segment cache, request sharing and coalescing read
-//! driver as every other read of the file. A size request is answered at submit. The intents of
+//! size when known, so segment reads go through the same segment cache, request sharing and
+//! coalescing read driver as every other read of the file. A size request is answered at submit,
+//! and fails for a source registered without one. The intents of
 //! segment requests map onto the source's requests:
 //!
 //! - every segment request calls [`SegmentSource::request`], which for an opened file registers the read
@@ -69,8 +70,8 @@ type Source = Arc<dyn SegmentSource>;
 /// rejected as unregistered rather than read from another source.
 static NEXT_SOURCE: AtomicU32 = AtomicU32::new(0);
 
-/// A registered source, held weakly so the registration owns it, and its size in bytes.
-type Registered = (Weak<dyn SegmentSource>, u64);
+/// A registered source, held weakly so the registration owns it, and its size in bytes if known.
+type Registered = (Weak<dyn SegmentSource>, Option<u64>);
 
 #[derive(Default)]
 struct Registry {
@@ -101,12 +102,12 @@ impl FileSegmentIo {
         session.get::<Self>().clone()
     }
 
-    /// Registers `source`, usually a [`VortexFile::segment_source`], whose total length is
-    /// `size` bytes. New sessions can read it while any clone of the registration is alive; a
+    /// Registers `source`, usually a [`VortexFile::segment_source`], whose total length is `size`
+    /// bytes if known; size requests of a source registered without one fail. New sessions can read it while any clone of the registration is alive; a
     /// session that has already read it keeps it readable for the session's lifetime.
     ///
     /// [`VortexFile::segment_source`]: crate::VortexFile::segment_source
-    pub fn register(&self, source: Source, size: u64) -> RegisteredSource {
+    pub fn register(&self, source: Source, size: Option<u64>) -> RegisteredSource {
         let id = SegmentSourceId(NEXT_SOURCE.fetch_add(1, Ordering::Relaxed));
         self.0
             .sources
@@ -156,7 +157,7 @@ struct FileSession {
 #[derive(Clone)]
 struct SessionSource {
     source: Source,
-    size: u64,
+    size: Option<u64>,
     keep_alive: Arc<dyn Any + Send + Sync>,
 }
 
@@ -196,7 +197,10 @@ impl SegmentIoSession for FileSession {
                 } = self.source(request.key.source)?;
                 let segment = match request.key.request {
                     SourceRequest::Size => {
-                        return Ok(IoHandle::ready(Ok(SourceResult::Size(size))));
+                        let size = size.map(SourceResult::Size).ok_or_else(|| {
+                            vortex_err!("the size of {:?} is unknown", request.key.source)
+                        });
+                        return Ok(IoHandle::ready(size));
                     }
                     SourceRequest::Segment(segment) => segment,
                 };
