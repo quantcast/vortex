@@ -27,9 +27,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use vortex_array::buffer::BufferHandle;
     use vortex_error::vortex_bail;
-    use vortex_io::segments::SegmentKey;
+    use vortex_io::segments::IoKey;
+    use vortex_io::segments::SourceResult;
 
     use super::*;
     use crate::planning::planner::PlannerOutput;
@@ -46,7 +46,7 @@ mod tests {
             Ok(PlannerOutput::Done)
         }
 
-        fn deliver(&mut self, _key: SegmentKey, _bytes: BufferHandle) {}
+        fn deliver(&mut self, _key: IoKey, _result: SourceResult) {}
     }
 
     #[test]
