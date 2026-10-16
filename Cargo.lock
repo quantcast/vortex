@@ -11344,6 +11344,7 @@ dependencies = [
  "vortex-decimal-byte-parts",
  "vortex-edition",
  "vortex-error",
+ "vortex-expr",
  "vortex-fastlanes",
  "vortex-file",
  "vortex-fsst",
@@ -11918,6 +11919,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "vortex-expr"
+version = "0.1.0"
+dependencies = [
+ "itertools 0.14.0",
+ "parking_lot",
+ "rstest",
+ "tracing",
+ "vortex-array",
+ "vortex-buffer",
+ "vortex-error",
+ "vortex-session",
+ "vortex-utils",
+]
+
+[[package]]
 name = "vortex-fastlanes"
 version = "0.1.0"
 dependencies = [
@@ -11997,6 +12013,7 @@ dependencies = [
  "vortex-decimal-byte-parts",
  "vortex-edition",
  "vortex-error",
+ "vortex-expr",
  "vortex-fastlanes",
  "vortex-fsst",
  "vortex-io",
@@ -12195,6 +12212,7 @@ dependencies = [
  "vortex-btrblocks",
  "vortex-buffer",
  "vortex-error",
+ "vortex-expr",
  "vortex-io",
  "vortex-mask",
  "vortex-metrics",
@@ -12472,6 +12490,7 @@ dependencies = [
  "vortex-buffer",
  "vortex-edition",
  "vortex-error",
+ "vortex-expr",
  "vortex-layout",
  "vortex-mask",
  "vortex-session",
