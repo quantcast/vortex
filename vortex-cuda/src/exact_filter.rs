@@ -17,6 +17,7 @@
 //! `VORTEX_CUDA_TYPED_FILTER=0` restores the generic mask; all other values retain the default.
 //! The CUB override takes precedence over this setting.
 
+use std::cmp::Ordering;
 use std::env;
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -31,17 +32,23 @@ use futures::StreamExt;
 use vortex::array::ArrayRef;
 use vortex::array::Canonical;
 use vortex::array::IntoArray;
+use vortex::array::arrays::Dict;
+use vortex::array::arrays::DictArray;
 use vortex::array::arrays::ExtensionArray;
 use vortex::array::arrays::Primitive;
 use vortex::array::arrays::PrimitiveArray;
 use vortex::array::arrays::Struct;
 use vortex::array::arrays::StructArray;
+use vortex::array::arrays::VarBinViewArray;
+use vortex::array::arrays::dict::DictArraySlotsExt;
 use vortex::array::arrays::extension::ExtensionArrayExt;
 use vortex::array::arrays::primitive::PrimitiveDataParts;
 use vortex::array::arrays::struct_::StructArrayExt;
 use vortex::array::buffer::BufferHandle;
 use vortex::array::buffer::DeviceBuffer;
+use vortex::array::builtins::ArrayBuiltins;
 use vortex::array::expr::Expression;
+use vortex::array::match_each_integer_ptype;
 use vortex::array::match_each_native_simd_ptype;
 use vortex::array::scalar_fn::fns::binary::Binary;
 use vortex::array::scalar_fn::fns::get_item::GetItem;
@@ -51,17 +58,23 @@ use vortex::array::stream::ArrayStreamAdapter;
 use vortex::array::stream::SendableArrayStream;
 use vortex::array::validity::Validity;
 use vortex::buffer::Alignment;
+use vortex::buffer::ByteBuffer;
 use vortex::dtype::DType;
 use vortex::dtype::FieldName;
 use vortex::dtype::NativePType;
+use vortex::dtype::Nullability;
 use vortex::dtype::PType;
+use vortex::encodings::sequence::Sequence;
 use vortex::error::VortexResult;
 use vortex::error::vortex_err;
 use vortex::scalar::Scalar;
 use vortex::session::VortexSession;
 use vortex_cub::filter::CubFilterable;
 use vortex_cub::filter::cudaStream_t;
+use vortex_onpair::OnPair;
+use vortex_onpair::OnPairArraySlotsExt;
 
+use crate::CanonicalCudaExt;
 use crate::CudaBufferExt;
 use crate::CudaDeviceBuffer;
 use crate::CudaSession;
@@ -149,6 +162,23 @@ struct SelectionMask {
     selected: usize,
 }
 
+/// One conjunct of a scan filter that the GPU can select rows by.
+#[derive(Clone, Debug)]
+pub enum ScanComparison {
+    /// A primitive or temporal field compared with a literal of its storage type.
+    Primitive(FieldComparison),
+    /// A UTF-8 field compared with a string literal.
+    ///
+    /// Only dictionary-encoded batches select by it: the comparison is evaluated once per
+    /// dictionary value on the host, and rows are selected on the GPU by comparing their codes
+    /// with the matching code, or code range. Other matching sets keep their rows.
+    Utf8 {
+        field: FieldName,
+        operator: CompareOp,
+        literal: ByteBuffer,
+    },
+}
+
 /// One conjunct of a scan filter: a top-level field compared with a non-null literal.
 #[derive(Clone, Debug)]
 pub struct FieldComparison {
@@ -162,7 +192,7 @@ pub struct FieldComparison {
 /// Comparison operators, numbered as `CompareOp` in `compare.cu`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
-enum CompareOp {
+pub enum CompareOp {
     Eq = 0,
     NotEq = 1,
     Gt = 2,
@@ -184,6 +214,18 @@ impl CompareOp {
         })
     }
 
+    /// Whether an operand ordered `ordering` relative to the literal satisfies the operator.
+    fn holds(self, ordering: Ordering) -> bool {
+        match self {
+            Self::Eq => ordering.is_eq(),
+            Self::NotEq => ordering.is_ne(),
+            Self::Gt => ordering.is_gt(),
+            Self::Gte => ordering.is_ge(),
+            Self::Lt => ordering.is_lt(),
+            Self::Lte => ordering.is_le(),
+        }
+    }
+
     /// The operator for swapped operands: `a < b` is `b > a`.
     fn swapped(self) -> Self {
         match self {
@@ -196,16 +238,16 @@ impl CompareOp {
     }
 }
 
-/// The conjuncts of `filter` that compare a top-level primitive or temporal field of `scope`
-/// with a literal. The others are left to the consumer.
-pub fn field_comparisons(filter: &Expression, scope: &DType) -> VortexResult<Vec<FieldComparison>> {
+/// The conjuncts of `filter` that compare a top-level primitive, temporal or UTF-8 field of
+/// `scope` with a literal. The others are left to the consumer.
+pub fn field_comparisons(filter: &Expression, scope: &DType) -> VortexResult<Vec<ScanComparison>> {
     let filter = coerce_comparison_literals(filter.clone(), scope)?;
     let mut comparisons = Vec::new();
     collect_comparisons(&filter, scope, &mut comparisons);
     Ok(comparisons)
 }
 
-fn collect_comparisons(expr: &Expression, scope: &DType, comparisons: &mut Vec<FieldComparison>) {
+fn collect_comparisons(expr: &Expression, scope: &DType, comparisons: &mut Vec<ScanComparison>) {
     let Some(&operator) = expr.as_opt::<Binary>() else {
         return;
     };
@@ -235,6 +277,16 @@ fn collect_comparisons(expr: &Expression, scope: &DType, comparisons: &mut Vec<F
         DType::Extension(ext) => ext.storage_dtype().clone(),
         dtype => dtype.clone(),
     };
+    if matches!(storage, DType::Utf8(_)) {
+        if let Some(literal) = literal.as_utf8_opt().and_then(|literal| literal.value()) {
+            comparisons.push(ScanComparison::Utf8 {
+                field: field.clone(),
+                operator,
+                literal: literal.inner().clone(),
+            });
+        }
+        return;
+    }
     let DType::Primitive(ptype, _) = storage else {
         return;
     };
@@ -249,12 +301,12 @@ fn collect_comparisons(expr: &Expression, scope: &DType, comparisons: &mut Vec<F
     if ptype == PType::F16 {
         return;
     }
-    comparisons.push(FieldComparison {
+    comparisons.push(ScanComparison::Primitive(FieldComparison {
         field: field.clone(),
         operator,
         literal,
         ptype,
-    });
+    }));
 }
 
 /// The field `expr` reads from the scope root, if it is a plain field reference.
@@ -273,13 +325,13 @@ fn field_of(expr: &Expression) -> Option<&FieldName> {
 /// selecting one batch does not hold back decoding the next.
 pub fn select_rows(
     stream: SendableArrayStream,
-    comparisons: Vec<FieldComparison>,
+    comparisons: Vec<ScanComparison>,
     session: VortexSession,
     concurrency: usize,
 ) -> SendableArrayStream {
     let dtype = stream.dtype().clone();
     let implementation = SelectionImpl::from_env();
-    let comparisons: Arc<[FieldComparison]> = comparisons.into();
+    let comparisons: Arc<[ScanComparison]> = comparisons.into();
     let batches = stream
         .map(move |batch| {
             let comparisons = Arc::clone(&comparisons);
@@ -295,7 +347,7 @@ pub fn select_rows(
 
 async fn select_batch(
     batch: ArrayRef,
-    comparisons: &[FieldComparison],
+    comparisons: &[ScanComparison],
     implementation: SelectionImpl,
     ctx: &mut CudaExecutionCtx,
 ) -> VortexResult<ArrayRef> {
@@ -304,12 +356,12 @@ async fn select_batch(
         return Ok(batch);
     };
     let validity = batch_struct.validity()?;
-    // Only primitive and temporal columns are compacted. Others, like strings, keep their
-    // batch whole before any work, so they also keep their direct export paths.
+    // Primitive and temporal columns are compacted, coded columns through their codes. Others,
+    // like plain strings, keep their batch whole before any work, so they also keep their
+    // direct export paths.
     let compactable = batch_struct
-        .struct_fields()
-        .fields()
-        .all(|dtype| primitive_storage(&dtype).is_some());
+        .iter_unmasked_fields()
+        .all(|field| primitive_storage(field.dtype()).is_some() || has_codes(field));
     if len == 0 || !compactable || !matches!(validity, Validity::NonNullable | Validity::AllValid) {
         return Ok(batch);
     }
@@ -319,40 +371,76 @@ async fn select_batch(
         Ok(StructArray::try_new(names.clone(), fields, len, validity.clone())?.into_array())
     };
 
-    let fused =
-        implementation != SelectionImpl::Cub && supports_fused_filter(len, comparisons.len());
-    let mut fused_inputs = Vec::new();
-    let mut words: Option<CudaSlice<u32>> = None;
+    // Coded fields and their decoded codes, shared by their comparisons and their compaction.
+    let mut coded: Vec<Option<(CodedColumn, Canonical)>> = vec![None; fields.len()];
+    let mut resolved = Vec::new();
     for comparison in comparisons {
-        let Some(index) = names.iter().position(|name| *name == comparison.field) else {
+        let field = match comparison {
+            ScanComparison::Primitive(comparison) => &comparison.field,
+            ScanComparison::Utf8 { field, .. } => field,
+        };
+        let Some(index) = names.iter().position(|name| name == field) else {
             continue;
         };
-        // Keep the decoded column so selection and export do not decode it again.
-        let canonical = fields[index].clone().execute_cuda(ctx).await?;
-        fields[index] = canonical.clone().into_array();
-        let Some(values) = comparable_values(canonical, comparison.ptype) else {
-            continue;
-        };
-        if fused {
-            fused_inputs.push((values, comparison));
-            continue;
+        match comparison {
+            ScanComparison::Primitive(comparison) => {
+                // Keep the decoded column so selection and export do not decode it again.
+                let canonical = fields[index].clone().execute_cuda(ctx).await?;
+                fields[index] = canonical.clone().into_array();
+                if let Some(values) = comparable_values(canonical, comparison.ptype) {
+                    resolved.push((values, comparison.clone()));
+                }
+            }
+            ScanComparison::Utf8 {
+                operator, literal, ..
+            } => {
+                if coded[index].is_none() {
+                    coded[index] = decode_coded(&fields[index], ctx).await?;
+                }
+                let Some((column, decoded)) = coded[index].clone() else {
+                    continue;
+                };
+                let Some(matching) =
+                    matching_values(column.values, *operator, literal, ctx).await?
+                else {
+                    continue;
+                };
+                let Canonical::Primitive(code_values) = decoded else {
+                    continue;
+                };
+                let ptype = code_values.ptype();
+                let Some(code_values) = comparable_values(Canonical::Primitive(code_values), ptype)
+                else {
+                    continue;
+                };
+                for comparison in code_comparisons(field, &matching, ptype)? {
+                    resolved.push((code_values.clone(), comparison));
+                }
+            }
         }
-        let combine = words.is_some();
-        let target = match &mut words {
-            Some(words) => words,
-            None => words.insert(ctx.device_alloc::<u32>(len.div_ceil(32))?),
-        };
-        launch_compare(values, len, comparison, target, combine, ctx).await?;
     }
-    let mask = if !fused_inputs.is_empty() {
+    if resolved.is_empty() {
+        return whole(fields);
+    }
+
+    let mask = if implementation != SelectionImpl::Cub && supports_fused_filter(len, resolved.len())
+    {
+        let inputs = resolved
+            .iter()
+            .map(|(values, comparison)| (values.clone(), comparison))
+            .collect();
         fused_selection_mask(
-            fused_inputs,
+            inputs,
             len,
             implementation == SelectionImpl::SharedTyped,
             ctx,
         )
         .await?
-    } else if let Some(words) = words {
+    } else {
+        let mut words = ctx.device_alloc::<u32>(len.div_ceil(32))?;
+        for (position, (values, comparison)) in resolved.into_iter().enumerate() {
+            launch_compare(values, len, &comparison, &mut words, position > 0, ctx).await?;
+        }
         let selected = count_selected(&words, ctx).await?;
         SelectionMask {
             words,
@@ -360,24 +448,46 @@ async fn select_batch(
             group_offsets: None,
             selected,
         }
-    } else {
-        return whole(fields);
     };
     let selected = mask.selected;
     if selected as f64 > SELECTED_FRACTION_MAX * len as f64 {
         return whole(fields);
     }
 
+    // Coded columns compact their codes and keep their values.
     let mut decoded = Vec::with_capacity(fields.len());
-    for field in &fields {
-        decoded.push(field.clone().execute_cuda(ctx).await?);
+    let mut dictionary_values = Vec::with_capacity(fields.len());
+    for (index, field) in fields.iter().enumerate() {
+        if has_codes(field) && coded[index].is_none() {
+            coded[index] = decode_coded(field, ctx).await?;
+        }
+        match coded[index].take() {
+            Some((column, codes)) => {
+                decoded.push(codes);
+                dictionary_values.push(Some(column.values));
+            }
+            None if has_codes(field) => return whole(fields),
+            None => {
+                decoded.push(field.clone().execute_cuda(ctx).await?);
+                dictionary_values.push(None);
+            }
+        }
     }
     // Columns holding nulls would need their validity selected too.
     if !decoded
         .iter()
         .all(|field| selectable_values(field.clone()).is_some())
     {
-        return whole(decoded.into_iter().map(Canonical::into_array).collect());
+        let fields = decoded
+            .into_iter()
+            .zip(dictionary_values)
+            .zip(fields)
+            .map(|((decoded, values), field)| match values {
+                Some(_) => field,
+                None => decoded.into_array(),
+            })
+            .collect();
+        return whole(fields);
     }
     let selected_fields = if implementation != SelectionImpl::Cub
         && mask.tile_offsets.is_some()
@@ -391,7 +501,202 @@ async fn select_batch(
         }
         selected_fields
     };
+    let selected_fields = selected_fields
+        .into_iter()
+        .zip(dictionary_values)
+        .map(|(field, values)| match values {
+            Some(values) => Ok(DictArray::try_new(field, values)?.into_array()),
+            None => Ok(field),
+        })
+        .collect::<VortexResult<Vec<_>>>()?;
     Ok(StructArray::try_new(names, selected_fields, selected, validity)?.into_array())
+}
+
+/// Most dictionary values a string comparison evaluates on the host per batch.
+const DICTIONARY_VALUES_MAX: usize = 1024;
+
+/// A column whose rows select through non-null integer codes into a small set of values.
+#[derive(Clone)]
+struct CodedColumn {
+    codes: ArrayRef,
+    values: ArrayRef,
+}
+
+/// Whether `field` is a coded column, checked without reading any data: a dictionary, or an
+/// OnPair string column whose every row is exactly one token, so its tokens are its values.
+fn has_codes(field: &ArrayRef) -> bool {
+    dictionary_parts(field).is_some() || single_token_codes(field).is_some()
+}
+
+/// The coded column of `field` with its codes decoded on the device, if it is one.
+async fn decode_coded(
+    field: &ArrayRef,
+    ctx: &mut CudaExecutionCtx,
+) -> VortexResult<Option<(CodedColumn, Canonical)>> {
+    let column = match dictionary_parts(field) {
+        Some((codes, values)) => CodedColumn { codes, values },
+        None => {
+            let Some(codes) = single_token_codes(field) else {
+                return Ok(None);
+            };
+            let Some(values) = onpair_tokens(field, ctx).await? else {
+                return Ok(None);
+            };
+            CodedColumn { codes, values }
+        }
+    };
+    let codes = column.codes.clone().execute_cuda(ctx).await?;
+    Ok(Some((column, codes)))
+}
+
+/// The non-nullable integer codes and the values of a dictionary-encoded column.
+fn dictionary_parts(field: &ArrayRef) -> Option<(ArrayRef, ArrayRef)> {
+    let dictionary = field.as_opt::<Dict>()?;
+    let codes = dictionary.codes();
+    matches!(codes.dtype(), DType::Primitive(ptype, Nullability::NonNullable) if ptype.is_int())
+        .then(|| (codes.clone(), dictionary.values().clone()))
+}
+
+/// The token code of each row of a non-null OnPair column whose rows are exactly one token
+/// each, recognized from row token offsets stored as a unit-step sequence.
+fn single_token_codes(field: &ArrayRef) -> Option<ArrayRef> {
+    if field.dtype().is_nullable() {
+        return None;
+    }
+    let onpair = field.as_opt::<OnPair>()?;
+    let offsets = onpair.codes_offsets().as_opt::<Sequence>()?;
+    let first = offsets.base().cast::<u64>().ok()?;
+    let step = offsets.multiplier().cast::<u64>().ok()?;
+    if step != 1 || onpair.codes_offsets().len() != field.len() + 1 {
+        return None;
+    }
+    let start = usize::try_from(first).ok()?;
+    let codes = onpair.codes();
+    let integer = matches!(codes.dtype(), DType::Primitive(ptype, Nullability::NonNullable) if ptype.is_int());
+    (integer && start.checked_add(field.len())? <= codes.len())
+        .then(|| codes.slice(start..start + field.len()).ok())
+        .flatten()
+}
+
+/// The tokens of an OnPair column's dictionary as host strings, indexed by token code, if
+/// there are at most [`DICTIONARY_VALUES_MAX`]. Rows of a single-token column are whole tokens,
+/// so tokens that are not UTF-8 are referenced by no row and stand in as empty strings.
+async fn onpair_tokens(
+    field: &ArrayRef,
+    ctx: &mut CudaExecutionCtx,
+) -> VortexResult<Option<ArrayRef>> {
+    let Some(onpair) = field.as_opt::<OnPair>() else {
+        return Ok(None);
+    };
+    if onpair.dict_offsets().len() > DICTIONARY_VALUES_MAX + 1 {
+        return Ok(None);
+    }
+    let bytes = onpair.dict_bytes_handle().clone().try_into_host()?.await?;
+    let offsets = onpair
+        .dict_offsets()
+        .clone()
+        .execute_cuda(ctx)
+        .await?
+        .into_host(ctx.execution_ctx())
+        .await?
+        .into_array()
+        .cast(DType::Primitive(PType::U64, Nullability::NonNullable))?
+        .execute::<PrimitiveArray>(ctx.execution_ctx())?;
+    let offsets = offsets.as_slice::<u64>();
+    let mut tokens = Vec::with_capacity(offsets.len().saturating_sub(1));
+    for bounds in offsets.windows(2) {
+        let (start, end) = (usize::try_from(bounds[0])?, usize::try_from(bounds[1])?);
+        let token = bytes
+            .as_slice()
+            .get(start..end)
+            .ok_or_else(|| vortex_err!("OnPair token {start}..{end} exceeds its dictionary"))?;
+        tokens.push(Some(str::from_utf8(token).unwrap_or_default()));
+    }
+    Ok(Some(
+        VarBinViewArray::from_iter(tokens, field.dtype().clone()).into_array(),
+    ))
+}
+
+/// Whether each UTF-8 dictionary value satisfies `operator` against `literal`, comparing bytes
+/// as UTF-8 orders strings. Null values never match. `None` if the values are not UTF-8 or too
+/// many to evaluate per batch.
+async fn matching_values(
+    values: ArrayRef,
+    operator: CompareOp,
+    literal: &ByteBuffer,
+    ctx: &mut CudaExecutionCtx,
+) -> VortexResult<Option<Vec<bool>>> {
+    if values.len() > DICTIONARY_VALUES_MAX || !matches!(values.dtype(), DType::Utf8(_)) {
+        return Ok(None);
+    }
+    let Canonical::VarBinView(strings) = values
+        .execute_cuda(ctx)
+        .await?
+        .into_host(ctx.execution_ctx())
+        .await?
+    else {
+        return Ok(None);
+    };
+    let valid = strings
+        .validity()?
+        .execute_mask(strings.len(), ctx.execution_ctx())?;
+    Ok(Some(
+        (0..strings.len())
+            .map(|index| {
+                valid.value(index)
+                    && operator.holds(strings.bytes_at(index).as_slice().cmp(literal.as_slice()))
+            })
+            .collect(),
+    ))
+}
+
+/// Comparisons of `field`'s codes selecting the rows whose dictionary value matches.
+///
+/// One matching code is an equality and all but one an inequality. Other sets select the code
+/// range from the first to the last match: exact for contiguous matches, otherwise a superset
+/// the consumer's filter narrows. No match selects nothing; every match needs no comparison.
+fn code_comparisons(
+    field: &FieldName,
+    matching: &[bool],
+    ptype: PType,
+) -> VortexResult<Vec<FieldComparison>> {
+    let comparison = |operator, code: usize| -> VortexResult<FieldComparison> {
+        let literal = match_each_integer_ptype!(ptype, |T| {
+            Scalar::from(
+                T::try_from(code)
+                    .map_err(|_| vortex_err!("dictionary code {code} exceeds {ptype}"))?,
+            )
+        });
+        Ok(FieldComparison {
+            field: field.clone(),
+            operator,
+            literal,
+            ptype,
+        })
+    };
+    let count = matching.iter().filter(|matches| **matches).count();
+    let (Some(first), Some(last)) = (
+        matching.iter().position(|matches| *matches),
+        matching.iter().rposition(|matches| *matches),
+    ) else {
+        // Codes are never negative.
+        return Ok(vec![comparison(CompareOp::Lt, 0)?]);
+    };
+    if count == matching.len() {
+        return Ok(Vec::new());
+    }
+    if first == last {
+        return Ok(vec![comparison(CompareOp::Eq, first)?]);
+    }
+    if count + 1 == matching.len()
+        && let Some(missing) = matching.iter().position(|matches| !*matches)
+    {
+        return Ok(vec![comparison(CompareOp::NotEq, missing)?]);
+    }
+    Ok(vec![
+        comparison(CompareOp::Gte, first)?,
+        comparison(CompareOp::Lte, last)?,
+    ])
 }
 
 /// The primitive type of a primitive column, or of a temporal column's storage.
@@ -865,6 +1170,7 @@ mod tests {
     use rstest::rstest;
     use vortex::array::VortexSessionExecute;
     use vortex::array::arrays::TemporalArray;
+    use vortex::array::arrays::VarBinArray;
     use vortex::array::arrays::VarBinViewArray;
     use vortex::array::assert_arrays_eq;
     use vortex::array::expr::and;
@@ -874,12 +1180,16 @@ mod tests {
     use vortex::array::expr::gt_eq;
     use vortex::array::expr::lit;
     use vortex::array::expr::lt;
+    use vortex::array::expr::not_eq;
     use vortex::array::expr::or;
     use vortex::array::extension::datetime::TimeUnit;
     use vortex::array::session::ArraySession;
     use vortex::error::VortexExpect;
     use vortex::mask::Mask;
     use vortex::session::VortexSession;
+    use vortex_onpair::DEFAULT_CONFIG;
+    use vortex_onpair::OnPairArrayExt;
+    use vortex_onpair::onpair_compress;
 
     use super::*;
     use crate::CanonicalCudaExt;
@@ -956,6 +1266,184 @@ mod tests {
         let selected =
             select_with_impl(batch, gt_eq(col("d"), lit(4500i32)), implementation).await?;
         assert_eq!(selected.len(), 500);
+        Ok(())
+    }
+
+    /// Columns `x = 0..6000` and `flag`, a dictionary of `values` whose codes cycle through them.
+    fn dictionary_batch(values: &[&str]) -> VortexResult<ArrayRef> {
+        let x = PrimitiveArray::from_iter(0i32..6000).into_array();
+        let codes = PrimitiveArray::from_iter((0..6000u32).map(|row| {
+            u8::try_from(row as usize % values.len()).vortex_expect("few dictionary values")
+        }))
+        .into_array();
+        let values = VarBinViewArray::from_iter_str(values.iter().copied()).into_array();
+        let flag = DictArray::try_new(codes, values)?.into_array();
+        Ok(StructArray::from_fields(&[("x", x), ("flag", flag)])?.into_array())
+    }
+
+    /// Like [`dictionary_batch`], with `flag` an OnPair column whose rows are one token each and
+    /// whose row token offsets are a unit-step sequence, as files store low-cardinality strings.
+    fn onpair_batch(values: &[&str]) -> VortexResult<ArrayRef> {
+        let mut ctx = vortex::array::array_session().create_execution_ctx();
+        let dtype = DType::Utf8(Nullability::NonNullable);
+        let strings = (0..6000).map(|row| Some(values[row % values.len()]));
+        let varbin = VarBinArray::from_iter(strings, dtype.clone()).into_array();
+        let onpair = onpair_compress(&varbin, DEFAULT_CONFIG, &mut ctx)?;
+        let view = onpair
+            .as_typed::<OnPair>()
+            .vortex_expect("expected an OnPair array");
+        let offsets = view
+            .codes_offsets()
+            .clone()
+            .cast(DType::Primitive(PType::U64, Nullability::NonNullable))?
+            .execute::<PrimitiveArray>(&mut ctx)?;
+        assert!(
+            offsets.as_slice::<u64>().iter().copied().eq(0..6001),
+            "every row must be a single token"
+        );
+        let sequence = Sequence::try_new_typed(0u32, 1, Nullability::NonNullable, 6001)?;
+        let flag = OnPair::try_new(
+            dtype,
+            view.dict_bytes_handle().clone(),
+            view.dict_offsets().clone(),
+            view.codes().clone(),
+            sequence.into_array(),
+            view.uncompressed_lengths().clone(),
+            view.array_validity(),
+        )?
+        .into_array();
+        let x = PrimitiveArray::from_iter(0i32..6000).into_array();
+        Ok(StructArray::from_fields(&[("x", x), ("flag", flag)])?.into_array())
+    }
+
+    /// String comparisons of dictionary columns select exactly the matching rows of every column
+    /// through the codes: one code, all but one, or a contiguous code range.
+    #[rstest]
+    #[case::equal(eq(col("flag"), lit("R")), "R", Operator::Eq)]
+    #[case::not_equal(not_eq(col("flag"), lit("A")), "A", Operator::NotEq)]
+    #[case::range(lt(col("flag"), lit("N")), "N", Operator::Lt)]
+    #[case::left_literal(gt(lit("N"), col("flag")), "N", Operator::Lt)]
+    #[case::none(eq(col("flag"), lit("Z")), "Z", Operator::Eq)]
+    #[crate::test]
+    async fn dictionary_string_comparisons_select_matching_rows(
+        #[case] filter: Expression,
+        #[case] literal: &str,
+        #[case] operator: Operator,
+        #[values(SelectionImpl::Cub, SelectionImpl::Shared, SelectionImpl::SharedTyped)]
+        implementation: SelectionImpl,
+        #[values(false, true)] onpair: bool,
+    ) -> VortexResult<()> {
+        // Six values keep `!= A` (5/6 of rows) above the compaction threshold; compare its
+        // selection directly instead.
+        let values = ["A", "C", "E", "N", "R", "T"];
+        let keep = |value: &str| match operator {
+            Operator::Eq => value == literal,
+            Operator::NotEq => value != literal,
+            _ => value < literal,
+        };
+        let batch = if onpair {
+            onpair_batch(&values)?
+        } else {
+            dictionary_batch(&values)?
+        };
+        let selected = select_with_impl(batch, filter, implementation).await?;
+        let rows = struct_rows(&selected)?;
+        let expected: Vec<(i32, String)> = (0..6000)
+            .map(|row| (row, values[row as usize % values.len()].to_string()))
+            .filter(|(_, flag)| keep(flag))
+            .collect();
+        // The selection is a superset holding every matching row, in order.
+        let matching: Vec<_> = rows
+            .iter()
+            .filter(|(_, flag)| keep(flag))
+            .cloned()
+            .collect();
+        assert_eq!(matching, expected);
+        // One matching code is exact. Dictionary values here are in string order, so their
+        // code ranges are exact too; OnPair token codes are not ordered by string.
+        let exact = operator == Operator::Eq || (!onpair && operator == Operator::Lt);
+        if exact && expected.len() as f64 <= SELECTED_FRACTION_MAX * 6000.0 {
+            assert_eq!(rows.len(), expected.len());
+        }
+        Ok(())
+    }
+
+    /// The `(x, flag)` rows of a decoded host struct batch.
+    fn struct_rows(batch: &ArrayRef) -> VortexResult<Vec<(i32, String)>> {
+        let mut ctx = VortexSession::empty()
+            .with::<ArraySession>()
+            .create_execution_ctx();
+        let batch = batch.clone().execute::<StructArray>(&mut ctx)?;
+        let x = batch
+            .unmasked_field_by_name("x")?
+            .clone()
+            .execute::<PrimitiveArray>(&mut ctx)?;
+        let flag = batch
+            .unmasked_field_by_name("flag")?
+            .clone()
+            .execute::<VarBinViewArray>(&mut ctx)?;
+        Ok(x.as_slice::<i32>()
+            .iter()
+            .enumerate()
+            .map(|(row, x)| {
+                let flag = flag.bytes_at(row);
+                (*x, String::from_utf8_lossy(flag.as_slice()).into_owned())
+            })
+            .collect())
+    }
+
+    /// A string comparison combines with a primitive one in the same conjunction.
+    #[crate::test]
+    async fn dictionary_and_primitive_comparisons_combine() -> VortexResult<()> {
+        let values = ["A", "N", "R"];
+        let filter = and(eq(col("flag"), lit("R")), lt(col("x"), lit(3000i32)));
+        let selected = select(dictionary_batch(&values)?, filter).await?;
+        let rows: Vec<i32> = (0..3000).filter(|row| row % 3 == 2).collect();
+        let x = PrimitiveArray::from_iter(rows.iter().copied()).into_array();
+        let flag = VarBinViewArray::from_iter_str(rows.iter().map(|_| "R")).into_array();
+        let expected = StructArray::from_fields(&[("x", x), ("flag", flag)])?.into_array();
+        let mut ctx = VortexSession::empty()
+            .with::<ArraySession>()
+            .create_execution_ctx();
+        assert_arrays_eq!(expected, selected, &mut ctx);
+        Ok(())
+    }
+
+    /// Non-contiguous matches select the code range between them, a superset that keeps most
+    /// rows here; string comparisons of columns without codes keep their batch.
+    #[crate::test]
+    async fn other_string_selections_keep_the_batch() -> VortexResult<()> {
+        let values = ["N", "A", "R", "B"];
+        let selected = select(dictionary_batch(&values)?, gt(col("flag"), lit("M"))).await?;
+        assert_eq!(selected.len(), 6000);
+
+        let x = PrimitiveArray::from_iter(0i32..5000).into_array();
+        let s = VarBinViewArray::from_iter_str((0..5000).map(|i| format!("s{i}"))).into_array();
+        let batch = StructArray::from_fields(&[("x", x), ("s", s)])?.into_array();
+        let selected = select(batch, eq(col("s"), lit("s7"))).await?;
+        assert_eq!(selected.len(), 5000);
+
+        // OnPair rows of several tokens have no single code to select by.
+        let mut ctx = vortex::array::array_session().create_execution_ctx();
+        let dtype = DType::Utf8(Nullability::NonNullable);
+        let strings = (0..5000).map(|i| Some(format!("value number {}", i % 7)));
+        let varbin = VarBinArray::from_iter(strings, dtype).into_array();
+        let s = onpair_compress(&varbin, DEFAULT_CONFIG, &mut ctx)?;
+        assert!(s.as_opt::<OnPair>().is_some());
+        let x = PrimitiveArray::from_iter(0i32..5000).into_array();
+        let batch = StructArray::from_fields(&[("x", x), ("s", s)])?.into_array();
+        let filter = eq(col("s"), lit("value number 3"));
+        let comparisons = field_comparisons(&filter, batch.dtype())?;
+        let mut ctx = CudaSession::create_execution_ctx(&cuda_session())?;
+        // Not decoded here: the batch is returned unchanged before any device work.
+        let selected = select_batch(
+            batch.clone(),
+            &comparisons,
+            SelectionImpl::SharedTyped,
+            &mut ctx,
+        )
+        .await?;
+        assert_eq!(selected.len(), batch.len());
         Ok(())
     }
 
@@ -1698,9 +2186,11 @@ mod tests {
         );
         let mut comparisons = field_comparisons(&filter, batch.dtype())?;
         assert_eq!(comparisons.len(), 1);
-        let mut missing = comparisons[0].clone();
+        let ScanComparison::Primitive(mut missing) = comparisons[0].clone() else {
+            panic!("a primitive comparison");
+        };
         missing.field = "not_projected".into();
-        comparisons.insert(0, missing);
+        comparisons.insert(0, ScanComparison::Primitive(missing));
         let expected = batch.slice(0..100)?;
         let mut ctx = CudaSession::create_execution_ctx(&cuda_session())?;
         let selected = select_batch(batch, &comparisons, implementation, &mut ctx).await?;

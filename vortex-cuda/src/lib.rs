@@ -34,6 +34,7 @@ pub use device_buffer::CudaBufferExt;
 pub use device_buffer::CudaDeviceBuffer;
 pub use device_read_at::CopyDeviceReadAt;
 pub use exact_filter::FieldComparison;
+pub use exact_filter::ScanComparison;
 pub use exact_filter::field_comparisons;
 pub use exact_filter::select_rows;
 pub use executor::CudaDispatchMode;
