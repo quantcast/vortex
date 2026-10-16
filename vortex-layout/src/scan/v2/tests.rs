@@ -42,12 +42,12 @@ use vortex_io::segments::FetchTracker;
 use vortex_io::segments::IoIntent;
 use vortex_io::segments::IoOwnerId;
 use vortex_io::segments::RegisteredSource;
-use vortex_io::segments::SegmentHandle;
+use vortex_io::segments::IoHandle;
 use vortex_io::segments::SegmentIoService;
 use vortex_io::segments::SegmentIoSession;
-use vortex_io::segments::SegmentRequest;
-use vortex_io::segments::SharedBytes;
-use vortex_io::segments::SourceId;
+use vortex_io::segments::IoRequest;
+use vortex_io::segments::SharedResult;
+use vortex_io::segments::SegmentSourceId;
 use vortex_io::session::RuntimeSessionExt;
 use vortex_scan::strict_sorted_buffer::StrictSortedBuffer;
 use vortex_session::VortexSession;
@@ -176,18 +176,18 @@ impl SegmentIoSession for SourceSession {
     fn submit(
         &self,
         owner: IoOwnerId,
-        batch: &[SegmentRequest],
-    ) -> VortexResult<Vec<SegmentHandle>> {
+        batch: &[IoRequest],
+    ) -> VortexResult<Vec<IoHandle>> {
         let handles: Vec<_> = batch
             .iter()
             .map(|request| {
-                let bytes: SharedBytes = self
+                let bytes: SharedResult = self
                     .source
                     .request(SegmentId::from(request.key.segment))
                     .map_err(Arc::new)
                     .boxed()
                     .shared();
-                SegmentHandle::new(bytes, Arc::new(()))
+                IoHandle::new(bytes, Arc::new(()))
             })
             .collect();
         let mut fetches = self.fetches.lock();
@@ -237,7 +237,7 @@ fn scan_file(segments: &Arc<dyn SegmentSource>, layout: &LayoutRef) -> VortexRes
         locations,
         segment_io: RegisteredSource::new(
             Arc::new(SourceIo(Arc::clone(segments))),
-            SourceId(0),
+            SegmentSourceId(0),
             Arc::new(()),
         ),
     })

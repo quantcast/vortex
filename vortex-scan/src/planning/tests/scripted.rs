@@ -29,11 +29,11 @@ use vortex_error::VortexResult;
 use vortex_error::vortex_err;
 use vortex_io::segments::IoIntent;
 use vortex_io::segments::IoOwnerId;
-use vortex_io::segments::SegmentHandle;
+use vortex_io::segments::IoHandle;
 use vortex_io::segments::SegmentIoSession;
-use vortex_io::segments::SegmentKey;
-use vortex_io::segments::SegmentRequest;
-use vortex_io::segments::SourceId;
+use vortex_io::segments::IoKey;
+use vortex_io::segments::IoRequest;
+use vortex_io::segments::SegmentSourceId;
 use vortex_utils::aliases::hash_map::HashMap;
 
 use crate::planning::morsel::Morsel;
@@ -62,13 +62,13 @@ pub enum PlannerStep {
     Done,
     Continue,
     /// Publishes the batch and goes straight on to the next step.
-    NeedsIO(Vec<SegmentRequest>),
+    NeedsIO(Vec<IoRequest>),
     Planner(WorkScope, Vec<PlannerStep>),
     Morsel(WorkScope, Vec<MorselStep>),
     /// Publishes the batch, then waits until every request in it is delivered.
-    Io(Vec<SegmentRequest>),
+    Io(Vec<IoRequest>),
     /// Waits for fetches an earlier `NeedsIO` step published.
-    Await(Vec<SegmentKey>),
+    Await(Vec<IoKey>),
     /// Reports `Waiting` without having published anything.
     Wait,
 }
@@ -77,19 +77,19 @@ pub enum PlannerStep {
 pub enum MorselStep {
     Compute(MorselOutput),
     /// Publishes the batch, then waits until every request in it is delivered.
-    Io(Vec<SegmentRequest>),
+    Io(Vec<IoRequest>),
 }
 
 /// The keys a waiting step still expects.
-struct Pending(Vec<SegmentKey>);
+struct Pending(Vec<IoKey>);
 
 impl Pending {
-    fn of(batch: &[SegmentRequest]) -> Self {
+    fn of(batch: &[IoRequest]) -> Self {
         Self(batch.iter().map(|request| request.key).collect())
     }
 
     /// Removes a delivered key and returns whether the step has everything it waited for.
-    fn deliver(&mut self, name: &str, position: usize, key: SegmentKey) -> bool {
+    fn deliver(&mut self, name: &str, position: usize, key: IoKey) -> bool {
         let index = self
             .0
             .iter()
@@ -129,7 +129,7 @@ impl ScriptedPlanner {
 }
 
 impl ScriptedPlanner {
-    fn take_delivery(&mut self, key: SegmentKey) {
+    fn take_delivery(&mut self, key: IoKey) {
         self.log
             .push(format!("deliver {} {}", self.name, key.segment));
         let position = self.position;
@@ -152,7 +152,7 @@ impl ScriptedPlanner {
 }
 
 impl Planner for ScriptedPlanner {
-    fn deliver(&mut self, key: SegmentKey, _bytes: BufferHandle) {
+    fn deliver(&mut self, key: IoKey, _bytes: BufferHandle) {
         self.take_delivery(key);
     }
 
@@ -224,7 +224,7 @@ impl ScriptedMorsel {
 }
 
 impl Morsel for ScriptedMorsel {
-    fn deliver(&mut self, key: SegmentKey, _bytes: BufferHandle) {
+    fn deliver(&mut self, key: IoKey, _bytes: BufferHandle) {
         self.log
             .push(format!("deliver {} {}", self.name, key.segment));
         let position = self.position;
@@ -273,13 +273,13 @@ impl Morsel for ScriptedMorsel {
 }
 
 /// The key of `segment` in the one source the driver tests read.
-pub fn key(segment: u32) -> SegmentKey {
-    SegmentKey::new(SourceId(0), segment)
+pub fn key(segment: u32) -> IoKey {
+    IoKey::new(SegmentSourceId(0), segment)
 }
 
 /// A fetch of `segment`.
-pub fn fetch(segment: u32) -> SegmentRequest {
-    SegmentRequest::new(key(segment), IoIntent::Fetch)
+pub fn fetch(segment: u32) -> IoRequest {
+    IoRequest::new(key(segment), IoIntent::Fetch)
 }
 
 type FetchResult = Result<BufferHandle, Arc<VortexError>>;
@@ -309,9 +309,9 @@ struct Unfinished {
 /// and every fetch performed.
 #[derive(Default)]
 pub struct RecordingSession {
-    canned: Mutex<HashMap<SegmentKey, Result<ByteBuffer, String>>>,
-    submissions: Mutex<Vec<(IoOwnerId, SegmentRequest)>>,
-    performed: Mutex<Vec<SegmentKey>>,
+    canned: Mutex<HashMap<IoKey, Result<ByteBuffer, String>>>,
+    submissions: Mutex<Vec<(IoOwnerId, IoRequest)>>,
+    performed: Mutex<Vec<IoKey>>,
     unfinished: Mutex<Vec<Unfinished>>,
     order: Order,
     gated: bool,
@@ -352,11 +352,11 @@ impl RecordingSession {
         }
     }
 
-    pub fn submissions(&self) -> Vec<(IoOwnerId, SegmentRequest)> {
+    pub fn submissions(&self) -> Vec<(IoOwnerId, IoRequest)> {
         self.submissions.lock().clone()
     }
 
-    pub fn performed(&self) -> Vec<SegmentKey> {
+    pub fn performed(&self) -> Vec<IoKey> {
         self.performed.lock().clone()
     }
 }
@@ -365,14 +365,14 @@ impl SegmentIoSession for RecordingSession {
     fn submit(
         &self,
         owner: IoOwnerId,
-        batch: &[SegmentRequest],
-    ) -> VortexResult<Vec<SegmentHandle>> {
+        batch: &[IoRequest],
+    ) -> VortexResult<Vec<IoHandle>> {
         Ok(batch
             .iter()
             .map(|request| {
                 self.submissions.lock().push((owner, *request));
                 if request.intent != IoIntent::Fetch {
-                    return SegmentHandle::new(future::pending().boxed().shared(), Arc::new(()));
+                    return IoHandle::new(future::pending().boxed().shared(), Arc::new(()));
                 }
                 self.performed.lock().push(request.key);
                 let result = match self.canned.lock().get(&request.key) {
@@ -395,7 +395,7 @@ impl SegmentIoSession for RecordingSession {
                     })
                     .boxed()
                     .shared();
-                SegmentHandle::new(bytes, Arc::new(()))
+                IoHandle::new(bytes, Arc::new(()))
             })
             .collect())
     }

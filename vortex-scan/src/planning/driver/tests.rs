@@ -40,8 +40,8 @@ fn gated_source() -> Arc<RecordingSession> {
     Arc::new(RecordingSession::new(Order::Fifo, true))
 }
 
-fn with_intent(segment: u32, intent: IoIntent) -> SegmentRequest {
-    SegmentRequest::new(key(segment), intent)
+fn with_intent(segment: u32, intent: IoIntent) -> IoRequest {
+    IoRequest::new(key(segment), intent)
 }
 
 fn one_batch_morsel(scope: WorkScope, rows: u64) -> PlannerStep {
@@ -613,7 +613,7 @@ fn a_waiting_item_is_not_revisited_per_delivery() -> VortexResult<()> {
     const FETCHES: u32 = 64;
     let log = Log::default();
     let io = RecordingSession::new(Order::Fifo, false);
-    let batch: Vec<SegmentRequest> = (0..FETCHES)
+    let batch: Vec<IoRequest> = (0..FETCHES)
         .map(|segment| {
             io.canned_bytes(segment, ByteBuffer::from(vec![0u8; 4]));
             fetch(segment)

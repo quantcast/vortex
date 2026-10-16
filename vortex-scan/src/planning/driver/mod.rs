@@ -40,10 +40,10 @@ use vortex_error::vortex_bail;
 use vortex_error::vortex_err;
 use vortex_io::segments::IoIntent;
 use vortex_io::segments::IoOwnerId;
-use vortex_io::segments::SegmentHandle;
+use vortex_io::segments::IoHandle;
 use vortex_io::segments::SegmentIoSession;
-use vortex_io::segments::SegmentKey;
-use vortex_io::segments::SegmentRequest;
+use vortex_io::segments::IoKey;
+use vortex_io::segments::IoRequest;
 use vortex_utils::aliases::hash_map::HashMap;
 use vortex_utils::aliases::hash_set::HashSet;
 
@@ -105,12 +105,12 @@ struct Work {
     next_child: u64,
     /// Published fetches not yet delivered. Each finishes with its key and result, so a report
     /// from the session yields exactly the fetches that finished.
-    fetches: FuturesUnordered<BoxFuture<'static, (SegmentKey, FetchResult)>>,
+    fetches: FuturesUnordered<BoxFuture<'static, (IoKey, FetchResult)>>,
     /// The keys of `fetches`, to reject a fetch published while one of the same key is
     /// outstanding.
-    outstanding: HashSet<SegmentKey>,
+    outstanding: HashSet<IoKey>,
     /// Announcements and prefetches, held until the item retires.
-    hints: Vec<SegmentHandle>,
+    hints: Vec<IoHandle>,
 }
 
 type FetchResult = Result<BufferHandle, Arc<VortexError>>;
@@ -470,7 +470,7 @@ impl Run {
 
     /// Registers the requests an item published with its root's session, and keeps their
     /// handles.
-    fn submit(&mut self, work: &mut Work, batch: Vec<SegmentRequest>) -> VortexResult<()> {
+    fn submit(&mut self, work: &mut Work, batch: Vec<IoRequest>) -> VortexResult<()> {
         if batch.is_empty() {
             vortex_bail!("compute() published an empty batch");
         }

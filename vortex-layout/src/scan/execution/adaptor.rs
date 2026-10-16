@@ -14,9 +14,9 @@ use vortex_error::VortexResult;
 use vortex_error::vortex_err;
 use vortex_error::vortex_panic;
 use vortex_io::segments::IoIntent;
-use vortex_io::segments::SegmentKey;
-use vortex_io::segments::SegmentRequest;
-use vortex_io::segments::SourceId;
+use vortex_io::segments::IoKey;
+use vortex_io::segments::IoRequest;
+use vortex_io::segments::SegmentSourceId;
 use vortex_scan::planning::planner::State;
 
 use crate::plan::physical::pipeline::ReadId;
@@ -39,7 +39,7 @@ pub(super) enum AdaptorStep {
     /// Control returns to the owner with CPU work still ready.
     Yield,
     /// Requests to publish, each returned once.
-    NeedsIO(Vec<SegmentRequest>),
+    NeedsIO(Vec<IoRequest>),
     /// Rows the plan produced.
     Piece(Piece),
 }
@@ -57,7 +57,7 @@ pub(super) struct ScanAdaptor {
     /// Orders the pieces handed out.
     next_piece: u64,
     locations: Arc<[SegmentLocation]>,
-    source: SourceId,
+    source: SegmentSourceId,
     /// Segments fetched and not yet delivered, with the scan reads waiting for each.
     outstanding: FxHashMap<u32, Vec<ReadId>>,
     /// A delivery the scan could not take, reported by the next compute.
@@ -66,7 +66,7 @@ pub(super) struct ScanAdaptor {
 
 impl ScanAdaptor {
     /// Wraps a scan of the file registered as `source`.
-    pub(super) fn new(scan: Scan, locations: Arc<[SegmentLocation]>, source: SourceId) -> Self {
+    pub(super) fn new(scan: Scan, locations: Arc<[SegmentLocation]>, source: SegmentSourceId) -> Self {
         Self {
             scan,
             pending: None,
@@ -150,13 +150,13 @@ impl ScanAdaptor {
         &mut self,
         read: ReadId,
         segment_id: SegmentId,
-        batch: &mut Vec<SegmentRequest>,
+        batch: &mut Vec<IoRequest>,
     ) -> VortexResult<()> {
         self.location(segment_id)?;
         let reads = self.outstanding.entry(*segment_id).or_default();
         if reads.is_empty() {
-            batch.push(SegmentRequest::new(
-                SegmentKey::new(self.source, *segment_id),
+            batch.push(IoRequest::new(
+                IoKey::new(self.source, *segment_id),
                 IoIntent::Fetch,
             ));
         }
@@ -167,7 +167,7 @@ impl ScanAdaptor {
     /// Hands a delivered segment to every scan read waiting for it. The driver only delivers
     /// fetches this adaptor published, so anything else is a driver bug. Bytes the scan cannot
     /// take fail the owner's next compute.
-    pub(super) fn set_segment(&mut self, key: SegmentKey, bytes: BufferHandle) {
+    pub(super) fn set_segment(&mut self, key: IoKey, bytes: BufferHandle) {
         let segment_id = SegmentId::from(key.segment);
         let Some(reads) = self.outstanding.remove(&key.segment) else {
             vortex_panic!("ScanAdaptor: delivery of {key:?}, which is not outstanding");
