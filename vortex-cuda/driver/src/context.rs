@@ -34,6 +34,9 @@ pub struct CudaContext {
     /// Timing-disabled events returned by finished accesses, reused to avoid creating and
     /// destroying an event per access.
     events: Mutex<Vec<sys::CUevent>>,
+    /// Frees allocations that other streams than their allocation stream accessed, so the
+    /// allocation stream never waits for those streams' work.
+    free_stream: sys::CUstream,
 }
 
 // SAFETY: The handles are driver handles usable from any thread; the pool is synchronized.
@@ -60,6 +63,8 @@ impl Eq for CudaContext {}
 impl Drop for CudaContext {
     fn drop(&mut self) {
         self.record_err(self.bind_to_thread());
+        // SAFETY: Created in `wrap` and destroyed once; queued frees still complete.
+        self.record_err(unsafe { sys::cuStreamDestroy_v2(self.free_stream) }.result());
         for event in std::mem::take(self.events.get_mut()) {
             // SAFETY: Pooled events are owned by the pool and no longer in use.
             self.record_err(unsafe { sys::cuEventDestroy_v2(event) }.result());
@@ -118,7 +123,26 @@ impl CudaContext {
                 sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED,
             )
         }?;
-        let context = Arc::new(Self {
+        let mut free_stream = std::ptr::null_mut();
+        // SAFETY: The context is valid; once current, the driver writes the new stream.
+        let created = unsafe {
+            sys::cuCtxSetCurrent(context).result().and_then(|()| {
+                sys::cuStreamCreate(&raw mut free_stream, sys::CU_STREAM_NON_BLOCKING).result()
+            })
+        };
+        if let Err(error) = created {
+            // SAFETY: Releases the retain, or destroys the creation, that `Drop` would have.
+            // The creation error is the one worth reporting.
+            let _released = unsafe {
+                if primary {
+                    sys::cuDevicePrimaryCtxRelease_v2(device)
+                } else {
+                    sys::cuCtxDestroy_v2(context)
+                }
+            };
+            return Err(error);
+        }
+        Ok(Arc::new(Self {
             device,
             context,
             ordinal,
@@ -126,9 +150,8 @@ impl CudaContext {
             primary,
             error_state: AtomicU32::new(0),
             events: Mutex::new(Vec::new()),
-        });
-        context.bind_to_thread()?;
-        Ok(context)
+            free_stream,
+        }))
     }
 
     /// The number of devices.
@@ -265,6 +288,38 @@ impl CudaContext {
     /// Waits already enqueued on it are unaffected by later records.
     pub(crate) fn give_event(&self, event: sys::CUevent) {
         self.events.lock().push(event);
+    }
+
+    /// Frees `pointer` on the free stream once the work recorded in `events` completes.
+    ///
+    /// The free stream only waits and frees, so a free never delays other work.
+    pub(crate) fn free_after(
+        &self,
+        events: impl IntoIterator<Item = sys::CUevent>,
+        pointer: sys::CUdeviceptr,
+    ) -> Result<(), DriverError> {
+        self.bind_to_thread()?;
+        for event in events {
+            // SAFETY: Both handles belong to this context and are valid.
+            unsafe {
+                sys::cuStreamWaitEvent(
+                    self.free_stream,
+                    event,
+                    sys::CUevent_wait_flags::CU_EVENT_WAIT_DEFAULT.0,
+                )
+            }
+            .result()?;
+        }
+        // SAFETY: Callers free an allocation of this context once, after ordering every access
+        // before the free stream's queued work.
+        unsafe {
+            if self.has_async_alloc {
+                sys::cuMemFreeAsync(pointer, self.free_stream).result()
+            } else {
+                sys::cuStreamSynchronize(self.free_stream).result()?;
+                sys::cuMemFree_v2(pointer).result()
+            }
+        }
     }
 
     /// The number of events waiting in the pool.

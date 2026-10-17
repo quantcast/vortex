@@ -18,7 +18,9 @@
 //! - Reads on the allocation stream, and the allocation itself, record nothing. If a later
 //!   access on another stream must follow them, it records the allocation stream at that time
 //!   and waits for that, which also covers them because they were enqueued earlier.
-//! - The free runs on the allocation stream after waiting only for other streams' accesses.
+//! - The free runs on the allocation stream if no other stream accessed the allocation, and
+//!   otherwise on the context's free stream after waiting for the accesses, so the allocation
+//!   stream never waits for other streams.
 //!
 //! Callers must use a pointer only on the stream they passed when obtaining it, and keep the
 //! returned [`SyncOnDrop`] alive until the work using it is enqueued.
@@ -195,21 +197,41 @@ impl Access {
         Ok(())
     }
 
-    /// Makes the allocation stream wait for every other stream's access before a free.
-    fn before_free(&self, owner: &CudaStream) -> Result<(), DriverError> {
+    /// Frees `pointer` after every access.
+    ///
+    /// An allocation only the allocation stream used is freed there, in order. Otherwise the
+    /// context's free stream waits for the accesses: freeing on the allocation stream would
+    /// make all its later work, such as the next file copies, wait for other streams' reads.
+    fn free(&self, owner: &CudaStream, pointer: sys::CUdeviceptr) -> Result<(), DriverError> {
+        let context = owner.context();
         owner.bind()?;
-        let state = self.state.lock();
+        let mut state = self.state.lock();
         let id = owner.id();
-        if let Some(write) = state.write
-            && write.stream != id
-            && !state.waited.contains(&id)
-        {
-            owner.wait_raw(write.event)?;
+        let crossed =
+            !state.reads.is_empty() || state.write.is_some_and(|write| write.stream != id);
+        if !crossed {
+            return owner.free_raw(pointer);
         }
-        for read in &state.reads {
-            owner.wait_raw(read.event)?;
+        // The allocation stream's unrecorded work: the allocation and its own reads.
+        if state.allocation_stream_pending {
+            let event = match state.snapshot {
+                Some(event) => event,
+                None => {
+                    let event = context.take_event()?;
+                    state.snapshot = Some(event);
+                    event
+                }
+            };
+            owner.record_raw(event)?;
+            state.allocation_stream_pending = false;
         }
-        Ok(())
+        let events = state
+            .write
+            .iter()
+            .chain(&state.reads)
+            .map(|recorded| recorded.event)
+            .chain(state.snapshot);
+        context.free_after(events, pointer)
     }
 
     /// Returns the access events to the context's pool.
@@ -295,7 +317,7 @@ impl std::fmt::Debug for SyncOnDrop<'_> {
     }
 }
 
-/// A typed device allocation, freed in stream order on its allocation stream.
+/// A typed device allocation, freed in stream order after its accesses.
 pub struct CudaSlice<T> {
     pointer: sys::CUdeviceptr,
     len: usize,
@@ -323,8 +345,7 @@ impl<T> std::fmt::Debug for CudaSlice<T> {
 impl<T> Drop for CudaSlice<T> {
     fn drop(&mut self) {
         let context = self.stream.context();
-        context.record_err(self.access.before_free(&self.stream));
-        context.record_err(self.stream.free_raw(self.pointer));
+        context.record_err(self.access.free(&self.stream, self.pointer));
         self.access.release(context);
     }
 }

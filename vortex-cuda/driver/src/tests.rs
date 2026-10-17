@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::ffi::c_void;
 use std::sync::Arc;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use crate::CudaContext;
 use crate::CudaStream;
 use crate::DevicePtr;
 use crate::DevicePtrMut;
 use crate::DriverError;
+use crate::result::stream::launch_host_function;
 use crate::sys;
 
 /// A context and two streams, or `None` without a CUDA device.
@@ -75,6 +79,56 @@ fn frees_follow_reads_on_other_streams() -> Result<(), DriverError> {
         assert!(reader.clone_dtoh(copy)?.iter().all(|value| *value == 7));
     }
     assert!(owner.clone_dtoh(&reused)?.iter().all(|value| *value == 9));
+    context.check_err()
+}
+
+/// Blocks the calling driver thread until the gate's sender sends or drops.
+unsafe extern "C" fn wait_for_gate(gate: *mut c_void) {
+    // SAFETY: The test leaks a boxed receiver for this one call and reclaims it here.
+    let gate = unsafe { Box::from_raw(gate.cast::<mpsc::Receiver<()>>()) };
+    let _opened = gate.recv();
+}
+
+/// Freeing an allocation another stream still reads does not hold up the allocation stream:
+/// its later work runs while the read is blocked, as later file copies must while a decode
+/// reads earlier segments.
+#[test]
+fn frees_do_not_stall_the_allocation_stream() -> Result<(), DriverError> {
+    let Some((context, owner, reader)) = streams() else {
+        return Ok(());
+    };
+    let (open, gate) = mpsc::channel::<()>();
+    // SAFETY: The reader's work runs only after the gate opens; the host function makes no CUDA
+    // calls and owns the boxed receiver.
+    unsafe {
+        launch_host_function(
+            reader.cu_stream(),
+            wait_for_gate,
+            Box::into_raw(Box::new(gate)).cast(),
+        )
+    }?;
+    let device = owner.clone_htod(&[3u8; 1 << 20])?;
+    // SAFETY: Fully written by the copy below.
+    let mut copy = unsafe { reader.alloc::<u8>(1 << 20) }?;
+    reader.memcpy_dtod(&device, &mut copy)?;
+    drop(device);
+    // An asynchronous memset: a pageable upload could block this thread behind the gate.
+    let later = owner.alloc_zeros::<u8>(1 << 20)?;
+
+    let (done, finished) = mpsc::channel();
+    let waiter = Arc::clone(&owner);
+    let synchronized = std::thread::spawn(move || {
+        let _sent = done.send(waiter.synchronize());
+    });
+    let unblocked = finished.recv_timeout(Duration::from_secs(10));
+    drop(open);
+    assert!(synchronized.join().is_ok());
+    assert!(
+        matches!(unblocked, Ok(Ok(()))),
+        "the allocation stream waited for the blocked read: {unblocked:?}"
+    );
+    assert!(owner.clone_dtoh(&later)?.iter().all(|value| *value == 0));
+    assert!(reader.clone_dtoh(&copy)?.iter().all(|value| *value == 3));
     context.check_err()
 }
 
