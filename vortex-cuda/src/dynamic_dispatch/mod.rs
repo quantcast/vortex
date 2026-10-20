@@ -19,7 +19,6 @@
 
 use std::borrow::Borrow;
 use std::mem::size_of;
-use std::sync::Arc;
 
 use cudarc::driver::DevicePtr;
 use cudarc::driver::LaunchConfig;
@@ -372,6 +371,9 @@ impl ScalarOp {
     }
 }
 
+// SAFETY: `InlinePlan` is a plain byte array matching the kernel parameter's C layout.
+unsafe impl cudarc::driver::DeviceRepr for InlinePlan {}
+
 impl MaterializedPlan {
     pub fn execute(self, len: usize, ctx: &mut CudaExecutionCtx) -> VortexResult<Canonical> {
         let output_ptype = self.dispatch_plan.output_ptype();
@@ -416,15 +418,16 @@ impl MaterializedPlan {
         }
 
         let mut output = ctx.device_alloc::<T>(len.next_multiple_of(1024))?;
-
-        // Upload the packed plan bytes to the device.
-        let device_plan = Arc::new(
-            ctx.stream()
-                .clone_htod(self.dispatch_plan.as_bytes())
-                .map_err(|e| vortex_err!("copy plan to device: {e}"))?,
-        );
-
-        let cuda_function = ctx.load_function("dynamic_dispatch", &[T::PTYPE])?;
+        let plan_bytes = self.dispatch_plan.as_bytes();
+        // Small plans travel as a kernel parameter. Uploading them instead costs an allocation
+        // and a host-to-device copy per launch, which dominates decoding small chunks.
+        let inline_plan = (plan_bytes.len() <= INLINE_PLAN_BYTES as usize).then(|| {
+            let mut plan = InlinePlan {
+                bytes: [0; INLINE_PLAN_BYTES as usize],
+            };
+            plan.bytes[..plan_bytes.len()].copy_from_slice(plan_bytes);
+            plan
+        });
         let num_blocks = u32::try_from(len.div_ceil(ELEMENTS_PER_BLOCK as usize))?;
         let config = LaunchConfig {
             grid_dim: (num_blocks, 1, 1),
@@ -447,16 +450,35 @@ impl MaterializedPlan {
             .map(|view| view.device_ptr(&stream).1)
             .collect::<Vec<_>>();
 
-        let (plan_ptr, plan_read_record) = device_plan.device_ptr(&stream);
         let array_len_u64 = len as u64;
 
-        ctx.launch_kernel_config(&cuda_function, config, len, |args| {
-            args.arg(&mut output);
-            args.arg(&array_len_u64);
-            args.arg(&plan_ptr);
-        })?;
+        if let Some(plan) = inline_plan {
+            let cuda_function = ctx.load_function_with_suffixes(
+                "dynamic_dispatch",
+                &["inline", &T::PTYPE.to_string()],
+            )?;
+            ctx.launch_kernel_config(&cuda_function, config, len, |args| {
+                args.arg(&mut output);
+                args.arg(&array_len_u64);
+                args.arg(&plan);
+            })?;
+        } else {
+            // Upload the packed plan bytes to the device.
+            let device_plan = ctx
+                .stream()
+                .clone_htod(plan_bytes)
+                .map_err(|e| vortex_err!("copy plan to device: {e}"))?;
+            let cuda_function = ctx.load_function("dynamic_dispatch", &[T::PTYPE])?;
+            let (plan_ptr, plan_read_record) = device_plan.device_ptr(&stream);
+            ctx.launch_kernel_config(&cuda_function, config, len, |args| {
+                args.arg(&mut output);
+                args.arg(&array_len_u64);
+                args.arg(&plan_ptr);
+            })?;
+            drop(plan_read_record);
+        }
 
-        drop((device_buffer_read_records, plan_read_record));
+        drop(device_buffer_read_records);
 
         let output = CudaDeviceBuffer::new(output);
         Ok(Canonical::Primitive(PrimitiveArray::from_buffer_handle(

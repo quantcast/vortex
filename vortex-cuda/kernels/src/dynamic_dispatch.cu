@@ -670,3 +670,23 @@ dynamic_dispatch(T *__restrict output, uint64_t array_len, const uint8_t *__rest
     }
 
 FOR_EACH_UNSIGNED_INT(GENERATE_KERNEL)
+
+// Plans of at most `INLINE_PLAN_BYTES` bytes are passed by value as a kernel parameter instead of
+// through a device buffer, which saves an allocation and a host-to-device copy per launch. The
+// `__grid_constant__` parameter is read in place from the constant bank rather than copied per
+// thread; it needs compute capability 7.0.
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 700
+#define VX_GRID_CONSTANT __grid_constant__
+#else
+#define VX_GRID_CONSTANT
+#endif
+
+#define GENERATE_INLINE_KERNEL(suffix, Type)                                                                 \
+    extern "C" __global__ void __launch_bounds__(BLOCK_SIZE, 32)                                             \
+        dynamic_dispatch_inline_##suffix(Type *__restrict output,                                            \
+                                         uint64_t array_len,                                                 \
+                                         const VX_GRID_CONSTANT struct InlinePlan plan) {                    \
+        dynamic_dispatch<Type>(output, array_len, plan.bytes);                                               \
+    }
+
+FOR_EACH_UNSIGNED_INT(GENERATE_INLINE_KERNEL)

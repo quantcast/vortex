@@ -228,6 +228,14 @@ struct PackedStage {
     enum PTypeTag source_ptype; // PType produced by the source op
 };
 
+/// Largest packed plan passed to the kernel by value; larger plans go through a device buffer.
+#define INLINE_PLAN_BYTES 1024
+
+/// A packed plan passed by value, zero-padded after `PlanHeader::plan_size_bytes`.
+struct __attribute__((aligned(8))) InlinePlan {
+    uint8_t bytes[INLINE_PLAN_BYTES];
+};
+
 /// Header for the packed plan byte buffer.
 struct __attribute__((aligned(8))) PlanHeader {
     uint8_t num_stages;
