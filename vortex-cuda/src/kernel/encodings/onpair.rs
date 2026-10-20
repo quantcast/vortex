@@ -59,7 +59,7 @@ use vortex::buffer::Buffer;
 use vortex::dtype::DType;
 use vortex::dtype::NativePType;
 use vortex::dtype::PType;
-
+use vortex::encodings::sequence::Sequence;
 use vortex::error::VortexExpect;
 use vortex::error::VortexResult;
 use vortex::error::vortex_bail;
@@ -300,7 +300,7 @@ async fn decode_onpair_bytes(
     // split dictionary staging. The per-row lengths stay encoded until an
     // output path builds row offsets from them.
     let lengths = onpair.uncompressed_lengths().clone();
-    let codes_offsets = decode_primitive_child(onpair.codes_offsets().clone(), ctx).await?;
+    let codes_offsets = window_boundaries(onpair.codes_offsets().clone(), ctx).await?;
     let codes = decode_primitive_child(onpair.codes().clone(), ctx).await?;
     let dict = stage_dict(onpair, ctx).await?;
 
@@ -610,6 +610,33 @@ async fn decode_primitive_child(
     Ok(child.execute_cuda(ctx).await?.into_primitive())
 }
 
+/// The `codes_offsets` values the window kernel reads: with at least two
+/// elements it only reads the first and the last, the window's token bounds.
+///
+/// A `Sequence` child, written when every row holds the same number of
+/// tokens, yields both on the host as a two-element array, so the whole child
+/// is never materialized. Other encodings are decoded in full.
+// The values wrap at the output width like the sequence kernel's.
+#[expect(clippy::cast_possible_truncation)]
+async fn window_boundaries(
+    codes_offsets: ArrayRef,
+    ctx: &mut CudaExecutionCtx,
+) -> VortexResult<PrimitiveArray> {
+    let len = codes_offsets.len();
+    if len >= 2
+        && let Some(sequence) = codes_offsets.as_opt::<Sequence>()
+    {
+        let (base, step) = sequence.wrapping_bits()?;
+        let last = base.wrapping_add(step.wrapping_mul(u64::try_from(len - 1)?));
+        return Ok(match_each_integer_ptype!(sequence.ptype(), |O| {
+            PrimitiveArray::new(
+                Buffer::from(vec![base as O, last as O]),
+                Validity::NonNullable,
+            )
+        }));
+    }
+    decode_primitive_child(codes_offsets, ctx).await
+}
 
 /// The `dict_offsets` child, decoded and widened to the `u32` the dictionary stores.
 ///
@@ -668,7 +695,6 @@ mod tests {
     use vortex::array::IntoArray;
     use vortex::array::arrays::Constant;
     use vortex::array::arrays::ConstantArray;
-    use vortex::array::arrays::Primitive;
     use vortex::array::arrays::VarBinArray;
     use vortex::array::assert_arrays_eq;
     use vortex::buffer::Buffer;
@@ -1047,10 +1073,11 @@ mod tests {
         Ok(())
     }
 
-    /// Constant lengths build Arrow offsets without materialization. Keep code offsets primitive
-    /// to isolate this path, including a slice whose code offsets no longer start at zero.
+    /// Fixed-width strings are written with a `Sequence` of code offsets, one token per row, and
+    /// `Constant` lengths. Both are consumed without materializing them; the output must match
+    /// the plain children's, also for a slice whose sequence no longer starts at zero.
     #[crate::test]
-    async fn test_cuda_onpair_varbin_primitive_offsets_constant_lengths() -> VortexResult<()> {
+    async fn test_cuda_onpair_varbin_sequence_offsets_constant_lengths() -> VortexResult<()> {
         let mut cuda_ctx = cuda_ctx_with_varbin_layout(VarBinExportLayout::VarBin)?;
         let values: Vec<&'static [u8]> = (0..3000)
             .map(|row| [&b"A"[..], b"N", b"R"][row % 3])
@@ -1064,7 +1091,8 @@ mod tests {
         .try_downcast::<OnPair>()
         .map_err(|array| vortex_err!("expected OnPair array, got {}", array.encoding_id()))?;
 
-        // Rebuild with primitive code offsets and constant lengths.
+        // Rebuild with the encoded children, after checking that they are equivalent.
+        let offsets_ptype = plain.codes_offsets().dtype().as_ptype();
         let codes_offsets = plain
             .codes_offsets()
             .cast(DType::Primitive(PType::U64, Nullability::NonNullable))?
@@ -1075,7 +1103,9 @@ mod tests {
             expected_codes_offsets.as_slice()
         );
         let lengths_ptype = plain.uncompressed_lengths().dtype().as_ptype();
-
+        let sequence = match_each_integer_ptype!(offsets_ptype, |O| {
+            Sequence::try_new_typed::<O>(0, 1, Nullability::NonNullable, rows + 1)?.into_array()
+        });
         let lengths = match_each_integer_ptype!(lengths_ptype, |L| {
             ConstantArray::new(1 as L, rows).into_array()
         });
@@ -1084,7 +1114,7 @@ mod tests {
             plain.dict_bytes_handle().clone(),
             plain.dict_offsets().clone(),
             plain.codes().clone(),
-            codes_offsets.into_array(),
+            sequence,
             lengths,
             plain.array_validity(),
         )?;
@@ -1099,7 +1129,7 @@ mod tests {
                 .map_err(|array| {
                     vortex_err!("slice changed encoding to {}", array.encoding_id())
                 })?;
-            assert!(sliced.codes_offsets().is::<Primitive>());
+            assert!(sliced.codes_offsets().is::<Sequence>());
             assert!(sliced.uncompressed_lengths().is::<Constant>());
             let output = decode_onpair_varbin(sliced, &mut cuda_ctx).await?;
             assert_eq!(output.len, range.len());
