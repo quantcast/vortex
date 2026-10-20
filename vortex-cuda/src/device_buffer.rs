@@ -7,6 +7,7 @@ use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::mem::ManuallyDrop;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -24,6 +25,7 @@ use vortex::error::VortexResult;
 use vortex::error::vortex_ensure;
 use vortex::error::vortex_err;
 use vortex::error::vortex_panic;
+use vortex_cuda_driver::CudaContext;
 use vortex_cuda_driver::CudaSlice;
 use vortex_cuda_driver::CudaView;
 use vortex_cuda_driver::CudaViewMut;
@@ -43,16 +45,20 @@ static PINNED_STAGING: LazyLock<Mutex<Vec<PinnedStagingBuffer>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
 /// A pooled pinned host allocation; the pointer is only accessed by its current owner.
-struct PinnedStagingBuffer(*mut u8);
+struct PinnedStagingBuffer {
+    ptr: *mut u8,
+    // Portable allocations are usable from every context, but freed when their owner resets.
+    _context: Arc<CudaContext>,
+}
 
 // SAFETY: The buffer is plain host memory owned by one `PinnedStaging` at a time.
 unsafe impl Send for PinnedStagingBuffer {}
 
 /// A pinned staging buffer taken from the pool. It returns to the pool only through `release`,
-/// after its copy completed: dropping it otherwise leaks the buffer, because a cancelled copy
-/// may still be writing into it.
+/// after its copy completed: dropping it otherwise leaks the allocation and its context,
+/// because a cancelled copy may still be writing into it.
 struct PinnedStaging {
-    ptr: *mut u8,
+    buffer: ManuallyDrop<PinnedStagingBuffer>,
 }
 
 // SAFETY: See `PinnedStagingBuffer`.
@@ -60,15 +66,22 @@ unsafe impl Send for PinnedStaging {}
 
 impl PinnedStaging {
     /// Take a pooled buffer or allocate one. The CUDA context must be bound to this thread.
-    fn take() -> VortexResult<Self> {
+    fn take(context: &Arc<CudaContext>) -> VortexResult<Self> {
         if let Some(buffer) = PINNED_STAGING.lock().pop() {
-            return Ok(Self { ptr: buffer.0 });
+            return Ok(Self {
+                buffer: ManuallyDrop::new(buffer),
+            });
         }
         // The pool is process-wide, so the allocation must be pinned for every context.
         // SAFETY: Allocating host memory has no preconditions beyond a bound context.
         let ptr = unsafe { malloc_host(PINNED_STAGING_BYTES, sys::CU_MEMHOSTALLOC_PORTABLE) }
             .map_err(|e| vortex_err!("Failed to allocate pinned staging memory: {}", e))?;
-        Ok(Self { ptr: ptr.cast() })
+        Ok(Self {
+            buffer: ManuallyDrop::new(PinnedStagingBuffer {
+                ptr: ptr.cast(),
+                _context: Arc::clone(context),
+            }),
+        })
     }
 }
 
@@ -81,12 +94,14 @@ impl PinnedStaging {
     unsafe fn bytes(&self, len: usize) -> &[u8] {
         debug_assert!(len <= PINNED_STAGING_BYTES);
         // SAFETY: Guaranteed by the caller.
-        unsafe { std::slice::from_raw_parts(self.ptr, len) }
+        unsafe { std::slice::from_raw_parts(self.buffer.ptr, len) }
     }
 
     /// Return the buffer to the pool once no copy writes into it anymore.
     fn release(self) {
-        PINNED_STAGING.lock().push(PinnedStagingBuffer(self.ptr));
+        PINNED_STAGING
+            .lock()
+            .push(ManuallyDrop::into_inner(self.buffer));
     }
 }
 
@@ -481,11 +496,11 @@ impl DeviceBuffer for CudaDeviceBuffer {
         // file copies that stalled every thread's CUDA calls for milliseconds, so small copies,
         // typically metadata, go through pinned staging and are awaited without the lock.
         if len <= PINNED_STAGING_BYTES {
-            let staging = PinnedStaging::take()?;
+            let staging = PinnedStaging::take(stream.context())?;
             // SAFETY: The staging buffer holds `PINNED_STAGING_BYTES` >= `len` bytes and is
             // released to the pool only after the stream callback reports completion.
             unsafe {
-                sys::cuMemcpyDtoHAsync_v2(staging.ptr.cast(), src_ptr, len, stream.cu_stream())
+                sys::cuMemcpyDtoHAsync_v2(staging.buffer.ptr.cast(), src_ptr, len, stream.cu_stream())
                     .result()
                     .map_err(|e| vortex_err!("Failed to schedule async copy to host: {}", e))?;
             }
