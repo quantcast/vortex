@@ -321,10 +321,11 @@ impl Matcher for AnyList {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::LazyLock;
+
     use futures::stream;
     use vortex_array::ArrayContext;
     use vortex_array::VortexSessionExecute;
-    use vortex_array::array_session;
     use vortex_array::arrays::BoolArray;
     use vortex_array::arrays::ChunkedArray;
     use vortex_array::arrays::ListArray;
@@ -334,6 +335,7 @@ mod tests {
     use vortex_array::validity::Validity;
     use vortex_buffer::buffer;
     use vortex_io::session::RuntimeSession;
+    use vortex_session::VortexSession;
 
     use super::*;
     use crate::layouts::chunked::writer::ChunkedLayoutStrategy;
@@ -343,8 +345,10 @@ mod tests {
     use crate::sequence::SequentialArrayStreamExt;
     use crate::session::LayoutSession;
 
+    static SESSION: LazyLock<VortexSession> = LazyLock::new(VortexSession::empty);
+
     fn layout_test_session() -> VortexSession {
-        array_session()
+        VortexSession::empty()
             .with::<LayoutSession>()
             .with::<RuntimeSession>()
             .with_tokio()
@@ -382,7 +386,7 @@ mod tests {
     }
 
     fn create_basic_list(validity: Validity) -> ArrayRef {
-        let mut ctx = array_session().create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         ListArray::try_new(
             buffer![1i32, 2, 3, 4, 5].into_array(),
             buffer![0u32, 2, 5, 5].into_array(),
@@ -457,7 +461,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_of_struct_tree() -> VortexResult<()> {
-        let mut ctx = array_session().create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let struct_array = StructArray::from_fields(
             [
                 ("a", buffer![1i32, 2, 3, 4, 5].into_array()),
@@ -492,7 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_of_list_tree() -> VortexResult<()> {
-        let mut ctx = array_session().create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let inner_list = ListArray::try_new(
             buffer![1i32, 2, 3, 4, 5, 6].into_array(),
             buffer![0u32, 2, 5, 5, 6].into_array(),
@@ -523,7 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_of_list_of_list_tree() -> VortexResult<()> {
-        let mut ctx = array_session().create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let innermost = ListArray::try_new(
             buffer![1i32, 2, 3, 4].into_array(),
             buffer![0u32, 2, 4].into_array(),
@@ -564,7 +568,7 @@ mod tests {
 
     #[tokio::test]
     async fn chunked_list_input_with_chunked_strategy_succeeds() -> VortexResult<()> {
-        let mut ctx = array_session().create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let chunk0 = ListArray::try_new(
             buffer![1i32, 2, 3].into_array(),
             buffer![0u32, 2, 3].into_array(),

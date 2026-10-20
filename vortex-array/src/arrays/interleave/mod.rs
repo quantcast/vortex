@@ -456,16 +456,20 @@ fn value_validity_array(value: &ArrayRef) -> VortexResult<ArrayRef> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::LazyLock;
+
     use vortex_error::VortexResult;
+    use vortex_session::VortexSession;
 
     use super::*;
     use crate::Canonical;
     use crate::VortexSessionExecute;
-    use crate::array_session;
     use crate::arrays::BoolArray;
     use crate::arrays::PrimitiveArray;
     use crate::assert_arrays_eq;
     use crate::dtype::PType;
+
+    static SESSION: LazyLock<VortexSession> = LazyLock::new(VortexSession::empty);
 
     /// Reference (oracle) implementation of the interleave spec, used only to validate the optimized
     /// [execute](super::execute) path. It is intentionally simple and slow: it pulls each output
@@ -553,7 +557,7 @@ mod tests {
             InterleaveArray::try_new(values.clone(), array_indices.clone(), row_indices.clone())?
                 .into_array();
 
-        let mut ctx = array_session().create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let reference = interleave_reference(&values, &array_indices, &row_indices, &mut ctx)?;
 
         assert_arrays_eq!(interleaved, reference, &mut ctx);
@@ -691,7 +695,7 @@ mod tests {
             InterleaveArray::try_new(vec![value.clone(), value], array_indices, row_indices)?
                 .into_array();
 
-        let mut ctx = array_session().create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let err = interleaved
             .execute::<Canonical>(&mut ctx)
             .err()
@@ -712,7 +716,7 @@ mod tests {
             InterleaveArray::try_new(vec![value.clone(), value], array_indices, row_indices)?
                 .into_array();
 
-        let mut ctx = array_session().create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         let err = interleaved
             .execute::<Canonical>(&mut ctx)
             .err()
@@ -732,7 +736,7 @@ mod tests {
         let expected =
             PrimitiveArray::from_option_iter([Some(1.0f64), Some(10.0), Some(2.0), None])
                 .into_array();
-        let mut ctx = array_session().create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
         assert_arrays_eq!(interleaved, expected, &mut ctx);
         Ok(())
     }
@@ -747,7 +751,7 @@ mod tests {
             InterleaveArray::try_new(vec![constant, column], array_indices, row_indices)?
                 .into_array();
         let expected = PrimitiveArray::from_iter([1.0f64, 10.0, 1.0, 20.0]).into_array();
-        let mut ctx = array_session().create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
 
         assert_arrays_eq!(interleaved, expected, &mut ctx);
         Ok(())
@@ -768,7 +772,7 @@ mod tests {
                 .into_array();
         let expected =
             PrimitiveArray::from_option_iter([None, Some(10.0f64), None, Some(20.0)]).into_array();
-        let mut ctx = array_session().create_execution_ctx();
+        let mut ctx = SESSION.create_execution_ctx();
 
         assert_arrays_eq!(interleaved, expected, &mut ctx);
         Ok(())

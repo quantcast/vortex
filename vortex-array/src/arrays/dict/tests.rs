@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::sync::LazyLock;
+
 use vortex_buffer::buffer;
+use vortex_session::VortexSession;
 
 use super::DictArray;
 use crate::IntoArray;
 use crate::VortexSessionExecute;
-use crate::array_session;
 use crate::arrays::BoolArray;
 use crate::arrays::FixedSizeListArray;
 use crate::arrays::ListArray;
@@ -16,9 +18,11 @@ use crate::assert_arrays_eq;
 use crate::builders::builder_with_capacity_in;
 use crate::validity::Validity;
 
+static SESSION: LazyLock<VortexSession> = LazyLock::new(VortexSession::empty);
+
 #[test]
 fn test_scalar_at_null_code() {
-    let mut ctx = array_session().create_execution_ctx();
+    let mut ctx = SESSION.create_execution_ctx();
     let dict = DictArray::try_new(
         PrimitiveArray::from_option_iter(vec![None, Some(0u32), None]).into_array(),
         buffer![1i32].into_array(),
@@ -31,7 +35,7 @@ fn test_scalar_at_null_code() {
 
 #[test]
 fn test_canonicalize_dict_with_all_null_array_validity_codes() -> vortex_error::VortexResult<()> {
-    let mut ctx = array_session().create_execution_ctx();
+    let mut ctx = SESSION.create_execution_ctx();
     let codes = PrimitiveArray::new(
         buffer![0u32, 1],
         Validity::Array(BoolArray::from_iter([false, false]).into_array()),
@@ -72,7 +76,7 @@ fn test_canonicalize_dict_with_all_null_array_validity_codes() -> vortex_error::
 
 #[test]
 fn test_dict_display() {
-    let ctx = array_session().create_execution_ctx();
+    let ctx = SESSION.create_execution_ctx();
     let x = DictArray::try_new(
         buffer![0u8, 0, 0, 1, 0, 3].into_array(),
         VarBinArray::from(vec!["Hello", "你好", "Bonjour", "Hola"]).into_array(),
@@ -88,7 +92,7 @@ fn test_dict_display() {
 
 #[test]
 fn test_dict_list_dict_display() {
-    let mut ctx = array_session().create_execution_ctx();
+    let mut ctx = SESSION.create_execution_ctx();
     let elements = DictArray::try_new(
         buffer![0u8, 0, 0, 1, 0, 3, 3, 2].into_array(),
         <VarBinArray as FromIterator<_>>::from_iter([

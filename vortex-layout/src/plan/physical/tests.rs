@@ -38,6 +38,7 @@ use vortex_array::stats::as_stat_bitset_bytes;
 use vortex_error::VortexResult;
 use vortex_error::vortex_err;
 use vortex_mask::Mask;
+use vortex_session::VortexSession;
 use vortex_session::registry::CachedId;
 use vortex_session::registry::ReadContext;
 
@@ -1247,7 +1248,7 @@ fn stats_expression_rewrites_to_zoned_pruning_plan() -> VortexResult<()> {
         vec![max].into(),
     )?
     .into_layout();
-    let session = vortex_array::array_session();
+    let session = VortexSession::empty();
     let filter = gt(root(), lit(5_i32));
     let falsifier = filter
         .bind(&dtype)?
@@ -1325,7 +1326,7 @@ fn pruning_expression_partitions_across_row_idx_and_zoned_struct_field() -> Vort
     )
     .into_layout();
     let source = make_plan(layout)?;
-    let session = vortex_array::array_session();
+    let session = VortexSession::empty();
     let filter = and(
         gt(row_idx(), lit(11_u64)),
         gt(get_item("a", root()), lit(5_i32)),
@@ -1360,7 +1361,7 @@ fn legacy_layout(
         flat(5, dtype.clone(), 0),
         flat(2, zones_dtype, 1),
     ]);
-    let session = vortex_array::array_session();
+    let session = VortexSession::empty();
     let read_ctx = ReadContext::new([]);
     let build_ctx = LayoutBuildContext {
         session: &session,
