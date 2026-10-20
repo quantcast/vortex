@@ -200,6 +200,8 @@ pub(crate) fn launch_cuda_kernel_with_config(
 pub(crate) struct KernelLoader {
     /// Cache of loaded CUDA modules, keyed by module name
     modules: DashMap<String, Arc<CudaModule>>,
+    /// Function handles retain their modules within this session-scoped loader.
+    functions: DashMap<(String, String), CudaFunction>,
 }
 
 impl KernelLoader {
@@ -207,6 +209,7 @@ impl KernelLoader {
     pub fn new() -> Self {
         Self {
             modules: DashMap::default(),
+            functions: DashMap::default(),
         }
     }
 
@@ -233,6 +236,11 @@ impl KernelLoader {
             format!("{}_{}", module_name, type_suffixes.join("_"))
         };
 
+        let key = (module_name.to_string(), kernel_name.clone());
+        if let Some(function) = self.functions.get(&key) {
+            return Ok(function.value().clone());
+        }
+
         // Check if module is already cached
         let module = if let Some(entry) = self.modules.get(module_name) {
             Arc::clone(entry.value())
@@ -244,9 +252,11 @@ impl KernelLoader {
         };
 
         // Load the CUDA function from the compiled module.
-        module
+        let function = module
             .load_function(&kernel_name)
-            .map_err(|e| vortex_err!("Failed to load kernel function '{}': {}", kernel_name, e))
+            .map_err(|e| vortex_err!("Failed to load kernel function '{}': {}", kernel_name, e))?;
+        self.functions.insert(key, function.clone());
+        Ok(function)
     }
 
     /// Loads a CUDA module from a fatbin embedded in the binary.
@@ -261,5 +271,53 @@ impl KernelLoader {
         cuda_context
             .load_module(Ptx::from_binary(fatbin.to_vec()))
             .map_err(|e| vortex_err!("Failed to load embedded CUDA module {module_name}: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cudarc::driver::CudaContext;
+    use cudarc::driver::LaunchConfig;
+    use cudarc::driver::PushKernelArg;
+    use vortex::error::VortexResult;
+
+    use super::KernelLoader;
+
+    #[crate::test]
+    fn test_cached_function_retains_module() -> VortexResult<()> {
+        let ctx = CudaContext::new(0)?;
+        let stream = ctx.new_stream()?;
+        let kernel_loader = KernelLoader::new();
+        kernel_loader.load_function("constant_numeric", &["u32"], &ctx)?;
+        assert_eq!(kernel_loader.functions.len(), 1);
+
+        let function = kernel_loader.load_function("constant_numeric", &["u32"], &ctx)?;
+        assert_eq!(kernel_loader.functions.len(), 1);
+        assert!(
+            kernel_loader
+                .load_function("constant_numeric", &["missing"], &ctx)
+                .is_err()
+        );
+        assert_eq!(kernel_loader.functions.len(), 1);
+        // A cached handle must keep its module alive after the loader is dropped.
+        drop(kernel_loader);
+
+        let mut output = stream.alloc_zeros::<u32>(3)?;
+        let value = 42u32;
+        let len = 3u64;
+        let mut launch_args = stream.launch_builder(&function);
+        launch_args.arg(&mut output);
+        launch_args.arg(&value);
+        launch_args.arg(&len);
+        // SAFETY: The output holds len u32 values and all arguments match the kernel signature.
+        unsafe {
+            launch_args.launch(LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (64, 1, 1),
+                shared_mem_bytes: 0,
+            })?;
+        }
+        assert_eq!(stream.clone_dtoh(&output)?, vec![value; 3]);
+        Ok(())
     }
 }
