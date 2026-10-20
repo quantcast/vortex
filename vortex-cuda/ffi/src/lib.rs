@@ -577,9 +577,6 @@ mod tests {
     use arrow_schema::DataType;
     use arrow_schema::Field;
     use arrow_schema::Schema;
-    use cudarc::driver::CudaContext;
-    use cudarc::driver::result;
-    use cudarc::driver::sys::CUevent;
     use futures::TryStreamExt;
     use tempfile::NamedTempFile;
     use vortex::VortexSessionDefault;
@@ -634,6 +631,9 @@ mod tests {
     use vortex_cuda::arrow::release_schema;
     use vortex_cuda::layout::CudaFlat;
     use vortex_cuda::layout::CudaFlatLayoutStrategy;
+    use vortex_cuda_driver::CudaContext;
+    use vortex_cuda_driver::result;
+    use vortex_cuda_driver::sys::CUevent;
     use vortex_cuda_macros::cuda_not_available;
     use vortex_cuda_macros::test as cuda_test;
     use vortex_ffi::vx_array_free as free_test_array;

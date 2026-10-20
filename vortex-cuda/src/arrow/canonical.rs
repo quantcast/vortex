@@ -7,13 +7,6 @@ use std::ptr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cudarc::driver::CudaSlice;
-use cudarc::driver::DeviceRepr;
-use cudarc::driver::LaunchConfig;
-use cudarc::driver::PushKernelArg;
-use cudarc::driver::result::stream::wait_event;
-use cudarc::driver::sys::CUevent;
-use cudarc::driver::sys::CUevent_wait_flags;
 use futures::future::BoxFuture;
 use futures::future::join;
 use futures::future::try_join_all;
@@ -67,6 +60,13 @@ use vortex::error::vortex_ensure;
 use vortex::error::vortex_ensure_eq;
 use vortex::error::vortex_err;
 use vortex::extension::datetime::AnyTemporal;
+use vortex_cuda_driver::CudaSlice;
+use vortex_cuda_driver::DeviceRepr;
+use vortex_cuda_driver::LaunchConfig;
+use vortex_cuda_driver::PushKernelArg;
+use vortex_cuda_driver::result::stream::wait_event;
+use vortex_cuda_driver::sys::CUevent;
+use vortex_cuda_driver::sys::CUevent_wait_flags;
 use vortex_onpair::OnPair;
 
 use crate::CudaBufferExt;

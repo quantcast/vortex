@@ -22,12 +22,6 @@ use std::env;
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use cudarc::driver::CudaSlice;
-use cudarc::driver::DevicePtr;
-use cudarc::driver::DevicePtrMut;
-use cudarc::driver::DeviceRepr;
-use cudarc::driver::LaunchConfig;
-use cudarc::driver::PushKernelArg;
 use futures::StreamExt;
 use vortex::array::ArrayRef;
 use vortex::array::Canonical;
@@ -71,6 +65,12 @@ use vortex::scalar::Scalar;
 use vortex::session::VortexSession;
 use vortex_cub::filter::CubFilterable;
 use vortex_cub::filter::cudaStream_t;
+use vortex_cuda_driver::CudaSlice;
+use vortex_cuda_driver::DevicePtr;
+use vortex_cuda_driver::DevicePtrMut;
+use vortex_cuda_driver::DeviceRepr;
+use vortex_cuda_driver::LaunchConfig;
+use vortex_cuda_driver::PushKernelArg;
 use vortex_onpair::OnPair;
 use vortex_onpair::OnPairArraySlotsExt;
 

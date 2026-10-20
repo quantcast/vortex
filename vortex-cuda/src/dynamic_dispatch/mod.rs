@@ -20,9 +20,6 @@
 use std::borrow::Borrow;
 use std::mem::size_of;
 
-use cudarc::driver::DevicePtr;
-use cudarc::driver::LaunchConfig;
-use cudarc::driver::PushKernelArg;
 use vortex::array::Canonical;
 use vortex::array::IntoArray;
 use vortex::array::arrays::ConstantArray;
@@ -40,6 +37,9 @@ use vortex::dtype::PType;
 use vortex::error::VortexResult;
 use vortex::error::vortex_bail;
 use vortex::error::vortex_err;
+use vortex_cuda_driver::DevicePtr;
+use vortex_cuda_driver::LaunchConfig;
+use vortex_cuda_driver::PushKernelArg;
 
 use crate::CudaBufferExt;
 use crate::CudaDeviceBuffer;
@@ -402,7 +402,7 @@ impl ScalarOp {
 }
 
 // SAFETY: `InlinePlan` is a plain byte array matching the kernel parameter's C layout.
-unsafe impl cudarc::driver::DeviceRepr for InlinePlan {}
+unsafe impl vortex_cuda_driver::DeviceRepr for InlinePlan {}
 
 /// The bytes of a patch descriptor, as embedded in a packed plan.
 pub(crate) fn gpu_patches_bytes(patches: &GPUPatches) -> &[u8] {
@@ -448,7 +448,7 @@ impl MaterializedPlan {
         ctx: &mut CudaExecutionCtx,
     ) -> VortexResult<Canonical>
     where
-        T: cudarc::driver::DeviceRepr + vortex::dtype::NativePType,
+        T: vortex_cuda_driver::DeviceRepr + vortex::dtype::NativePType,
     {
         let nullability = self.validity.nullability();
 
@@ -539,9 +539,6 @@ mod tests {
     use std::ops::Range;
     use std::sync::Arc;
 
-    use cudarc::driver::DevicePtr;
-    use cudarc::driver::LaunchConfig;
-    use cudarc::driver::PushKernelArg;
     use rstest::rstest;
     use vortex::array::ArrayRef;
     use vortex::array::IntoArray;
@@ -583,6 +580,9 @@ mod tests {
     use vortex_array::arrays::FilterArray;
     use vortex_array::assert_arrays_eq;
     use vortex_array::patches::Patches;
+    use vortex_cuda_driver::DevicePtr;
+    use vortex_cuda_driver::LaunchConfig;
+    use vortex_cuda_driver::PushKernelArg;
 
     use super::*;
     use crate::CanonicalCudaExt;
@@ -689,7 +689,7 @@ mod tests {
     fn copy_raw_to_device(
         cuda_ctx: &CudaExecutionCtx,
         data: &[u32],
-    ) -> VortexResult<(u64, Arc<cudarc::driver::CudaSlice<u32>>)> {
+    ) -> VortexResult<(u64, Arc<vortex_cuda_driver::CudaSlice<u32>>)> {
         let device_buf = Arc::new(
             cuda_ctx
                 .stream()
