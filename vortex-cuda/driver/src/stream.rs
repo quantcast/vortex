@@ -215,6 +215,8 @@ impl CudaStream {
 pub struct CudaEvent {
     event: sys::CUevent,
     context: Arc<CudaContext>,
+    /// Whether the event came from the context's pool of timing-disabled events.
+    pooled: bool,
 }
 
 // SAFETY: Event handles are usable from any thread.
@@ -232,6 +234,11 @@ impl std::fmt::Debug for CudaEvent {
 
 impl Drop for CudaEvent {
     fn drop(&mut self) {
+        if self.pooled {
+            // Waits already enqueued on it are unaffected by later records.
+            self.context.give_event(self.event);
+            return;
+        }
         self.context.record_err(self.context.bind_to_thread());
         // SAFETY: Owned events are destroyed once; pending work completes regardless.
         self.context
@@ -244,6 +251,15 @@ impl CudaEvent {
         context: &Arc<CudaContext>,
         flags: sys::CUevent_flags,
     ) -> Result<Self, DriverError> {
+        // Creating and destroying events contends with copies for a driver lock; timing-disabled
+        // events are interchangeable, so reuse them.
+        if flags == sys::CUevent_flags::CU_EVENT_DISABLE_TIMING {
+            return Ok(Self {
+                event: context.take_event()?,
+                context: Arc::clone(context),
+                pooled: true,
+            });
+        }
         context.bind_to_thread()?;
         let mut event = std::ptr::null_mut();
         // SAFETY: The context is current; the driver writes the new event.
@@ -251,6 +267,7 @@ impl CudaEvent {
         Ok(Self {
             event,
             context: Arc::clone(context),
+            pooled: false,
         })
     }
 

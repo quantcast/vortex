@@ -489,6 +489,28 @@ mod tests {
     }
 
     #[crate::test]
+    fn allocation_on_unbound_thread_with_pooled_event() -> VortexResult<()> {
+        let (pool, stream) = setup()?;
+        // Reusing an event must not make allocation depend on event creation binding the context.
+        let event = pool
+            .ctx
+            .new_event(None)
+            .map_err(|error| vortex_err!("Failed to create test event: {error}"))?;
+        let handle = event.cu_event();
+        drop(event);
+
+        let mut pinned = std::thread::spawn(move || pool.get(16))
+            .join()
+            .expect("allocation thread panicked")?;
+        assert_eq!(pinned.inner.as_ref().unwrap().event.cu_event(), handle);
+        pinned.as_mut_slice().fill(0x5A);
+        let device = pinned.transfer_to_device(&stream)?;
+        let host = device.copy_to_host_sync(Alignment::of::<u8>())?;
+        assert_eq!(host.as_ref(), &[0x5A; 16]);
+        Ok(())
+    }
+
+    #[crate::test]
     fn transfer_to_device_round_trip() -> VortexResult<()> {
         let (pool, stream) = setup()?;
         let data: Vec<u8> = (0..=255u8).collect();
