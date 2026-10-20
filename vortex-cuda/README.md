@@ -12,6 +12,16 @@ Key files:
 
 ## CUDA file scans
 
+`CudaFileScanExt::scan_cuda(DictionaryExport::Decode)` builds a scan-local reader tree for
+plain Arrow Device output. With a CUDA session already installed, CUDA-flat readers eagerly
+decode numeric field packs before joining field inputs. Mixed/string projections and raw
+primitive auxiliary arrays, such as list offsets, remain lazy.
+
+Use the same dictionary policy in the Arrow export context. The scan does not change the
+shared session or ordinary reader cache: `VortexFile::scan()` and
+`scan_cuda(DictionaryExport::Preserve)` retain their existing dictionary-preserving behavior.
+No CUDA session is initialized by constructing a scan.
+
 Local pooled file reads use fixed 8 MiB chunks with concurrency 32. These are physical
 file-read/H2D chunks, independent of logical row ranges or scan batch sizes. File transfers
 use one session-scoped H2D stream, separate from the execution pool (four streams by default).

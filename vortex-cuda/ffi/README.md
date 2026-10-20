@@ -24,7 +24,10 @@ Use `vx_cuda_scan_path_arrow_device_stream` to read such a local file through pi
 and receive an Arrow C Device stream. Reuse the same CUDA session across scans so the pinned buffer
 pool and CUDA state are reused as well.
 
-Pooled data reads use fixed 8 MiB chunks and concurrency 32;
+File scans already request decoded dictionaries for plain Arrow schemas. Their reader trees
+use that scan-local policy to eagerly decode numeric CUDA-flat field packs as inputs become
+ready, without changing the shared session's dictionary policy. Mixed/string packs and raw
+auxiliary arrays remain lazy. Pooled data reads use fixed 8 MiB chunks and concurrency 32;
 scan row ranges and batch sizes are unchanged. Local file transfers use a shared session-scoped
 H2D stream separate from the four default execution streams, with buffer-event dependencies
 and pinned-source lifetime fences preserved.
