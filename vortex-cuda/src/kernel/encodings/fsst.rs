@@ -42,7 +42,7 @@ use crate::CanonicalCudaExt;
 use crate::CudaBufferExt;
 use crate::CudaDeviceBuffer;
 use crate::arrow::I32Offsets;
-use crate::arrow::i32_offsets_from_lengths;
+use crate::arrow::i32_offsets_from_length_array;
 use crate::executor::CudaArrayExt;
 use crate::executor::CudaExecute;
 use crate::executor::CudaExecutionCtx;
@@ -169,12 +169,6 @@ pub(crate) async fn decode_fsst_varbin(
     let dtype = fsst.dtype().clone();
     let validity = fsst.codes().validity()?;
     let len = fsst.len();
-    let lens = fsst
-        .uncompressed_lengths()
-        .clone()
-        .execute_cuda(ctx)
-        .await?
-        .into_primitive();
     let codes_offsets = fsst
         .codes()
         .offsets()
@@ -185,7 +179,7 @@ pub(crate) async fn decode_fsst_varbin(
     let I32Offsets {
         buffer: output_offsets,
         total: total_size,
-    } = i32_offsets_from_lengths(lens, ctx).await?;
+    } = i32_offsets_from_length_array(fsst.uncompressed_lengths().clone(), ctx).await?;
 
     if total_size == 0 {
         let allocation = CudaDeviceBuffer::new(ctx.device_alloc::<u8>(1)?);

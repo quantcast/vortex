@@ -28,7 +28,7 @@
 //! so the code stream is decompressed on device and never widened.
 //!
 //! The heap size and window bounds come from the GPU; each output path builds
-//! its row offsets from the lengths child with [`i32_offsets_from_lengths`]
+//! its row offsets from the lengths child with [`i32_offsets_from_length_array`]
 //! on device and validates them against the window size before they index the
 //! decoded bytes. The result is exposed either as a canonical `VarBinView`
 //! (views built on-device by `onpair_build_views`, or on host for windows
@@ -59,6 +59,7 @@ use vortex::buffer::Buffer;
 use vortex::dtype::DType;
 use vortex::dtype::NativePType;
 use vortex::dtype::PType;
+
 use vortex::error::VortexExpect;
 use vortex::error::VortexResult;
 use vortex::error::vortex_bail;
@@ -83,7 +84,7 @@ use crate::CanonicalCudaExt;
 use crate::CudaBufferExt;
 use crate::CudaDeviceBuffer;
 use crate::arrow::I32Offsets;
-use crate::arrow::i32_offsets_from_lengths;
+use crate::arrow::i32_offsets_from_length_array;
 use crate::cub::onpair_batch_offsets;
 use crate::executor::CudaArrayExt;
 use crate::executor::CudaExecute;
@@ -148,7 +149,7 @@ async fn decode_onpair(
         let I32Offsets {
             buffer: row_offsets,
             total,
-        } = i32_offsets_from_lengths(lengths, ctx).await?;
+        } = i32_offsets_from_length_array(lengths, ctx).await?;
         let row_total = u64::try_from(total)?;
         vortex_ensure_eq!(
             row_total,
@@ -177,6 +178,7 @@ async fn decode_onpair(
     // roll the decoded bytes over on host, mirroring the CPU canonical path;
     // only here do the lengths leave the device. The host views index the
     // copied window, so validate the lengths first.
+    let lengths = decode_primitive_child(lengths, ctx).await?;
     let lengths = Canonical::Primitive(lengths)
         .into_host(ctx.execution_ctx())
         .await?
@@ -233,7 +235,7 @@ pub(crate) async fn decode_onpair_varbin(
     let I32Offsets {
         buffer: offsets,
         total,
-    } = i32_offsets_from_lengths(lengths, ctx).await?;
+    } = i32_offsets_from_length_array(lengths, ctx).await?;
     let row_total = u64::try_from(total)?;
     vortex_ensure_eq!(
         row_total,
@@ -256,10 +258,10 @@ struct OnPairDecoded {
     bytes: BufferHandle,
     /// Byte size of the window, computed on device.
     total_size: usize,
-    /// Per-row lengths. The varbin path and the canonical fast path build
-    /// their row offsets from them on device; only the host rollover path
-    /// materialises them.
-    lengths: PrimitiveArray,
+    /// Per-row lengths, still encoded. The varbin path and the canonical fast
+    /// path build their row offsets from them on device; only the host
+    /// rollover path materialises them.
+    lengths: ArrayRef,
 }
 
 /// Run the OnPair decode pipeline: stage the codes and dictionary, regenerate
@@ -288,17 +290,16 @@ async fn decode_onpair_bytes(
     // No codes at all (e.g. every row empty): the child's length is host
     // metadata, so this early-out costs no device read.
     if onpair.codes().is_empty() {
-        let lengths = decode_primitive_child(onpair.uncompressed_lengths().clone(), ctx).await?;
-        ensure_zero_lengths(lengths, ctx).await?;
+        ensure_zero_lengths(onpair.uncompressed_lengths().clone(), ctx).await?;
         return Ok(None);
     }
 
-    // The three children and the dictionary staging all run on `ctx`'s
-    // stream: the per-row lengths (consumed only by the output paths), the
+    // The children and the dictionary staging all run on `ctx`'s stream: the
     // per-row code boundaries (the token window is resolved from them by a
     // kernel, never by host scalar reads), the codes themselves, and the
-    // split dictionary staging.
-    let lengths = decode_primitive_child(onpair.uncompressed_lengths().clone(), ctx).await?;
+    // split dictionary staging. The per-row lengths stay encoded until an
+    // output path builds row offsets from them.
+    let lengths = onpair.uncompressed_lengths().clone();
     let codes_offsets = decode_primitive_child(onpair.codes_offsets().clone(), ctx).await?;
     let codes = decode_primitive_child(onpair.codes().clone(), ctx).await?;
     let dict = stage_dict(onpair, ctx).await?;
@@ -370,7 +371,7 @@ async fn stage_dict(
 async fn decode_window<C>(
     codes: PrimitiveArray,
     codes_offsets: PrimitiveArray,
-    lengths: PrimitiveArray,
+    lengths: ArrayRef,
     dict: StagedDict,
     ctx: &mut CudaExecutionCtx,
 ) -> VortexResult<Option<OnPairDecoded>>
@@ -609,6 +610,7 @@ async fn decode_primitive_child(
     Ok(child.execute_cuda(ctx).await?.into_primitive())
 }
 
+
 /// The `dict_offsets` child, decoded and widened to the `u32` the dictionary stores.
 ///
 /// Decoded on the GPU like the other children, then copied back: the dictionary is staged
@@ -632,10 +634,8 @@ async fn host_dict_offsets(
 }
 
 /// Cold path: the window has no codes, so the rows must decode to zero bytes.
-async fn ensure_zero_lengths(
-    lengths: PrimitiveArray,
-    ctx: &mut CudaExecutionCtx,
-) -> VortexResult<()> {
+async fn ensure_zero_lengths(lengths: ArrayRef, ctx: &mut CudaExecutionCtx) -> VortexResult<()> {
+    let lengths = decode_primitive_child(lengths, ctx).await?;
     let lengths = Canonical::Primitive(lengths)
         .into_host(ctx.execution_ctx())
         .await?
@@ -666,6 +666,9 @@ mod tests {
     use arrow_schema::Field;
     use rstest::rstest;
     use vortex::array::IntoArray;
+    use vortex::array::arrays::Constant;
+    use vortex::array::arrays::ConstantArray;
+    use vortex::array::arrays::Primitive;
     use vortex::array::arrays::VarBinArray;
     use vortex::array::assert_arrays_eq;
     use vortex::buffer::Buffer;
@@ -1041,6 +1044,70 @@ mod tests {
             output.values.try_to_host()?.await?.as_ref(),
             values.concat()
         );
+        Ok(())
+    }
+
+    /// Constant lengths build Arrow offsets without materialization. Keep code offsets primitive
+    /// to isolate this path, including a slice whose code offsets no longer start at zero.
+    #[crate::test]
+    async fn test_cuda_onpair_varbin_primitive_offsets_constant_lengths() -> VortexResult<()> {
+        let mut cuda_ctx = cuda_ctx_with_varbin_layout(VarBinExportLayout::VarBin)?;
+        let values: Vec<&'static [u8]> = (0..3000)
+            .map(|row| [&b"A"[..], b"N", b"R"][row % 3])
+            .collect();
+        let rows = values.len();
+        let plain = compress_onpair(
+            values.iter().map(|v| Some(*v)).collect(),
+            DType::Utf8(Nullability::NonNullable),
+            &mut cuda_ctx,
+        )?
+        .try_downcast::<OnPair>()
+        .map_err(|array| vortex_err!("expected OnPair array, got {}", array.encoding_id()))?;
+
+        // Rebuild with primitive code offsets and constant lengths.
+        let codes_offsets = plain
+            .codes_offsets()
+            .cast(DType::Primitive(PType::U64, Nullability::NonNullable))?
+            .execute::<PrimitiveArray>(cuda_ctx.execution_ctx())?;
+        let expected_codes_offsets: Vec<u64> = (0..=u64::try_from(rows)?).collect();
+        assert_eq!(
+            codes_offsets.as_slice::<u64>(),
+            expected_codes_offsets.as_slice()
+        );
+        let lengths_ptype = plain.uncompressed_lengths().dtype().as_ptype();
+
+        let lengths = match_each_integer_ptype!(lengths_ptype, |L| {
+            ConstantArray::new(1 as L, rows).into_array()
+        });
+        let encoded = OnPair::try_new(
+            plain.dtype().clone(),
+            plain.dict_bytes_handle().clone(),
+            plain.dict_offsets().clone(),
+            plain.codes().clone(),
+            codes_offsets.into_array(),
+            lengths,
+            plain.array_validity(),
+        )?;
+
+        for range in [0..rows, 1001..2777] {
+            let expected = values[range.clone()].concat();
+            let sliced = encoded
+                .clone()
+                .into_array()
+                .slice(range.clone())?
+                .try_downcast::<OnPair>()
+                .map_err(|array| {
+                    vortex_err!("slice changed encoding to {}", array.encoding_id())
+                })?;
+            assert!(sliced.codes_offsets().is::<Primitive>());
+            assert!(sliced.uncompressed_lengths().is::<Constant>());
+            let output = decode_onpair_varbin(sliced, &mut cuda_ctx).await?;
+            assert_eq!(output.len, range.len());
+            let offsets = Buffer::<i32>::from_byte_buffer(output.offsets.try_to_host()?.await?);
+            let expected_offsets: Vec<i32> = (0..=i32::try_from(range.len())?).collect();
+            assert_eq!(offsets.as_slice(), expected_offsets.as_slice());
+            assert_eq!(output.values.try_to_host()?.await?.as_ref(), expected);
+        }
         Ok(())
     }
 

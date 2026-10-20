@@ -31,7 +31,7 @@ use arrow_schema::ffi::FFI_ArrowSchema;
 use async_trait::async_trait;
 pub(crate) use canonical::CanonicalDeviceArrayExport;
 pub(crate) use offsets::I32Offsets;
-pub(crate) use offsets::i32_offsets_from_lengths;
+pub(crate) use offsets::i32_offsets_from_length_array;
 use vortex::array::ArrayRef;
 use vortex::array::arrays::Dict;
 use vortex::array::arrays::FixedSizeList;
