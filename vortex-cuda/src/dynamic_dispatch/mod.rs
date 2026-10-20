@@ -160,6 +160,7 @@ impl MaterializedStage {
 #[derive(Clone)]
 pub struct CudaDispatchPlan {
     buffer: ByteBuffer,
+    has_patches: bool,
 }
 
 impl CudaDispatchPlan {
@@ -243,6 +244,7 @@ impl CudaDispatchPlan {
         assert_eq!(buffer.len(), total_size);
         Self {
             buffer: buffer.freeze(),
+            has_patches: !patches.is_empty(),
         }
     }
 
@@ -460,15 +462,19 @@ impl MaterializedPlan {
 
         let mut output = ctx.device_alloc::<T>(len.next_multiple_of(1024))?;
         let plan_bytes = self.dispatch_plan.as_bytes();
-        // Small plans travel as a kernel parameter. Uploading them instead costs an allocation
-        // and a host-to-device copy per launch, which dominates decoding small chunks.
-        let inline_plan = (plan_bytes.len() <= INLINE_PLAN_BYTES as usize).then(|| {
-            let mut plan = InlinePlan {
-                bytes: [0; INLINE_PLAN_BYTES as usize],
-            };
-            plan.bytes[..plan_bytes.len()].copy_from_slice(plan_bytes);
-            plan
-        });
+        // Small patch-free plans travel as a kernel parameter. Uploading them instead costs an
+        // allocation and a host-to-device copy per launch, which dominates decoding small chunks.
+        // CUDA 13.0-generated inline kernels can lose indirect patch-descriptor loads from
+        // `__grid_constant__` plans. Keep patched plans in device memory to avoid that path.
+        let inline_plan =
+            (plan_bytes.len() <= INLINE_PLAN_BYTES as usize && !self.dispatch_plan.has_patches)
+                .then(|| {
+                    let mut plan = InlinePlan {
+                        bytes: [0; INLINE_PLAN_BYTES as usize],
+                    };
+                    plan.bytes[..plan_bytes.len()].copy_from_slice(plan_bytes);
+                    plan
+                });
         let num_blocks = u32::try_from(len.div_ceil(ELEMENTS_PER_BLOCK as usize))?;
         let config = LaunchConfig {
             grid_dim: (num_blocks, 1, 1),
