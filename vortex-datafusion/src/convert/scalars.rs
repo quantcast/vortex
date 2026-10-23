@@ -417,10 +417,15 @@ mod tests {
 
     #[rstest]
     #[case::invalid_zone(ScalarValue::TimestampSecond(None, Some("Not/A/Timezone".into())))]
-    #[case::extreme_timestamp(ScalarValue::TimestampSecond(Some(i64::MAX), None))]
     #[case::extreme_time(ScalarValue::Time64Nanosecond(Some(i64::MIN)))]
     fn test_reject_invalid_temporal_scalar(#[case] value: ScalarValue) {
         assert!(scalar_from_df(&value, &VortexSession::default()).is_err());
+    }
+
+    #[test]
+    fn test_accept_extreme_timestamp() {
+        let value = ScalarValue::TimestampSecond(Some(i64::MAX), None);
+        assert!(scalar_from_df(&value, &VortexSession::default()).is_ok());
     }
 
     #[test]
