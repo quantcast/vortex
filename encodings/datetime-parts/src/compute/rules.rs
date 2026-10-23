@@ -278,6 +278,13 @@ mod tests {
         ConstantArray::new(scalar, len).into_array()
     }
 
+    /// A midnight constant whose days do not fit `i32` must not be pushed down as wrapped days.
+    #[test]
+    fn days_pushdown_declines_constant_outside_i32_days() {
+        let constant = midnight_constant(i64::from(i32::MAX) + 1, TimeUnit::Seconds, 1);
+        assert_eq!(try_extract_days_constant(&constant), None);
+    }
+
     #[test]
     fn test_midnight_binary_comparison() {
         // DTP with days [0, 1, 2] at midnight

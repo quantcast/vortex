@@ -6,6 +6,9 @@ use std::mem::MaybeUninit;
 use vortex_array::ArrayRef;
 use vortex_array::ExecutionCtx;
 use vortex_array::IntoArray;
+use vortex_array::aggregate_fn::NumericalAggregateOpts;
+use vortex_array::aggregate_fn::fns::min_max::MinMaxResult;
+use vortex_array::aggregate_fn::fns::min_max::min_max;
 use vortex_array::arrays::ConstantArray;
 use vortex_array::arrays::PrimitiveArray;
 use vortex_array::arrays::TemporalArray;
@@ -18,9 +21,10 @@ use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 
 use crate::timestamp;
-/// All parts are stored as i32. seconds and subseconds always fit in i32.
-/// For days we have a upper day limitation due to "jiff" validation so days
-/// also fit in i32.
+
+/// All parts are stored as i32. Seconds and subseconds always fit in i32. Days are checked by
+/// [`split_temporal`]: second and millisecond counts can lie more than `i32::MAX` days from the
+/// epoch, and such arrays are rejected rather than wrapped.
 pub struct TemporalParts {
     pub days: ArrayRef,
     pub seconds: ArrayRef,
@@ -31,10 +35,21 @@ pub struct TemporalParts {
 ///
 /// Splitting the components by granularity creates more small values, which enables better
 /// cascading compression.
+///
+/// # Errors
+///
+/// Returns an error if the time unit is days, or if a valid timestamp lies more than `i32::MAX`
+/// days from the epoch (see [`can_split_temporal`]).
 pub fn split_temporal(array: TemporalArray, ctx: &mut ExecutionCtx) -> VortexResult<TemporalParts> {
     let time_unit = array.temporal_metadata().time_unit();
     if matches!(time_unit, TimeUnit::Days) {
         vortex_bail!("Cannot handle day-level data");
+    }
+    if !days_fit(array.temporal_values(), time_unit, ctx)? {
+        vortex_bail!(
+            "{time_unit} timestamps lie more than i32::MAX days from the epoch and cannot be \
+             split into days"
+        );
     }
 
     let temporal_values = array
@@ -109,6 +124,33 @@ pub fn split_temporal(array: TemporalArray, ctx: &mut ExecutionCtx) -> VortexRes
     })
 }
 
+/// Whether `array` can be split into [`TemporalParts`]: every valid timestamp's days since the
+/// epoch fit the `i32` days part. Microsecond and nanosecond timestamps always can.
+pub fn can_split_temporal(array: &TemporalArray, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
+    let time_unit = array.temporal_metadata().time_unit();
+    if matches!(time_unit, TimeUnit::Days) {
+        return Ok(false);
+    }
+    days_fit(array.temporal_values(), time_unit, ctx)
+}
+
+/// Checks the days of the valid extremes of `values`, which bound every other valid value.
+fn days_fit(values: &ArrayRef, time_unit: TimeUnit, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
+    if matches!(time_unit, TimeUnit::Microseconds | TimeUnit::Nanoseconds) {
+        return Ok(true);
+    }
+    let Some(MinMaxResult { min, max }) = min_max(values, ctx, NumericalAggregateOpts::default())?
+    else {
+        return Ok(true);
+    };
+    Ok([min, max].iter().all(|bound| {
+        bound
+            .as_primitive()
+            .as_::<i64>()
+            .is_some_and(|ts| timestamp::days_fit(ts, time_unit))
+    }))
+}
+
 #[inline]
 fn split_slice<const DIVISOR: i64>(
     days: &mut [MaybeUninit<i32>],
@@ -177,13 +219,17 @@ mod tests {
     use vortex_array::VortexSessionExecute;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::arrays::TemporalArray;
+    use vortex_array::assert_arrays_eq;
     use vortex_array::extension::datetime::TimeUnit;
     use vortex_array::validity::Validity;
     use vortex_buffer::buffer;
     use vortex_error::VortexExpect;
+    use vortex_error::VortexResult;
     use vortex_session::VortexSession;
 
+    use crate::DateTimeParts;
     use crate::TemporalParts;
+    use crate::can_split_temporal;
     use crate::split_temporal;
 
     static SESSION: LazyLock<VortexSession> = LazyLock::new(VortexSession::empty);
@@ -234,5 +280,38 @@ mod tests {
                 .vortex_expect("subseconds validity should be derivable"),
             Validity::NonNullable
         ));
+    }
+
+    /// Extreme timestamps either split exactly or are rejected, never wrapped: `i64::MAX` seconds
+    /// used to come back as 50027779063807.
+    #[rstest]
+    #[case::seconds(TimeUnit::Seconds, false)]
+    #[case::milliseconds(TimeUnit::Milliseconds, false)]
+    #[case::microseconds(TimeUnit::Microseconds, true)]
+    #[case::nanoseconds(TimeUnit::Nanoseconds, true)]
+    fn extreme_timestamps_split_exactly_or_fail(
+        #[case] unit: TimeUnit,
+        #[case] splittable: bool,
+    ) -> VortexResult<()> {
+        let mut ctx = SESSION.create_execution_ctx();
+        let temporal = TemporalArray::new_timestamp(
+            PrimitiveArray::from_option_iter([Some(i64::MAX), None, Some(i64::MIN), Some(0)])
+                .into_array(),
+            unit,
+            Some("UTC".into()),
+        );
+        assert_eq!(can_split_temporal(&temporal, &mut ctx)?, splittable);
+
+        match DateTimeParts::try_from_temporal(temporal.clone(), &mut ctx) {
+            Ok(parts) => {
+                assert_arrays_eq!(parts, temporal, &mut ctx);
+                assert!(splittable, "{unit} must be rejected");
+            }
+            Err(err) => {
+                assert!(!splittable, "{unit} must split: {err}");
+                assert!(err.to_string().contains("i32::MAX days"), "{err}");
+            }
+        }
+        Ok(())
     }
 }
