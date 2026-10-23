@@ -567,6 +567,7 @@ mod tests {
     use crate::arrays::ListArray;
     use crate::arrays::NullArray;
     use crate::arrays::PrimitiveArray;
+    use crate::arrays::TemporalArray;
     use crate::arrays::VarBinArray;
     use crate::dtype::BigCast;
     use crate::dtype::DType;
@@ -580,6 +581,7 @@ mod tests {
     use crate::expr::stats::Precision;
     use crate::expr::stats::Stat;
     use crate::expr::stats::StatsProvider;
+    use crate::extension::datetime::TimeUnit;
     use crate::match_each_decimal_value_type;
     use crate::scalar::DecimalValue;
     use crate::scalar::Scalar;
@@ -598,6 +600,30 @@ mod tests {
                 min: 1.into(),
                 max: 3.into()
             })
+        );
+        Ok(())
+    }
+
+    /// A timestamp on the last day of year 9999 lies beyond `jiff`'s range but is a valid Arrow
+    /// and Parquet value, so the statistics of a column holding one must not fail.
+    #[test]
+    fn test_timestamp_min_max_beyond_jiff_range() -> VortexResult<()> {
+        // 9999-12-31T00:00:00Z
+        const END_OF_9999_US: i64 = 253_402_214_400_000_000;
+        let timestamps = TemporalArray::new_timestamp(
+            PrimitiveArray::from_iter([0i64, END_OF_9999_US]).into_array(),
+            TimeUnit::Microseconds,
+            None,
+        )
+        .into_array();
+        let mut ctx = SESSION.create_execution_ctx();
+        let MinMaxResult { min, max } =
+            min_max(&timestamps, &mut ctx, NumericalAggregateOpts::default())?
+                .vortex_expect("non-empty array");
+        assert_eq!(min.as_extension().to_storage_scalar(), 0i64.into());
+        assert_eq!(
+            max.as_extension().to_storage_scalar(),
+            END_OF_9999_US.into()
         );
         Ok(())
     }
