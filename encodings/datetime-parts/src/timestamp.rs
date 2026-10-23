@@ -12,7 +12,7 @@ pub const SECONDS_PER_DAY: i64 = 86_400; // 24 * 60 * 60
 /// Parts of a Unix timestamp (time since 1970-01-01 00:00:00 UTC).
 ///
 /// Broken down into:
-///  * Days since epoch (max range is "jiff"'s range)
+///  * Days since epoch (must fit `i32`, see [`days_fit`])
 ///  * Seconds within day (0-86399)
 ///  * Subseconds (range depends on `TimeUnit`)
 pub struct TimestampParts {
@@ -30,18 +30,44 @@ pub struct TimestampParts {
 ///
 /// # Errors
 ///
-/// Returns an error if `time_unit` is days, which cannot be split.
+/// Returns an error if `time_unit` is days, which cannot be split, or if the timestamp's days
+/// since the epoch do not fit the `i32` days part.
 pub fn split(timestamp: i64, time_unit: TimeUnit) -> VortexResult<TimestampParts> {
-    Ok(match time_unit {
+    let parts = match time_unit {
         TimeUnit::Nanoseconds => split_with_divisor::<1_000_000_000>(timestamp),
         TimeUnit::Microseconds => split_with_divisor::<1_000_000>(timestamp),
         TimeUnit::Milliseconds => split_with_divisor::<1_000>(timestamp),
         TimeUnit::Seconds => split_with_divisor::<1>(timestamp),
         TimeUnit::Days => vortex_bail!("Cannot handle day-level data"),
-    })
+    };
+    if !days_fit(timestamp, time_unit) {
+        vortex_bail!(
+            "Timestamp {timestamp}{time_unit} lies more than i32::MAX days from the epoch and \
+             cannot be split into days"
+        );
+    }
+    Ok(parts)
+}
+
+/// Whether the days since the epoch of `timestamp` fit the `i32` days part of [`TimestampParts`].
+///
+/// Every `i64` count of microseconds or nanoseconds fits. Second and millisecond counts can lie
+/// further from the epoch than `i32::MAX` days.
+pub fn days_fit(timestamp: i64, time_unit: TimeUnit) -> bool {
+    let ticks_per_second = match time_unit {
+        TimeUnit::Nanoseconds => 1_000_000_000,
+        TimeUnit::Microseconds => 1_000_000,
+        TimeUnit::Milliseconds => 1_000,
+        TimeUnit::Seconds => 1,
+        TimeUnit::Days => return false,
+    };
+    i32::try_from(timestamp / (SECONDS_PER_DAY * ticks_per_second)).is_ok()
 }
 
 /// Split a Unix timestamp into parts using a constant DIVISOR.
+///
+/// Days that do not fit `i32` wrap: callers check [`days_fit`] first, as [`split`] does for a
+/// single timestamp and `split_temporal` does for a whole array.
 #[inline]
 pub(crate) fn split_with_divisor<const DIVISOR: i64>(timestamp: i64) -> TimestampParts {
     let days = timestamp / (SECONDS_PER_DAY * DIVISOR);
@@ -159,6 +185,21 @@ mod tests {
     #[test]
     fn test_split_days_error() {
         assert!(split(1, TimeUnit::Days).is_err());
+    }
+
+    #[rstest]
+    #[case::seconds(TimeUnit::Seconds, false)]
+    #[case::milliseconds(TimeUnit::Milliseconds, false)]
+    #[case::microseconds(TimeUnit::Microseconds, true)]
+    #[case::nanoseconds(TimeUnit::Nanoseconds, true)]
+    fn split_rejects_days_outside_i32(#[case] unit: TimeUnit, #[case] fits: bool) {
+        for ts in [i64::MAX, i64::MIN] {
+            assert_eq!(days_fit(ts, unit), fits, "{ts}{unit}");
+            match split(ts, unit) {
+                Ok(parts) => assert_eq!(combine(parts, unit), ts, "{ts}{unit}"),
+                Err(err) => assert!(!fits && err.to_string().contains("i32::MAX days"), "{err}"),
+            }
+        }
     }
 
     #[test]
