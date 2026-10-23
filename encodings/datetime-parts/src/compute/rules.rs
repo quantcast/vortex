@@ -13,12 +13,12 @@ use vortex_array::arrays::scalar_fn::AnyScalarFn;
 use vortex_array::arrays::scalar_fn::ScalarFn;
 use vortex_array::arrays::scalar_fn::ScalarFnArrayExt;
 use vortex_array::arrays::slice::SliceReduceAdaptor;
-use vortex_array::builtins::ArrayBuiltins;
 use vortex_array::dtype::DType;
 use vortex_array::extension::datetime::Timestamp;
 use vortex_array::optimizer::ArrayOptimizer;
 use vortex_array::optimizer::rules::ArrayParentReduceRule;
 use vortex_array::optimizer::rules::ParentRuleSet;
+use vortex_array::scalar::Scalar;
 use vortex_array::scalar_fn::fns::between::Between;
 use vortex_array::scalar_fn::fns::binary::Binary;
 use vortex_array::scalar_fn::fns::cast::CastReduceAdaptor;
@@ -138,8 +138,11 @@ impl ArrayParentReduceRule<DateTimeParts> for DTPComparisonPushDownRule {
                 // Keep the nullability of the replaced constant, so the rewritten comparison has
                 // the same result dtype as the original.
                 let target_dtype = days.dtype().with_nullability(c.dtype().nullability());
-                let constant = ConstantArray::new(days_value, len).into_array();
-                new_children.push(constant.cast(target_dtype)?);
+                // Narrowed days, such as u16, cannot hold every literal's days.
+                let Ok(days_scalar) = Scalar::from(days_value).cast(&target_dtype) else {
+                    return Ok(None);
+                };
+                new_children.push(ConstantArray::new(days_scalar, len).into_array());
             }
         }
 
@@ -190,6 +193,7 @@ fn is_constant_zero(array: &ArrayRef) -> bool {
 mod tests {
     use std::sync::LazyLock;
 
+    use rstest::rstest;
     use vortex_array::ArrayRef;
     use vortex_array::VortexSessionExecute;
     use vortex_array::arrays::BoolArray;
@@ -283,6 +287,37 @@ mod tests {
     fn days_pushdown_declines_constant_outside_i32_days() {
         let constant = midnight_constant(i64::from(i32::MAX) + 1, TimeUnit::Seconds, 1);
         assert_eq!(try_extract_days_constant(&constant), None);
+    }
+
+    /// Days compressed to u16 cannot hold 9999-12-31, so the comparison is not pushed down.
+    #[rstest]
+    #[case::lt(Operator::Lt, true)]
+    #[case::lte(Operator::Lte, true)]
+    #[case::eq(Operator::Eq, false)]
+    #[case::not_eq(Operator::NotEq, true)]
+    #[case::gt(Operator::Gt, false)]
+    fn test_midnight_comparison_beyond_narrowed_days(#[case] op: Operator, #[case] expected: bool) {
+        let dtype = dtp_at_midnight(&[0], TimeUnit::Microseconds)
+            .dtype()
+            .clone();
+        let narrowed = DateTimeParts::try_new(
+            dtype,
+            PrimitiveArray::from_iter([20_000u16, 20_001]).into_array(),
+            ConstantArray::new(0u8, 2).into_array(),
+            ConstantArray::new(0u8, 2).into_array(),
+        )
+        .unwrap();
+        let constant = midnight_constant(2_932_896, TimeUnit::Microseconds, 2);
+        let comparison = Binary::try_new(narrowed.into_array(), constant, op)
+            .unwrap()
+            .into_array();
+
+        let mut ctx = SESSION.create_execution_ctx();
+        assert_arrays_eq!(
+            comparison.optimize().unwrap(),
+            BoolArray::from_iter([expected, expected]),
+            &mut ctx
+        );
     }
 
     #[test]
