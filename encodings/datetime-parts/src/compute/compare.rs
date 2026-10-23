@@ -52,7 +52,11 @@ impl CompareKernel for DateTimeParts {
         let Some(options) = ext_dtype.metadata_opt::<Timestamp>() else {
             return Ok(None);
         };
-        let ts_parts = timestamp::split(timestamp, options.unit)?;
+        // A constant more than i32::MAX days from the epoch has no days part to compare with:
+        // leave it to the canonical comparison.
+        let Ok(ts_parts) = timestamp::split(timestamp, options.unit) else {
+            return Ok(None);
+        };
 
         let result = match operator {
             CompareOperator::Eq => compare_eq(lhs, &ts_parts, nullability, ctx)?,
@@ -443,8 +447,8 @@ mod test {
         )
         .unwrap();
 
-        // Timestamp with a value larger than i32::MAX.
-        let rhs = dtp_array_from_timestamp(i64::MAX, rhs_validity);
+        // Timestamp with a value larger than i32::MAX, whose days still fit the i32 days part.
+        let rhs = dtp_array_from_timestamp(i64::from(i32::MAX) + 1, rhs_validity);
 
         let comparison = lhs
             .clone()

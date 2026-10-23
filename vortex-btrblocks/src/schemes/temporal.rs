@@ -21,6 +21,7 @@ use vortex_compressor::scheme::CompressionEstimate;
 use vortex_compressor::scheme::EstimateVerdict;
 use vortex_datetime_parts::DateTimeParts;
 use vortex_datetime_parts::TemporalParts;
+use vortex_datetime_parts::can_split_temporal;
 use vortex_datetime_parts::split_temporal;
 use vortex_error::VortexResult;
 
@@ -66,12 +67,19 @@ impl Scheme for TemporalScheme {
 
     fn expected_compression_ratio(
         &self,
-        _data: &ArrayAndStats,
+        data: &ArrayAndStats,
         _compress_ctx: CompressorContext,
-        _exec_ctx: &mut ExecutionCtx,
+        exec_ctx: &mut ExecutionCtx,
     ) -> CompressionEstimate {
-        // Temporal compression (splitting into parts) is almost always beneficial.
-        CompressionEstimate::Verdict(EstimateVerdict::AlwaysUse)
+        // Temporal compression (splitting into parts) is almost always beneficial, but second and
+        // millisecond timestamps more than i32::MAX days from the epoch have no i32 days part, so
+        // `split_temporal` rejects them and the storage array is compressed instead.
+        let splittable = TemporalArray::try_from(data.array().clone())
+            .and_then(|temporal| can_split_temporal(&temporal, exec_ctx));
+        match splittable {
+            Ok(true) => CompressionEstimate::Verdict(EstimateVerdict::AlwaysUse),
+            _ => CompressionEstimate::Verdict(EstimateVerdict::Skip),
+        }
     }
 
     fn compress(
