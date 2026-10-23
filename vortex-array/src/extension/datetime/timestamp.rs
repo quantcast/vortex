@@ -6,7 +6,6 @@
 use std::fmt;
 use std::sync::Arc;
 
-use jiff::Span;
 use jiff::fmt::temporal::DateTimeParser;
 use jiff::tz::TimeZone;
 use vortex_error::VortexExpect;
@@ -129,13 +128,20 @@ pub enum TimestampValue<'a> {
 
 impl fmt::Display for TimestampValue<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (span, tz) = match self {
-            TimestampValue::Seconds(v, tz) => (Span::new().seconds(*v), *tz),
-            TimestampValue::Milliseconds(v, tz) => (Span::new().milliseconds(*v), *tz),
-            TimestampValue::Microseconds(v, tz) => (Span::new().microseconds(*v), *tz),
-            TimestampValue::Nanoseconds(v, tz) => (Span::new().nanoseconds(*v), *tz),
+        let (unit, value, tz) = match *self {
+            TimestampValue::Seconds(v, tz) => (TimeUnit::Seconds, v, tz),
+            TimestampValue::Milliseconds(v, tz) => (TimeUnit::Milliseconds, v, tz),
+            TimestampValue::Microseconds(v, tz) => (TimeUnit::Microseconds, v, tz),
+            TimestampValue::Nanoseconds(v, tz) => (TimeUnit::Nanoseconds, v, tz),
         };
-        let ts = jiff::Timestamp::UNIX_EPOCH + span;
+        // `jiff` stops 26 hours short of the end of years 9999 and -9999, so a valid timestamp may
+        // have no calendar rendering; show the count then.
+        let Ok(ts) = unit
+            .to_jiff_span(value)
+            .and_then(|span| Ok(jiff::Timestamp::UNIX_EPOCH.checked_add(span)?))
+        else {
+            return write!(f, "{value}{unit}");
+        };
 
         match tz {
             None => write!(f, "{ts}"),
@@ -243,34 +249,15 @@ impl ExtVTable for Timestamp {
         let ts_value = storage_value.as_primitive().cast::<i64>()?;
         let tz = metadata.tz.as_ref();
 
-        let (span, value) = match metadata.unit {
-            TimeUnit::Nanoseconds => (
-                Span::new().try_nanoseconds(ts_value)?,
-                TimestampValue::Nanoseconds(ts_value, tz),
-            ),
-            TimeUnit::Microseconds => (
-                Span::new().try_microseconds(ts_value)?,
-                TimestampValue::Microseconds(ts_value, tz),
-            ),
-            TimeUnit::Milliseconds => (
-                Span::new().try_milliseconds(ts_value)?,
-                TimestampValue::Milliseconds(ts_value, tz),
-            ),
-            TimeUnit::Seconds => (
-                Span::new().try_seconds(ts_value)?,
-                TimestampValue::Seconds(ts_value, tz),
-            ),
-            TimeUnit::Days => {
-                vortex_bail!("Timestamp does not support Days time unit")
-            }
-        };
-
-        // Validate the storage value is within the valid range for Timestamp.
-        jiff::Timestamp::UNIX_EPOCH
-            .checked_add(span)
-            .map_err(|e| vortex_err!("Invalid timestamp scalar: {}", e))?;
-
-        Ok(value)
+        // Every `i64` count of the unit is a valid timestamp, as in Arrow and Parquet. `jiff`'s
+        // narrower range only bounds what `Display` can render as a calendar date.
+        Ok(match metadata.unit {
+            TimeUnit::Nanoseconds => TimestampValue::Nanoseconds(ts_value, tz),
+            TimeUnit::Microseconds => TimestampValue::Microseconds(ts_value, tz),
+            TimeUnit::Milliseconds => TimestampValue::Milliseconds(ts_value, tz),
+            TimeUnit::Seconds => TimestampValue::Seconds(ts_value, tz),
+            TimeUnit::Days => vortex_bail!("Timestamp does not support Days time unit"),
+        })
     }
 }
 
@@ -294,6 +281,33 @@ mod tests {
         let dtype = DType::Extension(Timestamp::new(TimeUnit::Seconds, Nullable).erased());
         Scalar::try_new(dtype, Some(ScalarValue::Primitive(PValue::I64(0))))?;
 
+        Ok(())
+    }
+
+    /// Arrow and Parquet store every `i64` count of the unit, so a timestamp on the last day of
+    /// year 9999, beyond `jiff`'s range, is a valid scalar; it displays as the raw count.
+    #[cfg_attr(miri, ignore)]
+    #[rstest]
+    #[case::end_of_9999(
+        TimeUnit::Microseconds,
+        253_402_214_400_000_000,
+        "253402214400000000µs"
+    )]
+    #[case::start_of_neg_9999(TimeUnit::Seconds, -377_705_116_800, "-377705116800s")]
+    #[case::max(TimeUnit::Microseconds, i64::MAX, "9223372036854775807µs")]
+    #[case::max_seconds(TimeUnit::Seconds, i64::MAX, "9223372036854775807s")]
+    #[case::max_milliseconds(TimeUnit::Milliseconds, i64::MAX, "9223372036854775807ms")]
+    #[case::min_nanoseconds(TimeUnit::Nanoseconds, i64::MIN, "-9223372036854775808ns")]
+    fn accept_timestamp_beyond_jiff_range(
+        #[case] unit: TimeUnit,
+        #[case] value: i64,
+        #[case] expected: &str,
+    ) -> VortexResult<()> {
+        for tz in [None, Some(Arc::from("UTC"))] {
+            let dtype = DType::Extension(Timestamp::new_with_tz(unit, tz, Nullable).erased());
+            let scalar = Scalar::try_new(dtype, Some(ScalarValue::Primitive(PValue::I64(value))))?;
+            assert_eq!(format!("{}", scalar.as_extension()), expected);
+        }
         Ok(())
     }
 
@@ -329,16 +343,6 @@ mod tests {
     #[test]
     fn test_reject_timestamp_days() {
         assert!(Timestamp::try_new_with_tz(TimeUnit::Days, None, Nullable).is_err());
-    }
-
-    #[rstest]
-    #[case::seconds(TimeUnit::Seconds, i64::MAX)]
-    #[case::milliseconds(TimeUnit::Milliseconds, i64::MAX)]
-    #[case::microseconds(TimeUnit::Microseconds, i64::MAX)]
-    #[case::nanoseconds(TimeUnit::Nanoseconds, i64::MIN)]
-    fn test_reject_timestamp_span_out_of_range(#[case] unit: TimeUnit, #[case] value: i64) {
-        let dtype = DType::Extension(Timestamp::new(unit, Nullable).erased());
-        assert!(Scalar::try_new(dtype, Some(ScalarValue::from(value))).is_err());
     }
 
     #[cfg_attr(miri, ignore)]
