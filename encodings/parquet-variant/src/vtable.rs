@@ -348,7 +348,7 @@ mod tests {
     use crate::array::ParquetVariantArraySlotsExt;
 
     static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
-        let session = vortex_array::array_session();
+        let session = VortexSession::empty();
         crate::initialize(&session);
         session
     });
@@ -357,7 +357,7 @@ mod tests {
         let dtype = array.dtype().clone();
         let len = array.len();
 
-        let session = vortex_array::array_session();
+        let session = VortexSession::empty();
         session.arrays().register(ParquetVariant);
 
         let ctx = ArrayContext::empty();
@@ -401,18 +401,16 @@ mod tests {
     fn parquet_variant_file_session() -> VortexResult<VortexSession> {
         const TEST_EDITION: EditionId = EditionId::new("test", 2026, 7, 0);
 
-        let session = vortex_array::array_session()
+        let session = VortexSession::empty()
             .with::<LayoutSession>()
             .with::<RuntimeSession>();
         vortex_file::register_default_encodings(&session);
         session.arrays().register(ParquetVariant);
         let editions = session.editions();
-        editions
-            .declare_edition(Edition {
-                id: TEST_EDITION,
-                min_library_version: None,
-            })
-            .map_err(|error| vortex_err!("{error}"))?;
+        editions.declare_edition(Edition {
+            id: TEST_EDITION,
+            min_library_version: None,
+        })?;
         let component_ids = [
             (
                 ComponentKind::Array,
@@ -438,9 +436,7 @@ mod tests {
         ];
         for (kind, ids) in component_ids {
             for id in ids {
-                editions
-                    .declare_inclusion(EditionInclusion::new(kind, &id, TEST_EDITION))
-                    .map_err(|error| vortex_err!("{error}"))?;
+                editions.declare_inclusion(EditionInclusion::new(kind, &id, TEST_EDITION))?;
             }
         }
         for id in [
@@ -451,17 +447,13 @@ mod tests {
             "vortex.nan_count",
             "vortex.null_count",
         ] {
-            editions
-                .declare_inclusion(EditionInclusion::new(
-                    ComponentKind::Aggregate,
-                    id,
-                    TEST_EDITION,
-                ))
-                .map_err(|error| vortex_err!("{error}"))?;
+            editions.declare_inclusion(EditionInclusion::new(
+                ComponentKind::Aggregate,
+                id,
+                TEST_EDITION,
+            ))?;
         }
-        session
-            .enable_edition(TEST_EDITION)
-            .map_err(|error| vortex_err!("{error}"))?;
+        session.enable_edition(TEST_EDITION)?;
         Ok(session)
     }
 

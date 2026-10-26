@@ -205,7 +205,6 @@ pub(crate) fn enable_all_registered_array_encodings(session: &VortexSession) {
     use vortex_edition::EditionInclusion;
     use vortex_edition::EditionSessionExt;
     use vortex_error::VortexExpect;
-    use vortex_error::vortex_err;
     use vortex_layout::session::LayoutSessionExt;
 
     const TEST_EDITION: EditionId = EditionId::new("test", 2026, 7, 0);
@@ -216,7 +215,6 @@ pub(crate) fn enable_all_registered_array_encodings(session: &VortexSession) {
             id: TEST_EDITION,
             min_library_version: None,
         })
-        .map_err(|error| vortex_err!("{error}"))
         .vortex_expect("test edition is valid");
     let component_ids = [
         (
@@ -245,7 +243,6 @@ pub(crate) fn enable_all_registered_array_encodings(session: &VortexSession) {
         for id in ids {
             editions
                 .declare_inclusion(EditionInclusion::new(kind, &id, TEST_EDITION))
-                .map_err(|error| vortex_err!("{error}"))
                 .vortex_expect("registered component has one test-edition inclusion");
         }
     }
@@ -263,30 +260,28 @@ pub(crate) fn enable_all_registered_array_encodings(session: &VortexSession) {
                 id,
                 TEST_EDITION,
             ))
-            .map_err(|error| vortex_err!("{error}"))
             .vortex_expect("default aggregate has one test-edition inclusion");
     }
     session
         .enable_edition(TEST_EDITION)
-        .map_err(|error| vortex_err!("{error}"))
         .vortex_expect("test edition is registered");
 }
 
 #[cfg(test)]
 mod default_encoding_tests {
     use vortex_array::VTable as _;
-    use vortex_array::array_session;
     use vortex_array::arrays::Filter;
     use vortex_array::optimizer::kernels::ArrayKernelsExt as _;
     use vortex_array::session::ArraySessionExt as _;
     use vortex_fsst::FSST;
     use vortex_onpair::OnPair;
+    use vortex_session::VortexSession;
 
     use crate::register_default_encodings;
 
     #[test]
     fn register_default_encodings_registers_external_execute_parent_kernels() {
-        let session = array_session();
+        let session = VortexSession::empty();
 
         assert!(!session.arrays().registry().contains_key(&FSST.id()));
         assert!(!session.kernels().has_execute_parent(Filter.id(), FSST.id()));
