@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
 use futures::FutureExt;
@@ -56,5 +58,33 @@ impl SegmentSink for TestSegments {
         segments.push(buffer.freeze());
 
         Ok(segment_id)
+    }
+}
+
+/// A [`SegmentSource`] that counts the segments requested from an inner source.
+pub struct CountingSegmentSource {
+    inner: Arc<dyn SegmentSource>,
+    requests: AtomicUsize,
+}
+
+impl CountingSegmentSource {
+    /// Wraps `inner`, starting the count at zero.
+    pub fn new(inner: Arc<dyn SegmentSource>) -> Self {
+        Self {
+            inner,
+            requests: AtomicUsize::new(0),
+        }
+    }
+
+    /// Returns how many segments have been requested so far.
+    pub fn requests(&self) -> usize {
+        self.requests.load(Ordering::Relaxed)
+    }
+}
+
+impl SegmentSource for CountingSegmentSource {
+    fn request(&self, id: SegmentId) -> SegmentFuture {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        self.inner.request(id)
     }
 }

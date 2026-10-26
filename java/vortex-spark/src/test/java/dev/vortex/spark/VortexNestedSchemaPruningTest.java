@@ -6,6 +6,7 @@ package dev.vortex.spark;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 import org.apache.spark.sql.Column;
@@ -60,7 +61,27 @@ public final class VortexNestedSchemaPruningTest {
                         functions.map(functions.lit("k"), abc).alias("m"),
                         functions
                                 .struct(functions.lit("x").alias("p"), abc.alias("inner"))
-                                .alias("outer"));
+                                .alias("outer"),
+                        nullWhen(
+                                        functions.col("id").equalTo(1),
+                                        functions.struct(
+                                                functions.lit("x").alias("p"),
+                                                nullWhen(functions.col("id").equalTo(2), abc)
+                                                        .alias("inner")))
+                                .alias("nullable_outer"),
+                        nullWhen(
+                                        functions.col("id").mod(2).equalTo(1),
+                                        functions.struct(
+                                                functions.col("id").plus(100).alias("a"),
+                                                nullWhen(
+                                                                functions
+                                                                        .col("id")
+                                                                        .equalTo(4),
+                                                                functions
+                                                                        .col("id")
+                                                                        .plus(200))
+                                                        .alias("b")))
+                                .alias("n"));
 
         String path = tempDir.resolve("nested").toUri().toString();
         df.write()
@@ -102,9 +123,64 @@ public final class VortexNestedSchemaPruningTest {
         assertEquals(C_VALUES, longsOf(functions.col("outer.inner.c")));
     }
 
+    @Test
+    @DisplayName("Null structs and null fields stay null when the struct is pruned")
+    public void nullableStructField() {
+        assertEquals(Arrays.asList(200L, null, 202L, null, null), valuesOf(table, functions.col("n.b")));
+        assertEquals(
+                List.of(false, true, false, true, false),
+                valuesOf(table, functions.col("n").isNull()));
+    }
+
+    @Test
+    @DisplayName("Nulls at each level of a struct inside a struct survive pruning both levels")
+    public void nullableStructInStructField() {
+        assertEquals(
+                Arrays.asList(300L, null, null, 303L, 304L), valuesOf(table, functions.col("nullable_outer.inner.c")));
+        assertEquals(
+                List.of(false, true, false, false, false),
+                valuesOf(table, functions.col("nullable_outer").isNull()));
+        assertEquals(
+                List.of(false, true, true, false, false),
+                valuesOf(table, functions.col("nullable_outer.inner").isNull()));
+    }
+
+    @Test
+    @DisplayName("A pushed filter on a field the query does not select still applies")
+    public void filterOnPrunedField() {
+        assertEquals(
+                List.of(302L, 303L, 304L),
+                valuesOf(table.where(functions.col("s.a").gt(101)), functions.col("s.c")));
+    }
+
+    @Test
+    @DisplayName("Whole struct columns still read in full alongside pruned ones")
+    public void wholeAndPrunedStructs() {
+        Row row = table.where("id = 3")
+                .select(functions.col("s"), functions.col("outer.inner.a"))
+                .first();
+        assertEquals(
+                List.of(103L, 203L, 303L),
+                List.of(
+                        row.getStruct(0).getLong(0),
+                        row.getStruct(0).getLong(1),
+                        row.getStruct(0).getLong(2)));
+        assertEquals(103L, row.getLong(1));
+    }
+
+    private static Column nullWhen(Column condition, Column value) {
+        return functions.when(condition, functions.lit(null)).otherwise(value);
+    }
+
     private List<Long> longsOf(Column column) {
-        return table.orderBy("id").select(column).collectAsList().stream()
-                .map(row -> row.getLong(0))
+        return valuesOf(table, column);
+    }
+
+    /** Returns {@code column} for each row of {@code rows}, ordered by id. */
+    @SuppressWarnings("unchecked")
+    private static <T> List<T> valuesOf(Dataset<Row> rows, Column column) {
+        return rows.orderBy("id").select(column).collectAsList().stream()
+                .map(row -> (T) row.get(0))
                 .collect(Collectors.toList());
     }
 }
