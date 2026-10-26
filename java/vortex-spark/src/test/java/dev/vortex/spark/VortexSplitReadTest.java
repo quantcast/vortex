@@ -5,14 +5,18 @@ package dev.vortex.spark;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import com.google.common.collect.ImmutableList;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.stream.Stream;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.connector.expressions.Transform;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -95,5 +99,59 @@ final class VortexSplitReadTest {
         assertEquals(
                 df.filter("name is null").select("id").orderBy("id").collectAsList(),
                 read.filter("name is null").select("id").orderBy("id").collectAsList());
+    }
+
+    @Test
+    @DisplayName("Split options match in any case, and scan options override table options")
+    void splitOptionsIgnoreCase() throws IOException {
+        Path outputPath = tempDir.resolve("cased");
+        spark.range(ROWS)
+                .selectExpr("id", "concat('n', id) as name")
+                .coalesce(1)
+                .write()
+                .format("vortex")
+                .option("path", outputPath.toUri().toString())
+                .mode(SaveMode.Overwrite)
+                .save();
+        long fileBytes;
+        try (Stream<Path> files = Files.walk(outputPath)) {
+            fileBytes = files.filter(p -> p.toString().endsWith(".vortex"))
+                    .mapToLong(p -> p.toFile().length())
+                    .sum();
+        }
+        // A third of the file is 33333 rows, rounded down to 32768: four ranges.
+        spark.conf().set("spark.sql.files.maxPartitionBytes", fileBytes / 3);
+        spark.conf().set("spark.sql.files.openCostInBytes", 0);
+        var schema = spark.read()
+                .format("vortex")
+                .option("path", outputPath.toUri().toString())
+                .load()
+                .schema();
+        ImmutableList<String> paths = ImmutableList.of(outputPath.toUri().toString());
+
+        VortexTable off = new VortexTable(paths, schema, Map.of("vortex.read.splitFiles", "false"), new Transform[0]);
+        assertEquals(4, partitions(off, Map.of("vortex.read.splitfiles", "true")));
+
+        VortexTable on = new VortexTable(paths, schema, Map.of("VORTEX.READ.SPLITFILES", "true"), new Transform[0]);
+        assertEquals(1, partitions(on, Map.of("vortex.read.splitFiles", "false")));
+        assertEquals(4, partitions(on, Map.of()));
+        assertEquals(1, partitions(on, Map.of("Vortex.Read.MaxSplitBytes", Long.toString(Long.MAX_VALUE))));
+
+        // Other options keep the table's spelling, which their case-sensitive lookups rely on.
+        VortexTable threads = new VortexTable(paths, schema, Map.of("vortex.workerThreads", "2"), new Transform[0]);
+        var partition = (VortexFilePartition)
+                threads.newScanBuilder(new CaseInsensitiveStringMap(Map.of("vortex.workerThreads", "8")))
+                        .build()
+                        .toBatch()
+                        .planInputPartitions()[0];
+        assertEquals("8", partition.formatOptions().get("vortex.workerThreads"));
+    }
+
+    private static int partitions(VortexTable table, Map<String, String> scanOptions) {
+        return table.newScanBuilder(new CaseInsensitiveStringMap(scanOptions))
+                .build()
+                .toBatch()
+                .planInputPartitions()
+                .length;
     }
 }

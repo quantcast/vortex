@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.internal.SQLConf;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import scala.Option;
 
 /**
@@ -48,7 +49,7 @@ final class FileSplitPlanner {
     private FileSplitPlanner() {}
 
     static boolean enabled(Map<String, String> options) {
-        String value = options.getOrDefault(SPLIT_FILES_OPTION, "false");
+        String value = new CaseInsensitiveStringMap(options).getOrDefault(SPLIT_FILES_OPTION, "false");
         if (value.equalsIgnoreCase("true")) {
             return true;
         }
@@ -58,7 +59,7 @@ final class FileSplitPlanner {
 
     /** The byte budget of one split, from the option or Spark's file-source formula. */
     static long maxSplitBytes(Map<String, String> options, Collection<FileSize> files) {
-        String configured = options.get(MAX_SPLIT_BYTES_OPTION);
+        String configured = new CaseInsensitiveStringMap(options).get(MAX_SPLIT_BYTES_OPTION);
         if (configured != null) {
             long bytes;
             try {
