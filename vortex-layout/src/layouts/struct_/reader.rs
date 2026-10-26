@@ -277,6 +277,9 @@ impl StructReader {
     /// These read each field with its own root expression and assemble the result directly,
     /// instead of partitioning a `pack` over every field and evaluating it lazily on top of the
     /// field arrays, a per-field cost that dominates scans of wide tables.
+    ///
+    /// A `pack` that reads any field more than once is left to partitioning, which reads that
+    /// field once rather than once per output.
     fn direct_projection(&self, expr: &BoundExpression) -> VortexResult<Option<DirectProjection>> {
         if self.dtype().is_nullable() {
             return Ok(None);
