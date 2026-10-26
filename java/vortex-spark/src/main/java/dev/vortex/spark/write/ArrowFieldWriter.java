@@ -30,6 +30,7 @@ import org.apache.spark.sql.types.BooleanType;
 import org.apache.spark.sql.types.ByteType;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DateType;
+import org.apache.spark.sql.types.Decimal;
 import org.apache.spark.sql.types.DecimalType;
 import org.apache.spark.sql.types.DoubleType;
 import org.apache.spark.sql.types.FloatType;
@@ -321,7 +322,12 @@ abstract class ArrowFieldWriter {
 
         @Override
         void setValue(SpecializedGetters row, int ordinal) {
-            decimals.setSafe(count, row.getDecimal(ordinal, precision, scale).toJavaBigDecimal());
+            Decimal value = row.getDecimal(ordinal, precision, scale);
+            if (precision <= Decimal.MAX_LONG_DIGITS()) {
+                decimals.setSafe(count, value.toUnscaledLong());
+            } else {
+                decimals.setSafe(count, value.toJavaBigDecimal());
+            }
         }
     }
 

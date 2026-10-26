@@ -94,13 +94,9 @@ public final class VortexDataWriter implements DataWriter<InternalRow>, AutoClos
                     .options(options.asCaseSensitiveMap())
                     .build();
             this.vectorSchemaRoot = VectorSchemaRoot.create(arrowSchema, allocator);
-            // Arrow's default capacity is a few thousand values per vector regardless of how many
-            // rows a batch holds, and the native writer keeps every batch it receives until a row
-            // block is complete, so the batch bounds the capacity. Start well below it, though:
-            // the buffers are allocated at the first row of every batch, and a partition writer
-            // that sees a handful of rows must not hold a whole batch of direct memory for its
-            // lifetime. Arrow doubles on demand and remembers the grown capacity for the next
-            // allocateNew(), so a writer that fills its batches reaches the batch size once.
+            // Small start so writers that see few rows hold little memory; Arrow grows on demand.
+            // It also keeps the largest capacity a batch needed, so one batch of huge values makes
+            // later batches allocate as much.
             int initialCapacity = Math.min(batchSize, INITIAL_VECTOR_CAPACITY);
             for (FieldVector vector : vectorSchemaRoot.getFieldVectors()) {
                 vector.setInitialCapacity(initialCapacity);
@@ -197,7 +193,11 @@ public final class VortexDataWriter implements DataWriter<InternalRow>, AutoClos
      */
     @Override
     public WriterCommitMessage commit() throws IOException {
-        checkNotFailed();
+        if (failed) {
+            // PartitionedVortexDataWriter never aborts a child whose commit threw, so release it here.
+            abort();
+            checkNotFailed();
+        }
         if (!closed) {
             IOException exception = null;
 
