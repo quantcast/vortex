@@ -321,14 +321,14 @@ impl StructReader {
                     return Ok(None);
                 };
                 let idx = field_index(name)?;
+                // Reading one field twice costs a read per output, so leave that to partitioning,
+                // which evaluates the field once.
+                if direct_fields.iter().any(|(other, _)| *other == idx) {
+                    return Ok(None);
+                }
                 let field_expr = if child.is::<GetItem>() && child.child(0).is_root() {
                     field_root(idx)?
                 } else {
-                    // Reading one field twice in different ways costs a read per output, so leave
-                    // that to partitioning, which evaluates the field once.
-                    if direct_fields.iter().any(|(other, _)| *other == idx) {
-                        return Ok(None);
-                    }
                     let item = Item::Field(name.clone());
                     step_into_struct_field(child.clone(), &item, field_root(idx)?.dtype().clone())?
                 };
@@ -1322,6 +1322,24 @@ mod tests {
             ("x", select(["a"], get_item("s", root()))),
             ("y", select(["b"], get_item("s", root()))),
         ],
+        Nullability::NonNullable,
+    ))]
+    #[case::pruned_then_whole(pack(
+        [
+            ("x", select(["a"], get_item("s", root()))),
+            ("y", get_item("s", root())),
+        ],
+        Nullability::NonNullable,
+    ))]
+    #[case::whole_then_pruned(pack(
+        [
+            ("x", get_item("s", root())),
+            ("y", select(["a"], get_item("s", root()))),
+        ],
+        Nullability::NonNullable,
+    ))]
+    #[case::whole_twice(pack(
+        [("x", get_item("s", root())), ("y", get_item("s", root()))],
         Nullability::NonNullable,
     ))]
     #[case::computed(pack(
