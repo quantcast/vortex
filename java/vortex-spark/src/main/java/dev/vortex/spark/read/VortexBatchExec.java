@@ -4,14 +4,19 @@
 package dev.vortex.spark.read;
 
 import com.google.common.collect.ImmutableMap;
+import dev.vortex.api.DataSource;
 import dev.vortex.api.Session;
 import dev.vortex.jni.NativeFiles;
 import dev.vortex.spark.VortexFilePartition;
+import dev.vortex.spark.VortexFilePartition.RowRange;
 import dev.vortex.spark.VortexSparkSession;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -50,20 +55,51 @@ public final class VortexBatchExec implements Batch {
     /**
      * Plans the input partitions for this batch scan.
      *
-     * <p>Directory-like entries are expanded to concrete {@code .vortex} files. Each resolved file becomes its own
+     * <p>Directory-like entries are expanded to concrete {@code .vortex} files. Each resolved file becomes one
      * {@link VortexFilePartition}; the partition carries the paths the reader should open, the requested schema, and
      * any Hive-style partition values parsed out of the path.
+     *
+     * <p>With {@code vortex.read.splitFiles=true} a file larger than the split size becomes several partitions covering
+     * disjoint row ranges (see {@link FileSplitPlanner}). That reads every file's footer on the driver to learn its row
+     * count and size, so it is off by default.
      */
     @Override
     public InputPartition[] planInputPartitions() {
         resolvedPaths = resolvePaths();
-        return resolvedPaths.stream()
-                .map(path -> {
-                    Map<String, String> partVals = PartitionPathUtils.parsePartitionValues(path);
-                    return new VortexFilePartition(
-                            List.of(path), readSchema, formatOptions, ImmutableMap.copyOf(partVals));
-                })
-                .toArray(InputPartition[]::new);
+        Map<String, FileSplitPlanner.FileSize> sizes =
+                FileSplitPlanner.enabled(formatOptions) ? measureFiles(resolvedPaths) : Map.of();
+        long maxSplitBytes = sizes.isEmpty() ? 0 : FileSplitPlanner.maxSplitBytes(formatOptions, sizes.values());
+
+        List<InputPartition> partitions = new ArrayList<>();
+        for (String path : resolvedPaths) {
+            Map<String, String> partVals = ImmutableMap.copyOf(PartitionPathUtils.parsePartitionValues(path));
+            FileSplitPlanner.FileSize size = sizes.get(path);
+            List<RowRange> ranges = size == null ? List.of() : FileSplitPlanner.splitRows(size, maxSplitBytes);
+            if (ranges.isEmpty()) {
+                partitions.add(new VortexFilePartition(List.of(path), readSchema, formatOptions, partVals));
+            }
+            for (RowRange range : ranges) {
+                partitions.add(new VortexFilePartition(List.of(path), readSchema, formatOptions, partVals, range));
+            }
+        }
+        return partitions.toArray(new InputPartition[0]);
+    }
+
+    /**
+     * Opens each file to read its exact row count and on-storage size from the footer. Files whose count is not exact
+     * or whose size is unknown are left out and read whole: a row range past the end of a file is a scan error.
+     */
+    private Map<String, FileSplitPlanner.FileSize> measureFiles(List<String> paths) {
+        Session session = VortexSparkSession.get(formatOptions);
+        Map<String, FileSplitPlanner.FileSize> sizes = new HashMap<>();
+        for (String path : paths) {
+            DataSource source = DataSource.open(session, path, formatOptions);
+            OptionalLong bytes = source.byteSize().asOptional();
+            if (source.rowCount() instanceof DataSource.RowCount.Exact exact && bytes.isPresent()) {
+                sizes.put(path, new FileSplitPlanner.FileSize(exact.value(), bytes.getAsLong()));
+            }
+        }
+        return sizes;
     }
 
     @Override

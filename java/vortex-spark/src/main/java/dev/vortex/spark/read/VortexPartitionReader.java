@@ -67,6 +67,10 @@ final class VortexPartitionReader implements PartitionReader<ColumnarBatch> {
         if (pushedPredicates != null && pushedPredicates.length > 0) {
             buildFilterExpression(pushedPredicates).ifPresent(options::filter);
         }
+        VortexFilePartition.RowRange rowRange = spark.rowRange();
+        if (rowRange != null) {
+            options.rowRangeBegin(rowRange.begin()).rowRangeEnd(rowRange.end());
+        }
         scan = dataSource.scan(options.build());
     }
 
