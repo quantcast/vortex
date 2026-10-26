@@ -77,8 +77,13 @@ pub(super) fn slice_constant_code(
     let code = code.as_primitive().as_::<usize>();
     if let Some(code) = code {
         let values = array.values().slice(code..code + 1)?;
+        // Keep the codes' nullability so the result's dtype matches the original dict's dtype.
+        let codes = ConstantArray::new(
+            Scalar::primitive(0u8, array.codes().dtype().nullability()),
+            len,
+        );
         Ok(Some(
-            DictArray::new(ConstantArray::new(0u8, len).into_array(), values).into_array(),
+            DictArray::new(codes.into_array(), values).into_array(),
         ))
     } else {
         Ok(Some(
@@ -118,6 +123,19 @@ mod tests {
         let sliced = dict.slice(1..4)?;
         let expected = PrimitiveArray::from_iter([20i32, 20, 20]).into_array();
         assert_arrays_eq!(sliced, expected, &mut ctx);
+        Ok(())
+    }
+
+    #[test]
+    fn slice_nullable_constant_valid_code() -> VortexResult<()> {
+        let mut ctx = SESSION.create_execution_ctx();
+        let dict = DictArray::new(
+            ConstantArray::new(Scalar::primitive(1u8, Nullable), 5).into_array(),
+            buffer![10i32, 20, 30].into_array(),
+        );
+        let sliced = dict.slice(1..4)?;
+        let expected = PrimitiveArray::from_option_iter([Some(20i32), Some(20), Some(20)]);
+        assert_arrays_eq!(sliced, expected.into_array(), &mut ctx);
         Ok(())
     }
 
