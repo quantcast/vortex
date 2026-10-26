@@ -6,14 +6,30 @@ package dev.vortex.spark.write;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.vortex.api.DataSource;
+import dev.vortex.api.Scan;
+import dev.vortex.api.ScanOptions;
+import dev.vortex.relocated.org.apache.arrow.memory.BufferAllocator;
+import dev.vortex.relocated.org.apache.arrow.memory.RootAllocator;
+import dev.vortex.relocated.org.apache.arrow.vector.FieldVector;
+import dev.vortex.relocated.org.apache.arrow.vector.VectorSchemaRoot;
+import dev.vortex.relocated.org.apache.arrow.vector.ipc.ArrowReader;
+import dev.vortex.spark.VortexSparkSession;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
+import org.apache.spark.sql.catalyst.expressions.UnsafeProjection;
+import org.apache.spark.sql.catalyst.expressions.UnsafeRow;
+import org.apache.spark.sql.catalyst.util.ArrayBasedMapData;
 import org.apache.spark.sql.catalyst.util.GenericArrayData;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+import org.apache.spark.unsafe.Platform;
 import org.apache.spark.unsafe.types.UTF8String;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -48,5 +64,108 @@ final class VortexDataWriterTest {
 
         assertEquals(rows, message.recordCount());
         assertTrue(held < 4L << 20, "the writer holds " + (held >> 10) + " KiB for " + rows + " rows");
+    }
+
+    /**
+     * Spark hands the writer one UnsafeRow object, rewritten in place for every row, so the writer has to consume each
+     * row before write() returns, including nulls and nested values, and across batch boundaries. The row's memory may
+     * be off-heap, and a byte[] behind a binary value may be overwritten by the caller afterwards.
+     */
+    @Test
+    void consumesReusedRowsAtWriteTime() throws IOException {
+        StructType schema = new StructType()
+                .add("id", DataTypes.LongType, false)
+                .add("s", DataTypes.StringType, true)
+                .add(
+                        "st",
+                        new StructType().add("a", DataTypes.LongType, false).add("b", DataTypes.StringType, true),
+                        true)
+                .add("arr", DataTypes.createArrayType(DataTypes.LongType, false), true)
+                .add("m", DataTypes.createMapType(DataTypes.StringType, DataTypes.LongType, false), true)
+                .add("bin", DataTypes.BinaryType, false);
+        UnsafeProjection projection = UnsafeProjection.create(schema);
+        String fileUri = tempDir.resolve("reused-rows.vortex").toUri().toString();
+        CaseInsensitiveStringMap options = new CaseInsensitiveStringMap(Map.of("vortex.write.batch.size", "4"));
+
+        VortexDataWriter writer = new VortexDataWriter(fileUri, schema, options);
+        List<String> expected = new ArrayList<>();
+        byte[] bin = new byte[2];
+        for (long i = 0; i < 12; i++) {
+            boolean odd = i % 2 == 1;
+            long[] arr = new long[(int) (i % 3)];
+            Arrays.setAll(arr, k -> k);
+            bin[0] = (byte) i;
+            bin[1] = (byte) -i;
+            GenericInternalRow generic = new GenericInternalRow(new Object[] {
+                i,
+                odd ? null : UTF8String.fromString("s" + i),
+                odd ? null : new GenericInternalRow(new Object[] {i, UTF8String.fromString("b" + i)}),
+                new GenericArrayData(arr),
+                odd
+                        ? null
+                        : new ArrayBasedMapData(
+                                new GenericArrayData(new Object[] {UTF8String.fromString("k" + i)}),
+                                new GenericArrayData(new long[] {i})),
+                bin,
+            });
+            UnsafeRow unsafeRow = projection.apply(generic);
+            switch ((int) (i % 3)) {
+                case 0 -> writer.write(unsafeRow);
+                case 1 -> {
+                    // The same row in off-heap memory, freed as soon as write() returns.
+                    int size = unsafeRow.getSizeInBytes();
+                    long address = Platform.allocateMemory(size);
+                    try {
+                        Platform.copyMemory(unsafeRow.getBaseObject(), unsafeRow.getBaseOffset(), null, address, size);
+                        UnsafeRow offHeap = new UnsafeRow(schema.length());
+                        offHeap.pointTo(null, address, size);
+                        writer.write(offHeap);
+                        Platform.setMemory(address, (byte) 0x5a, size);
+                    } finally {
+                        Platform.freeMemory(address);
+                    }
+                }
+                default -> writer.write(generic);
+            }
+            Arrays.fill(bin, (byte) 0x5a);
+            expected.add(String.join(
+                    "\t",
+                    Long.toString(i),
+                    odd ? "null" : "s" + i,
+                    odd ? "null" : "{\"a\":" + i + ",\"b\":\"b" + i + "\"}",
+                    Arrays.toString(arr).replace(" ", ""),
+                    odd ? "null" : "[{\"key\":\"k" + i + "\",\"value\":" + i + "}]",
+                    "[" + i + ", " + -i + "]"));
+        }
+        writer.commit();
+
+        assertEquals(expected, readRows(fileUri, options));
+    }
+
+    private static List<String> readRows(String fileUri, CaseInsensitiveStringMap options) throws IOException {
+        List<String> rows = new ArrayList<>();
+        try (BufferAllocator allocator = new RootAllocator()) {
+            Scan scan = DataSource.open(VortexSparkSession.get(options.asCaseSensitiveMap()), fileUri)
+                    .scan(ScanOptions.of());
+            while (scan.hasNext()) {
+                try (ArrowReader reader = scan.next().scanArrow(allocator)) {
+                    while (reader.loadNextBatch()) {
+                        VectorSchemaRoot root = reader.getVectorSchemaRoot();
+                        for (int i = 0; i < root.getRowCount(); i++) {
+                            StringBuilder line = new StringBuilder();
+                            for (FieldVector vector : root.getFieldVectors()) {
+                                if (line.length() > 0) {
+                                    line.append('\t');
+                                }
+                                Object value = vector.getObject(i);
+                                line.append(value instanceof byte[] bytes ? Arrays.toString(bytes) : value);
+                            }
+                            rows.add(line.toString());
+                        }
+                    }
+                }
+            }
+        }
+        return rows;
     }
 }
