@@ -58,9 +58,16 @@ public final class VortexTable implements Table, SupportsRead, SupportsWrite {
      */
     @Override
     public ScanBuilder newScanBuilder(CaseInsensitiveStringMap options) {
-        Map<String, String> opts = Maps.newHashMap();
-        opts.putAll(formatOptions);
-        opts.putAll(options);
+        Map<String, String> opts = Maps.newHashMap(formatOptions);
+        // Spark lowercases scan option keys. A scan option replaces the table option it matches in any case, under the
+        // table's spelling, which is the one case-sensitive lookups such as vortex.workerThreads find.
+        for (Map.Entry<String, String> option : options.entrySet()) {
+            String key = opts.keySet().stream()
+                    .filter(option.getKey()::equalsIgnoreCase)
+                    .findFirst()
+                    .orElse(option.getKey());
+            opts.put(key, option.getValue());
+        }
         return new VortexScanBuilder(opts, partitionTransforms)
                 .addAllPaths(paths)
                 .addAllColumns(toColumns(schema));

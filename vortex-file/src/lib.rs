@@ -113,6 +113,7 @@ mod pruning;
 mod read;
 /// Segment sources, caches, and sinks used by file readers and writers.
 pub mod segments;
+mod source;
 mod strategy;
 #[cfg(test)]
 mod tests;
@@ -188,7 +189,6 @@ pub fn register_default_encodings(session: &VortexSession) {
     vortex_datetime_parts::initialize(session);
     vortex_decimal_byte_parts::initialize(session);
     vortex_fastlanes::initialize(session);
-    vortex_runend::initialize(session);
     vortex_sequence::initialize(session);
     vortex_sparse::initialize(session);
 
@@ -205,7 +205,6 @@ pub(crate) fn enable_all_registered_array_encodings(session: &VortexSession) {
     use vortex_edition::EditionInclusion;
     use vortex_edition::EditionSessionExt;
     use vortex_error::VortexExpect;
-    use vortex_error::vortex_err;
     use vortex_layout::session::LayoutSessionExt;
 
     const TEST_EDITION: EditionId = EditionId::new("test", 2026, 7, 0);
@@ -214,9 +213,9 @@ pub(crate) fn enable_all_registered_array_encodings(session: &VortexSession) {
     editions
         .declare_edition(Edition {
             id: TEST_EDITION,
+            immutable: true,
             min_library_version: None,
         })
-        .map_err(|error| vortex_err!("{error}"))
         .vortex_expect("test edition is valid");
     let component_ids = [
         (
@@ -245,7 +244,6 @@ pub(crate) fn enable_all_registered_array_encodings(session: &VortexSession) {
         for id in ids {
             editions
                 .declare_inclusion(EditionInclusion::new(kind, &id, TEST_EDITION))
-                .map_err(|error| vortex_err!("{error}"))
                 .vortex_expect("registered component has one test-edition inclusion");
         }
     }
@@ -263,12 +261,10 @@ pub(crate) fn enable_all_registered_array_encodings(session: &VortexSession) {
                 id,
                 TEST_EDITION,
             ))
-            .map_err(|error| vortex_err!("{error}"))
             .vortex_expect("default aggregate has one test-edition inclusion");
     }
     session
         .enable_edition(TEST_EDITION)
-        .map_err(|error| vortex_err!("{error}"))
         .vortex_expect("test edition is registered");
 }
 

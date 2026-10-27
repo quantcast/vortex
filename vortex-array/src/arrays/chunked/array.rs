@@ -149,7 +149,7 @@ impl ChunkedData {
     pub fn validate(chunks: &[ArrayRef], dtype: &DType) -> VortexResult<()> {
         for chunk in chunks {
             if chunk.dtype() != dtype {
-                vortex_bail!(MismatchedTypes: dtype, chunk.dtype());
+                vortex_bail!("expected type: {} but instead got {}", dtype, chunk.dtype());
             }
         }
 
@@ -172,7 +172,11 @@ impl Array<Chunked> {
 
         for chunk in chunks {
             if VALIDATE && chunk.dtype() != &dtype {
-                vortex_bail!(MismatchedTypes: &dtype, chunk.dtype());
+                vortex_bail!(
+                    "expected type: {} but instead got {}",
+                    &dtype,
+                    chunk.dtype()
+                );
             }
             len += chunk.len();
             chunk_offsets.push(len);
@@ -215,7 +219,7 @@ impl Array<Chunked> {
 
     /// Constructs a new `ChunkedArray`.
     pub fn try_new(chunks: impl IntoIterator<Item = ArrayRef>, dtype: DType) -> VortexResult<Self> {
-        Array::try_from_parts(Self::parts_from_chunks::<true>(chunks, dtype)?)
+        Self::try_from_chunked_parts(Self::parts_from_chunks::<true>(chunks, dtype)?)
     }
 
     pub fn rechunk(
@@ -278,6 +282,26 @@ impl Array<Chunked> {
     pub unsafe fn new_unchecked(chunks: impl IntoIterator<Item = ArrayRef>, dtype: DType) -> Self {
         let parts = Self::parts_from_chunks::<false>(chunks, dtype)
             .vortex_expect("unchecked chunked construction cannot fail");
+        unsafe { Self::from_chunked_parts_unchecked(parts) }
+    }
+
+    /// Creates the array from parts after validation.
+    ///
+    /// The generic constructors call this function. It is not generic, so crates that call those
+    /// constructors do not each compile the `Chunked` array vtable.
+    fn try_from_chunked_parts(parts: ArrayParts<Chunked>) -> VortexResult<Self> {
+        Array::try_from_parts(parts)
+    }
+
+    /// Creates the array from parts without validation.
+    ///
+    /// The generic constructors call this function. It is not generic, so crates that call those
+    /// constructors do not each compile the `Chunked` array vtable.
+    ///
+    /// # Safety
+    ///
+    /// The parts must be logically consistent.
+    unsafe fn from_chunked_parts_unchecked(parts: ArrayParts<Chunked>) -> Self {
         unsafe { Array::from_parts_unchecked(parts) }
     }
 }
