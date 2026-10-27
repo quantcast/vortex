@@ -77,6 +77,22 @@ Dataset<Row> df = spark.read()
 When pointed at a directory, the connector discovers all `.vortex` files and creates one read
 partition per file.
 
+### Read Options
+
+| Option                      | Default                   | Description                                                  |
+|-----------------------------|---------------------------|--------------------------------------------------------------|
+| `vortex.read.splitFiles`    | `false`                   | Split files larger than the split size into several partitions (`true`/`false`) |
+| `vortex.read.maxSplitBytes` | Spark's `maxSplitBytes`   | Byte budget of one split when splitting; at least 1 MiB      |
+
+With `vortex.read.splitFiles=true`, a file larger than the split size is read by several
+partitions, each scanning a disjoint row range, so a few large files can use many Spark tasks.
+Planning then opens every file on the driver to read its row count and size from the footer,
+one round trip per file on object stores, which is why it is off by default. The split size is
+`vortex.read.maxSplitBytes` if set, otherwise Spark's rule for file sources:
+`min(spark.sql.files.maxPartitionBytes, max(spark.sql.files.openCostInBytes, totalBytes /
+parallelism))`. It is converted to rows at the file's average bytes per row and rounded down to
+the writer's 8192-row block.
+
 Column pruning is pushed down — only the columns referenced by the query are read from the file.
 
 Filter pushdown is also supported. Comparisons (`=`, `<>`, `>`, `>=`, `<`, `<=`), `IS NULL`,
