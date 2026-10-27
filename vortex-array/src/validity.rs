@@ -420,28 +420,21 @@ impl Validity {
             _ if len == 0 => Ok(Some(Validity::NonNullable)),
             Self::NonNullable => Ok(Some(Self::NonNullable)),
             Self::AllValid => Ok(Some(Self::NonNullable)),
-            Self::AllInvalid => {
-                Err(vortex_err!(InvalidArgument: "Cannot cast AllInvalid to NonNullable"))
-            }
+            Self::AllInvalid => Err(vortex_err!("Cannot cast AllInvalid to NonNullable")),
             Self::Array(_) => Ok(None),
         }
     }
 
     /// Convert into a variant compatible with the given nullability.
     ///
-    /// This is the execution-time half of the nullability-cast pair. It is paired with
-    /// [`Self::trivially_cast_nullability`], which is used by `CastReduce` rules. The pattern is:
-    ///
-    /// - **`CastReduce` rules** (metadata-only rewrites in the optimizer) call
-    ///   [`Self::trivially_cast_nullability`]. If it returns `Ok(None)`, the rule returns `Ok(None)`
-    ///   and the cast is deferred to execution.
-    /// - **`CastKernel` impls** (executed via [`ExecuteParentKernel`]) call this method, which
-    ///   may run the underlying validity array to compute statistics.
+    /// Unlike [`Self::trivially_cast_nullability`], this can execute the validity array, so a
+    /// [`CastKernel`] calls it. [`CastReduce`] documents when a cast rule needs the pair.
     ///
     /// Returns `Err` when nullability cannot be cast (for example, casting to non-nullable while
     /// invalid values are present).
     ///
-    /// [`ExecuteParentKernel`]: crate::kernel::ExecuteParentKernel
+    /// [`CastKernel`]: crate::scalar_fn::fns::cast::CastKernel
+    /// [`CastReduce`]: crate::scalar_fn::fns::cast::CastReduce
     #[inline]
     pub fn cast_nullability(
         self,
@@ -451,7 +444,7 @@ impl Validity {
     ) -> VortexResult<Validity> {
         match nullability {
             Nullability::NonNullable => self.into_non_nullable(len, ctx).ok_or_else(|| {
-                vortex_err!(InvalidArgument: "Cannot cast array with invalid values to non-nullable type.")
+                vortex_err!("Cannot cast array with invalid values to non-nullable type.")
             }),
             Nullability::Nullable => Ok(self.into_nullable()),
         }
@@ -459,11 +452,8 @@ impl Validity {
 
     /// Best-effort, non-executing variant of [`Self::cast_nullability`].
     ///
-    /// Use this from `CastReduce` rules — they run inside the optimizer where execution is not
-    /// available. The pairing with [`Self::cast_nullability`] is symmetric: every encoding that
-    /// implements `CastReduce` and inspects validity should also implement `CastKernel` so that
-    /// the harder cases (where statistics are not yet cached) can still be handled at execution
-    /// time.
+    /// A [`CastReduce`] rule that builds a new [`Validity`] calls this, because a rule cannot
+    /// execute.
     ///
     /// Return values:
     /// - `Ok(Some(_))` — the cast is provably safe and the new [`Validity`] is returned.
@@ -476,11 +466,13 @@ impl Validity {
     /// ```ignore
     /// let Some(new_validity) = array
     ///     .validity()?
-    ///     .trivial_cast_nullability(dtype.nullability(), array.len())?
+    ///     .trivially_cast_nullability(dtype.nullability(), array.len())?
     /// else {
     ///     return Ok(None);
     /// };
     /// ```
+    ///
+    /// [`CastReduce`]: crate::scalar_fn::fns::cast::CastReduce
     #[inline]
     pub fn trivially_cast_nullability(
         self,

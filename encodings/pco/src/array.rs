@@ -198,6 +198,10 @@ impl VTable for Pco {
         array: ArrayView<'_, Self>,
         _session: &VortexSession,
     ) -> VortexResult<Option<Vec<u8>>> {
+        vortex_ensure!(
+            array.slice_start() == 0 && array.slice_stop() == array.unsliced_n_rows(),
+            "cannot serialize sliced PCO arrays; materialize the slice first"
+        );
         Ok(Some(array.metadata.clone().encode_to_vec()))
     }
 
@@ -315,7 +319,10 @@ pub(crate) fn vortex_err_from_pco(err: PcoError) -> VortexError {
     use pco::errors::ErrorKind::*;
     match err.kind {
         Io(io_kind) => VortexError::from(std::io::Error::new(io_kind, err.message)),
-        InvalidArgument => vortex_err!(InvalidArgument: "{}", err.message),
+        InvalidArgument => vortex_err!("{}", err.message),
+        kind @ (Corruption | InsufficientData) => {
+            vortex_err!("Pco {:?} error: {}", kind, err.message)
+        }
         other => vortex_err!("Pco {:?} error: {}", other, err.message),
     }
 }

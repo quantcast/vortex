@@ -98,7 +98,9 @@ impl ScalarFnVTable for ByteLength {
             DType::Utf8(nullable) | DType::Binary(nullable) => {
                 Ok(DType::Primitive(PType::U64, *nullable))
             }
-            other => vortex_bail!("byte_length() requires Utf8 or Binary, got {other}"),
+            other => {
+                vortex_bail!("byte_length() requires Utf8 or Binary, got {other}")
+            }
         }
     }
 
@@ -112,13 +114,15 @@ impl ScalarFnVTable for ByteLength {
         let nullability = input.dtype().nullability();
 
         if let Some(scalar) = input.as_constant() {
-            let len_scalar = scalar_byte_length(&scalar, nullability)?;
+            let len_scalar = scalar_byte_length(scalar, nullability)?;
             return Ok(ConstantArray::new(len_scalar, args.row_count()).into_array());
         }
 
         match input.dtype() {
             DType::Utf8(_) | DType::Binary(_) => byte_length(&input, nullability, ctx),
-            other => vortex_bail!("byte_length() requires Utf8 or Binary, got {other}"),
+            other => {
+                vortex_bail!("byte_length() requires Utf8 or Binary, got {other}")
+            }
         }
     }
 
@@ -147,7 +151,9 @@ fn scalar_byte_length(scalar: &Scalar, nullability: Nullability) -> VortexResult
             .value()
             .vortex_expect("null binary scalar")
             .len(),
-        other => vortex_bail!("byte_length() requires Utf8 or Binary, got {other}"),
+        other => {
+            vortex_bail!("byte_length() requires Utf8 or Binary, got {other}")
+        }
     };
     let len: u64 = len.as_();
     Ok(Scalar::primitive(len, nullability))
