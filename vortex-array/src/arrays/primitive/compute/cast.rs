@@ -107,8 +107,9 @@ impl CastKernel for Primitive {
         if same_rep {
             if !values_fit_in(array, new_ptype, ctx, true) {
                 vortex_bail!(
-                    Compute: "Cannot cast {} to {} — values exceed target range",
-                    src_ptype, new_ptype,
+                    "Cannot cast {} to {} — values exceed target range",
+                    src_ptype,
+                    new_ptype,
                 );
             }
             return Ok(Some(reinterpret(array, new_ptype, new_validity)));
@@ -132,8 +133,9 @@ fn cast_to_decimal(
 ) -> VortexResult<ArrayRef> {
     if !array.ptype().is_int() {
         vortex_bail!(
-            Compute: "Cannot cast floating primitive {} to decimal {}",
-            array.ptype(), decimal_dtype
+            "Cannot cast floating primitive {} to decimal {}",
+            array.ptype(),
+            decimal_dtype
         );
     }
 
@@ -310,15 +312,38 @@ where
     // signed carrier that can represent both the source and target.
     let carrier_type = primitive_decimal_carrier_type(array.ptype()).max(T::DECIMAL_TYPE);
     match_each_decimal_value_type!(carrier_type, |W| {
-        let scale_factor = decimal_scale_factor::<W>(decimal_dtype.scale())?;
-        cast_integer_values_to_decimal_buffer(values, decimal_dtype, valid_values, |value| {
-            let value = <W as BigCast>::from(value)?;
-            let quotient = value / scale_factor;
-            let value = (quotient * scale_factor == value).then_some(quotient)?;
-            let value = <T as BigCast>::from(value)?;
-            decimal_value_fits_precision(value, decimal_dtype).then_some(value)
-        })
+        // `S` and `T` fix the carrier, so only one arm can match. The const condition lets the
+        // compiler skip codegen of the kernel for the other arms.
+        if const { is_scaled_down_carrier::<S, T, W>() } {
+            let scale_factor = decimal_scale_factor::<W>(decimal_dtype.scale())?;
+            cast_integer_values_to_decimal_buffer(values, decimal_dtype, valid_values, |value| {
+                let value = <W as BigCast>::from(value)?;
+                let quotient = value / scale_factor;
+                let value = (quotient * scale_factor == value).then_some(quotient)?;
+                let value = <T as BigCast>::from(value)?;
+                decimal_value_fits_precision(value, decimal_dtype).then_some(value)
+            })
+        } else {
+            unreachable!(
+                "{carrier_type} is not the scaled-down carrier for {}",
+                S::PTYPE
+            )
+        }
     })
+}
+
+/// Whether `W` is the carrier that a scaled-down cast from `S` to `T` selects.
+const fn is_scaled_down_carrier<S, T, W>() -> bool
+where
+    S: NativePType,
+    T: NativeDecimalType,
+    W: NativeDecimalType,
+{
+    let carrier = primitive_decimal_carrier_type(S::PTYPE) as u8;
+    let target = T::DECIMAL_TYPE as u8;
+    let selected = if carrier > target { carrier } else { target };
+
+    W::DECIMAL_TYPE as u8 == selected
 }
 
 fn cast_integer_values_to_decimal_buffer<S, T>(
@@ -350,7 +375,11 @@ fn signed_primitive_decimal_type(ptype: PType) -> Option<DecimalType> {
 }
 
 /// The smallest signed decimal physical type that represents every `ptype` value.
-fn primitive_decimal_carrier_type(ptype: PType) -> DecimalType {
+#[expect(
+    clippy::panic,
+    reason = "`unreachable!` with a message is not available in a const fn"
+)]
+const fn primitive_decimal_carrier_type(ptype: PType) -> DecimalType {
     match ptype {
         PType::I8 => DecimalType::I8,
         PType::U8 | PType::I16 => DecimalType::I16,
@@ -358,7 +387,7 @@ fn primitive_decimal_carrier_type(ptype: PType) -> DecimalType {
         PType::U32 | PType::I64 => DecimalType::I64,
         PType::U64 => DecimalType::I128,
         PType::F16 | PType::F32 | PType::F64 => {
-            unreachable!("floating primitives are rejected before selecting a decimal carrier")
+            panic!("floating primitives are rejected before selecting a decimal carrier")
         }
     }
 }
@@ -399,7 +428,7 @@ where
 #[cold]
 #[inline(never)]
 fn scale_factor_error(scale: i8) -> VortexError {
-    vortex_err!(Compute: "Cannot create decimal scale factor for scale {scale}")
+    vortex_err!("Cannot create decimal scale factor for scale {scale}")
 }
 
 fn decimal_value_fits_precision<T: NativeDecimalType>(
@@ -450,7 +479,7 @@ where
 {
     let Some(value) = <i256 as BigCast>::from(value) else {
         return vortex_err!(
-            Compute: "primitive value cannot be represented while casting to {}",
+            "primitive value cannot be represented while casting to {}",
             decimal_dtype
         );
     };
@@ -465,7 +494,7 @@ where
                 "primitive-to-decimal fast path rejected a value that the scalar cast accepts"
             );
             vortex_err!(
-                Compute: "primitive value cannot be represented while casting to {}",
+                "primitive value cannot be represented while casting to {}",
                 decimal_dtype
             )
         }
@@ -484,8 +513,9 @@ where
 {
     let overflow = || {
         vortex_err!(
-            Compute: "Cannot cast {} to {} — value exceeds target range",
-            F::PTYPE, T::PTYPE,
+            "Cannot cast {} to {} — value exceeds target range",
+            F::PTYPE,
+            T::PTYPE,
         )
     };
 
@@ -664,7 +694,6 @@ mod test {
     use rstest::rstest;
     use vortex_buffer::BitBuffer;
     use vortex_buffer::buffer;
-    use vortex_error::VortexError;
     use vortex_error::VortexResult;
     use vortex_mask::Mask;
     use vortex_session::VortexSession;
@@ -685,6 +714,7 @@ mod test {
     use crate::dtype::PType;
     use crate::dtype::i256;
     use crate::expr::stats::Stat;
+    use crate::match_each_decimal_value_type;
     use crate::validity::Validity;
 
     static SESSION: LazyLock<VortexSession> = LazyLock::new(VortexSession::empty);
@@ -1011,6 +1041,39 @@ mod test {
         Ok(())
     }
 
+    #[rstest]
+    fn cast_integer_to_negative_scale_decimal_every_width(
+        #[values(
+            PType::U8, PType::U16, PType::U32, PType::U64, PType::I8, PType::I16, PType::I32,
+            PType::I64
+        )]
+        ptype: PType,
+        #[values(2, 4, 9, 18, 38, 76)] precision: u8,
+    ) -> VortexResult<()> {
+        let mut ctx = SESSION.create_execution_ctx();
+        let decimal_dtype = DecimalDType::new(precision, -1);
+        let casted = PrimitiveArray::from_iter([100u8, 30])
+            .into_array()
+            .cast(DType::Primitive(ptype, Nullability::NonNullable))?
+            .cast(DType::Decimal(decimal_dtype, Nullability::NonNullable))?
+            .execute::<DecimalArray>(&mut ctx)?;
+
+        assert_eq!(
+            casted.values_type(),
+            DecimalType::smallest_decimal_value_type(&decimal_dtype)
+        );
+        match_each_decimal_value_type!(casted.values_type(), |T| {
+            let expected = [10i8, 3].map(<T as crate::dtype::BigCast>::from);
+            let actual = casted
+                .buffer::<T>()
+                .iter()
+                .map(|&value| Some(value))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+        });
+        Ok(())
+    }
+
     #[test]
     fn cast_zero_to_large_negative_scale_decimal() -> VortexResult<()> {
         let mut ctx = SESSION.create_execution_ctx();
@@ -1093,7 +1156,6 @@ mod test {
                     .map(|c| c.into_array())
             })
             .unwrap_err();
-        assert!(matches!(error, VortexError::Compute(..)));
         assert!(error.to_string().contains("values exceed target range"));
     }
 
@@ -1109,7 +1171,6 @@ mod test {
             })
             .unwrap_err();
 
-        assert!(matches!(err, VortexError::InvalidArgument(..)));
         assert!(
             err.to_string()
                 .contains("Cannot cast array with invalid values to non-nullable type.")
@@ -1173,7 +1234,10 @@ mod test {
                     .map(|c| c.into_array())
             })
             .unwrap_err();
-        assert!(matches!(err, VortexError::Compute(..)));
+        assert!(
+            err.to_string().contains("values exceed target range"),
+            "{err}"
+        );
     }
 
     /// All-null array cast between same-width types should succeed without

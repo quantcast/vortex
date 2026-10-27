@@ -67,13 +67,13 @@ pub struct ParquetVariant;
 struct ParquetVariantMetadataProto {
     /// Whether the un-shredded `value` child is present.
     #[prost(bool, tag = "1")]
-    pub has_value: bool,
+    pub(crate) has_value: bool,
     /// DType of the shredded `typed_value`, if present.
     #[prost(message, optional, tag = "2")]
-    pub typed_value_dtype: Option<pb::DType>,
+    pub(crate) typed_value_dtype: Option<pb::DType>,
     /// Whether the `value` child is nullable.
     #[prost(bool, tag = "3")]
-    pub value_nullable: bool,
+    pub(crate) value_nullable: bool,
 }
 
 /// A [`ParquetVariant`]-encoded Vortex array.
@@ -407,12 +407,11 @@ mod tests {
         vortex_file::register_default_encodings(&session);
         session.arrays().register(ParquetVariant);
         let editions = session.editions();
-        editions
-            .declare_edition(Edition {
-                id: TEST_EDITION,
-                min_library_version: None,
-            })
-            .map_err(|error| vortex_err!("{error}"))?;
+        editions.declare_edition(Edition {
+            id: TEST_EDITION,
+            immutable: true,
+            min_library_version: None,
+        })?;
         let component_ids = [
             (
                 ComponentKind::Array,
@@ -438,9 +437,7 @@ mod tests {
         ];
         for (kind, ids) in component_ids {
             for id in ids {
-                editions
-                    .declare_inclusion(EditionInclusion::new(kind, &id, TEST_EDITION))
-                    .map_err(|error| vortex_err!("{error}"))?;
+                editions.declare_inclusion(EditionInclusion::new(kind, &id, TEST_EDITION))?;
             }
         }
         for id in [
@@ -451,17 +448,13 @@ mod tests {
             "vortex.nan_count",
             "vortex.null_count",
         ] {
-            editions
-                .declare_inclusion(EditionInclusion::new(
-                    ComponentKind::Aggregate,
-                    id,
-                    TEST_EDITION,
-                ))
-                .map_err(|error| vortex_err!("{error}"))?;
+            editions.declare_inclusion(EditionInclusion::new(
+                ComponentKind::Aggregate,
+                id,
+                TEST_EDITION,
+            ))?;
         }
-        session
-            .enable_edition(TEST_EDITION)
-            .map_err(|error| vortex_err!("{error}"))?;
+        session.enable_edition(TEST_EDITION)?;
         Ok(session)
     }
 
