@@ -30,8 +30,7 @@ pub struct TimestampParts {
 ///
 /// # Errors
 ///
-/// Returns an error if `time_unit` is days, which cannot be split, or if the timestamp's days
-/// since the epoch do not fit the `i32` days part.
+/// Returns an error if `time_unit` is days, or if [`days_fit`] is false.
 pub fn split(timestamp: i64, time_unit: TimeUnit) -> VortexResult<TimestampParts> {
     let parts = match time_unit {
         TimeUnit::Nanoseconds => split_with_divisor::<1_000_000_000>(timestamp),
@@ -50,9 +49,6 @@ pub fn split(timestamp: i64, time_unit: TimeUnit) -> VortexResult<TimestampParts
 }
 
 /// Whether the days since the epoch of `timestamp` fit the `i32` days part of [`TimestampParts`].
-///
-/// Every `i64` count of microseconds or nanoseconds fits. Second and millisecond counts can lie
-/// further from the epoch than `i32::MAX` days.
 pub fn days_fit(timestamp: i64, time_unit: TimeUnit) -> bool {
     let ticks_per_second = match time_unit {
         TimeUnit::Nanoseconds => 1_000_000_000,
@@ -66,8 +62,7 @@ pub fn days_fit(timestamp: i64, time_unit: TimeUnit) -> bool {
 
 /// Split a Unix timestamp into parts using a constant DIVISOR.
 ///
-/// Days that do not fit `i32` wrap: callers check [`days_fit`] first, as [`split`] does for a
-/// single timestamp and `split_temporal` does for a whole array.
+/// Days that do not fit `i32` wrap, so callers check [`days_fit`] first.
 #[inline]
 pub(crate) fn split_with_divisor<const DIVISOR: i64>(timestamp: i64) -> TimestampParts {
     let days = timestamp / (SECONDS_PER_DAY * DIVISOR);
