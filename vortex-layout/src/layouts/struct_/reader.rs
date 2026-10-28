@@ -873,7 +873,6 @@ mod tests {
         (segments, layout)
     }
 
-
     /// Selecting one field of a nullable struct reads only that field and the struct validity.
     #[rstest]
     #[case::select_one_field(select(["b"], root()), 2)]
