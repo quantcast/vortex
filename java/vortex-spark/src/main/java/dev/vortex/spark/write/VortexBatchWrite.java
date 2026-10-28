@@ -82,6 +82,8 @@ public final class VortexBatchWrite implements Write, BatchWrite, Serializable {
      */
     @Override
     public DataWriterFactory createBatchWriterFactory(PhysicalWriteInfo info) {
+        // Built first so that invalid options fail before overwrite deletes anything.
+        var factory = new VortexDataWriterFactory(outputPath, schema, options, resolvedTransforms);
         // Handle overwrite cleanup BEFORE writing starts
         if (overwrite) {
             var session = VortexSparkSession.get(options);
@@ -97,7 +99,7 @@ public final class VortexBatchWrite implements Write, BatchWrite, Serializable {
             NativeFiles.delete(session, uris.toArray(new String[0]), options);
         }
 
-        return new VortexDataWriterFactory(outputPath, schema, options, resolvedTransforms);
+        return factory;
     }
 
     /**

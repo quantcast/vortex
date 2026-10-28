@@ -7,8 +7,10 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.vortex.jni.NativeRuntime;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -35,6 +37,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Integration test for Vortex DataSource write and read functionality.
@@ -68,6 +72,34 @@ public final class VortexDataSourceWriteTest {
         if (spark != null) {
             spark.stop();
         }
+    }
+
+    @Test
+    @DisplayName("Writes start the configured number of native worker threads")
+    public void testWriteSetsNativeWorkerThreads() {
+        NativeRuntime.setWorkerThreads(0);
+        createTestDataFrame(10)
+                .write()
+                .format("vortex")
+                .option("vortex.workerThreads", "3")
+                .mode(SaveMode.Overwrite)
+                .save(tempDir.resolve("worker_threads").toUri().toString());
+        assertEquals(3, NativeRuntime.workerCount());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"vortex.workerThreads", "vortex.write.batch.size", "batch.size"})
+    @DisplayName("An invalid option fails before overwrite deletes anything")
+    public void testInvalidOptionKeepsExistingFiles(String option) {
+        String path = tempDir.resolve("invalid_" + option).toUri().toString();
+        createTestDataFrame(10).write().format("vortex").mode(SaveMode.Append).save(path);
+        assertThrows(Exception.class, () -> createTestDataFrame(5)
+                .write()
+                .format("vortex")
+                .option(option, "many")
+                .mode(SaveMode.Overwrite)
+                .save(path));
+        assertEquals(10, spark.read().format("vortex").load(path).count());
     }
 
     @Test
