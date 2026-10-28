@@ -152,9 +152,9 @@ public final class PartitionedVortexDataWriter implements DataWriter<InternalRow
                 if (msg instanceof VortexWriterCommitMessage) {
                     messages.add((VortexWriterCommitMessage) msg);
                 }
-            } catch (IOException e) {
+            } catch (IOException | RuntimeException e) {
                 if (firstException == null) {
-                    firstException = e;
+                    firstException = e instanceof IOException io ? io : new IOException("Failed to commit", e);
                 } else {
                     firstException.addSuppressed(e);
                 }
@@ -164,6 +164,14 @@ public final class PartitionedVortexDataWriter implements DataWriter<InternalRow
         closed = true;
 
         if (firstException != null) {
+            // Spark retries the whole task, so the partitions that did commit must not keep their files either.
+            for (VortexWriterCommitMessage message : messages) {
+                try {
+                    VortexDataWriter.deleteFile(message.filePath(), options);
+                } catch (RuntimeException e) {
+                    firstException.addSuppressed(e);
+                }
+            }
             throw firstException;
         }
 
