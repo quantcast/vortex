@@ -529,6 +529,33 @@ public final class VortexDataSourceWriteTest {
                 nestedRows.stream().map(row -> row.getLong(1)).toList());
     }
 
+    @Test
+    @DisplayName("Reads skip Spark hidden files and directories in the table directory")
+    public void testReadSkipsHiddenFiles() throws IOException {
+        int numRows = 100;
+        Dataset<Row> originalDf = createTestDataFrame(numRows);
+        Path outputPath = tempDir.resolve("vortex_with_sidecars");
+        originalDf
+                .repartition(2)
+                .write()
+                .format("vortex")
+                .mode(SaveMode.Overwrite)
+                .save(outputPath.toString());
+
+        // Sidecars a Hadoop commit protocol or checksum filesystem leaves behind, which are not Vortex files...
+        Files.write(outputPath.resolve("_SUCCESS"), new byte[0]);
+        Files.write(outputPath.resolve(".part-00000-0.vortex.crc"), new byte[] {1, 2, 3, 4});
+        // ...and a valid Vortex file under a hidden directory, whose rows must not be read either.
+        Path temporary =
+                Files.createDirectories(outputPath.resolve("_temporary").resolve("0"));
+        Files.copy(findVortexFiles(outputPath).get(0), temporary.resolve("part-00000-9.vortex"));
+
+        Dataset<Row> readDf = spark.read().format("vortex").load(outputPath.toString());
+
+        assertSchemaEquals(originalDf.schema(), readDf.schema());
+        assertEquals(numRows, readDf.count(), "Hidden files must not contribute rows");
+    }
+
     /** Creates a test DataFrame with monotonically increasing integers and their string representations. */
     private Dataset<Row> createTestDataFrame(int numRows) {
         // Create DataFrame with monotonically increasing integers
