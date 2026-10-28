@@ -71,9 +71,7 @@ impl Scheme for TemporalScheme {
         _compress_ctx: CompressorContext,
         exec_ctx: &mut ExecutionCtx,
     ) -> CompressionEstimate {
-        // Temporal compression (splitting into parts) is almost always beneficial, but second and
-        // millisecond timestamps more than i32::MAX days from the epoch have no i32 days part, so
-        // `split_temporal` rejects them and the storage array is compressed instead.
+        // Second and millisecond timestamps past i32::MAX days cannot be split.
         let splittable = TemporalArray::try_from(data.array().clone())
             .and_then(|temporal| can_split_temporal(&temporal, exec_ctx));
         match splittable {

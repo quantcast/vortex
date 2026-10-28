@@ -604,8 +604,6 @@ mod tests {
         Ok(())
     }
 
-    /// A timestamp on the last day of year 9999 lies beyond `jiff`'s range but is a valid Arrow
-    /// and Parquet value, so the statistics of a column holding one must not fail.
     #[test]
     fn test_timestamp_min_max_beyond_jiff_range() -> VortexResult<()> {
         // 9999-12-31T00:00:00Z
