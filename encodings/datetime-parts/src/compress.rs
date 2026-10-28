@@ -22,9 +22,8 @@ use vortex_error::vortex_bail;
 
 use crate::timestamp;
 
-/// All parts are stored as i32. Seconds and subseconds always fit in i32. Days are checked by
-/// [`split_temporal`]: second and millisecond counts can lie more than `i32::MAX` days from the
-/// epoch, and such arrays are rejected rather than wrapped.
+/// All parts are stored as i32. Second and millisecond timestamps can lie more than `i32::MAX`
+/// days from the epoch, so [`split_temporal`] checks the days.
 pub struct TemporalParts {
     pub days: ArrayRef,
     pub seconds: ArrayRef,
@@ -38,8 +37,7 @@ pub struct TemporalParts {
 ///
 /// # Errors
 ///
-/// Returns an error if the time unit is days, or if a valid timestamp lies more than `i32::MAX`
-/// days from the epoch (see [`can_split_temporal`]).
+/// Returns an error if the time unit is days, or if [`can_split_temporal`] is false.
 pub fn split_temporal(array: TemporalArray, ctx: &mut ExecutionCtx) -> VortexResult<TemporalParts> {
     let time_unit = array.temporal_metadata().time_unit();
     if matches!(time_unit, TimeUnit::Days) {
@@ -124,8 +122,7 @@ pub fn split_temporal(array: TemporalArray, ctx: &mut ExecutionCtx) -> VortexRes
     })
 }
 
-/// Whether `array` can be split into [`TemporalParts`]: every valid timestamp's days since the
-/// epoch fit the `i32` days part. Microsecond and nanosecond timestamps always can.
+/// Whether every valid timestamp's days since the epoch fit the `i32` days part.
 pub fn can_split_temporal(array: &TemporalArray, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
     let time_unit = array.temporal_metadata().time_unit();
     if matches!(time_unit, TimeUnit::Days) {
@@ -134,7 +131,6 @@ pub fn can_split_temporal(array: &TemporalArray, ctx: &mut ExecutionCtx) -> Vort
     days_fit(array.temporal_values(), time_unit, ctx)
 }
 
-/// Checks the days of the valid extremes of `values`, which bound every other valid value.
 fn days_fit(values: &ArrayRef, time_unit: TimeUnit, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
     if matches!(time_unit, TimeUnit::Microseconds | TimeUnit::Nanoseconds) {
         return Ok(true);
@@ -282,8 +278,6 @@ mod tests {
         ));
     }
 
-    /// Extreme timestamps either split exactly or are rejected, never wrapped: `i64::MAX` seconds
-    /// used to come back as 50027779063807.
     #[rstest]
     #[case::seconds(TimeUnit::Seconds, false)]
     #[case::milliseconds(TimeUnit::Milliseconds, false)]
