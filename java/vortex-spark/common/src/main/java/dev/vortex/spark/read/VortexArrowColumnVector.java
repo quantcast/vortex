@@ -5,6 +5,7 @@
 package dev.vortex.spark.read;
 
 import com.jakewharton.nopen.annotation.Open;
+import dev.vortex.relocated.org.apache.arrow.memory.ArrowBuf;
 import dev.vortex.relocated.org.apache.arrow.vector.*;
 import dev.vortex.relocated.org.apache.arrow.vector.complex.ListVector;
 import dev.vortex.relocated.org.apache.arrow.vector.complex.ListViewVector;
@@ -646,8 +647,26 @@ public class VortexArrowColumnVector extends ColumnVector {
         }
     }
 
+    /**
+     * Reads Utf8View values in place, like {@link StringAccessor} does for Utf8: the returned
+     * {@link UTF8String} aliases vector memory and is valid until the batch is released. Spark's
+     * own column vectors return such aliases too, and Spark copies every value it keeps past the
+     * batch.
+     * <p>
+     * Each 16-byte view starts with the byte length. Values of at most
+     * {@link BaseVariableWidthViewVector#INLINE_SIZE} bytes follow it inline; longer values keep a
+     * 4-byte prefix, then the index of the data buffer and the offset within it. The view is
+     * decoded here rather than through {@code getDataPointer}, which in Arrow 19 ignores the
+     * offset and misclassifies 12-byte values.
+     */
     @Open
     static class StringViewAccessor extends VortexArrowColumnVector.ArrowVectorAccessor {
+
+        private static final int ELEMENT_SIZE = BaseVariableWidthViewVector.ELEMENT_SIZE;
+        private static final int INLINE_SIZE = BaseVariableWidthViewVector.INLINE_SIZE;
+        private static final int LENGTH_WIDTH = BaseVariableWidthViewVector.LENGTH_WIDTH;
+        private static final int BUF_INDEX_OFFSET = LENGTH_WIDTH + BaseVariableWidthViewVector.PREFIX_WIDTH;
+        private static final int DATA_OFFSET_OFFSET = BUF_INDEX_OFFSET + BaseVariableWidthViewVector.BUF_INDEX_WIDTH;
 
         private final ViewVarCharVector accessor;
 
@@ -658,9 +677,22 @@ public class VortexArrowColumnVector extends ColumnVector {
 
         @Override
         final UTF8String getUTF8String(int rowId) {
-            // View values may be inlined in the view buffer rather than contiguous in a data
-            // buffer, so copy out rather than aliasing vector memory.
-            return UTF8String.fromBytes(accessor.get(rowId));
+            ArrowBuf views = accessor.getDataBuffer();
+            long view = (long) rowId * ELEMENT_SIZE;
+            int length = views.getInt(view);
+            if (length < 0) {
+                throw new IndexOutOfBoundsException("view " + rowId + " has a negative length " + length);
+            }
+            if (length <= INLINE_SIZE) {
+                return UTF8String.fromAddress(null, views.memoryAddress() + view + LENGTH_WIDTH, length);
+            }
+            ArrowBuf data = accessor.getDataBuffers().get(views.getInt(view + BUF_INDEX_OFFSET));
+            int offset = views.getInt(view + DATA_OFFSET_OFFSET);
+            if (offset < 0 || (long) offset + length > data.capacity()) {
+                throw new IndexOutOfBoundsException(
+                        "view " + rowId + " points outside its data buffer: offset " + offset + ", length " + length);
+            }
+            return UTF8String.fromAddress(null, data.memoryAddress() + offset, length);
         }
     }
 
