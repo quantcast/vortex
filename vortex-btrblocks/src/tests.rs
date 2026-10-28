@@ -112,8 +112,6 @@ fn test_default_compressor_roundtrip() -> VortexResult<()> {
     Ok(())
 }
 
-/// Second timestamps beyond i32::MAX days from the epoch have no DateTimeParts form; the
-/// compressor must fall back to the storage rather than write wrapped days.
 #[test]
 fn test_extreme_second_timestamps_roundtrip() -> VortexResult<()> {
     let compressor = BtrBlocksCompressorBuilder::from_session(&SESSION)
