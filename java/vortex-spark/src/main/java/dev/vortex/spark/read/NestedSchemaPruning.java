@@ -45,10 +45,10 @@ final class NestedSchemaPruning {
      * <p>When nothing is pruned this is a plain {@code select} of the top-level columns.
      */
     static Expression projection(StructType readSchema, StructType tableSchema) {
-        return structProjection(Expression.root(), true, readSchema, tableSchema);
+        return structProjection(Expression.root(), false, readSchema, tableSchema);
     }
 
-    private static Expression structProjection(Expression struct, boolean isRoot, StructType read, StructType table) {
+    private static Expression structProjection(Expression struct, boolean nullable, StructType read, StructType table) {
         String[] names = read.fieldNames();
         // `select` keeps the struct's own nulls, so use it when no child needs pruning.
         if (!isPruned(read, table)) {
@@ -57,15 +57,16 @@ final class NestedSchemaPruning {
         Expression[] children = new Expression[names.length];
         for (int i = 0; i < names.length; i++) {
             Expression field = Expression.getItem(names[i], struct);
-            DataType readType = read.fields()[i].dataType();
+            StructField readField = read.fields()[i];
             DataType tableType = table.apply(names[i]).dataType();
-            children[i] = readType.equals(tableType)
+            children[i] = readField.dataType().equals(tableType)
                     ? field
-                    : structProjection(field, false, (StructType) readType, (StructType) tableType);
+                    : structProjection(
+                            field, readField.nullable(), (StructType) readField.dataType(), (StructType) tableType);
         }
         Expression packed = Expression.pack(names, children, false);
-        // `pack` builds a struct with no nulls, so carry over the source struct's nulls. The root has none.
-        return isRoot ? packed : Expression.mask(packed, Expression.isNotNull(struct));
+        // `pack` builds a struct with no nulls, so carry over the source struct's nulls.
+        return nullable ? Expression.mask(packed, Expression.isNotNull(struct)) : packed;
     }
 
     private static boolean isPruned(StructType read, StructType table) {

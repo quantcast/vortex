@@ -102,25 +102,25 @@ public final class VortexNestedSchemaPruningTest {
     @Test
     @DisplayName("Selecting a struct field other than the first returns that field")
     public void structField() {
-        assertEquals(C_VALUES, longsOf(functions.col("s.c")));
+        assertEquals(C_VALUES, valuesOf(table, functions.col("s.c")));
     }
 
     @Test
     @DisplayName("Selecting a field of the structs in an array returns that field")
     public void arrayElementField() {
-        assertEquals(C_VALUES, longsOf(functions.element_at(functions.col("arr.c"), 1)));
+        assertEquals(C_VALUES, valuesOf(table, functions.element_at(functions.col("arr.c"), 1)));
     }
 
     @Test
     @DisplayName("Selecting a field of the structs in a map returns that field")
     public void mapValueField() {
-        assertEquals(C_VALUES, longsOf(functions.col("m").getItem("k").getField("c")));
+        assertEquals(C_VALUES, valuesOf(table, functions.col("m").getItem("k").getField("c")));
     }
 
     @Test
     @DisplayName("Selecting a field of a struct inside a struct returns that field")
     public void structInStructField() {
-        assertEquals(C_VALUES, longsOf(functions.col("outer.inner.c")));
+        assertEquals(C_VALUES, valuesOf(table, functions.col("outer.inner.c")));
     }
 
     @Test
@@ -170,10 +170,6 @@ public final class VortexNestedSchemaPruningTest {
 
     private static Column nullWhen(Column condition, Column value) {
         return functions.when(condition, functions.lit(null)).otherwise(value);
-    }
-
-    private List<Long> longsOf(Column column) {
-        return valuesOf(table, column);
     }
 
     /** Returns {@code column} for each row of {@code rows}, ordered by id. */

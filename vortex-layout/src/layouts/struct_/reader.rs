@@ -873,11 +873,11 @@ mod tests {
         (segments, layout)
     }
 
-    /// Selecting one field of a nullable struct reads only that field and the struct validity.
+    /// Projecting a nullable struct reads only the fields it keeps, plus the struct validity.
     #[rstest]
     #[case::select_one_field(select(["b"], root()), 2)]
     #[case::whole_struct(root(), 4)]
-    fn test_nullable_struct_projection_reads_only_selected_fields(
+    fn test_nullable_struct_projection_request_count(
         #[from(null_struct_layout)] (segments, layout): (Arc<dyn SegmentSource>, LayoutRef),
         #[case] expr: Expression,
         #[case] expected_requests: usize,
@@ -908,8 +908,8 @@ mod tests {
         Ok(())
     }
 
-    /// The projections the Spark connector emits for a pruned nullable struct column read only
-    /// the fields they keep, plus the struct validity.
+    /// Projecting a pruned nullable struct column, with `select` or a masked `pack`, reads only
+    /// the fields it keeps, plus the struct validity.
     #[rstest]
     #[case::select(
         select(["b"], get_item("s", root())),

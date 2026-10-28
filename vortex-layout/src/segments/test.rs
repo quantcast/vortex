@@ -62,9 +62,12 @@ impl SegmentSink for TestSegments {
 }
 
 /// A [`SegmentSource`] that counts the segments requested from an inner source.
+///
+/// Clones share the count.
+#[derive(Clone)]
 pub struct CountingSegmentSource {
     inner: Arc<dyn SegmentSource>,
-    requests: AtomicUsize,
+    requests: Arc<AtomicUsize>,
 }
 
 impl CountingSegmentSource {
@@ -72,7 +75,7 @@ impl CountingSegmentSource {
     pub fn new(inner: Arc<dyn SegmentSource>) -> Self {
         Self {
             inner,
-            requests: AtomicUsize::new(0),
+            requests: Arc::new(AtomicUsize::new(0)),
         }
     }
 
