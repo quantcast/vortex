@@ -134,8 +134,7 @@ impl fmt::Display for TimestampValue<'_> {
             TimestampValue::Microseconds(v, tz) => (TimeUnit::Microseconds, v, tz),
             TimestampValue::Nanoseconds(v, tz) => (TimeUnit::Nanoseconds, v, tz),
         };
-        // `jiff` stops 26 hours short of the end of years 9999 and -9999, so a valid timestamp may
-        // have no calendar rendering; show the count then.
+        // jiff cannot render the last 26 hours of year 9999, so show the raw count.
         let Ok(ts) = unit
             .to_jiff_span(value)
             .and_then(|span| Ok(jiff::Timestamp::UNIX_EPOCH.checked_add(span)?))
@@ -249,8 +248,7 @@ impl ExtVTable for Timestamp {
         let ts_value = storage_value.as_primitive().cast::<i64>()?;
         let tz = metadata.tz.as_ref();
 
-        // Every `i64` count of the unit is a valid timestamp, as in Arrow and Parquet. `jiff`'s
-        // narrower range only bounds what `Display` can render as a calendar date.
+        // Any i64 count is valid, as in Arrow; jiff's range only limits Display.
         Ok(match metadata.unit {
             TimeUnit::Nanoseconds => TimestampValue::Nanoseconds(ts_value, tz),
             TimeUnit::Microseconds => TimestampValue::Microseconds(ts_value, tz),
@@ -284,8 +282,6 @@ mod tests {
         Ok(())
     }
 
-    /// Arrow and Parquet store every `i64` count of the unit, so a timestamp on the last day of
-    /// year 9999, beyond `jiff`'s range, is a valid scalar; it displays as the raw count.
     #[cfg_attr(miri, ignore)]
     #[rstest]
     #[case::end_of_9999(
