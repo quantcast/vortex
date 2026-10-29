@@ -94,6 +94,9 @@ public final class VortexAggregateReaderFactory extends FilePartitionReaderFacto
                                     + "Set the vortex.aggregatePushdown option to false to count rows instead.",
                             file.toPath()));
                 }
+                // Splitting is off under aggregate pushdown, but a split must still count only its own rows.
+                long splitRows = SplitRows.of(file.start(), file.length(), file.fileSize(), rowCount.getAsLong())
+                        .count();
                 StructField[] fields = aggregateSchema.fields();
                 ColumnVector[] vectors = new ColumnVector[fields.length];
                 for (int i = 0; i < groupByOrdinals.length; i++) {
@@ -103,7 +106,7 @@ public final class VortexAggregateReaderFactory extends FilePartitionReaderFacto
                 for (int i = groupByOrdinals.length; i < fields.length; i++) {
                     ConstantColumnVector count = new ConstantColumnVector(1, fields[i].dataType());
                     count.setNotNull();
-                    count.setLong(rowCount.getAsLong());
+                    count.setLong(splitRows);
                     vectors[i] = count;
                 }
                 batch = new ColumnarBatch(vectors, 1);
