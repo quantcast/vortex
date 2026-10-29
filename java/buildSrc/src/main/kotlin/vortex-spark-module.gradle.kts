@@ -121,6 +121,10 @@ testing {
                 implementation(libs.findLibrary("s3mock-testcontainers").get())
                 implementation(libs.findLibrary("testcontainers-juputer").get())
                 runtimeOnly("org.apache.hadoop:hadoop-aws:$hadoopVersion")
+                // Spark's cloud commit protocol, for the S3A committer tests; the rest of its tree is cloud SDKs.
+                runtimeOnly("org.apache.spark:spark-hadoop-cloud_$scalaBinaryVersion:$sparkVersion") {
+                    isTransitive = false
+                }
                 runtimeOnly(libs.findLibrary("slf4j-simple").get())
                 if (sparkLine == "3.5") {
                     runtimeOnly("javax.servlet:javax.servlet-api:4.0.1")
@@ -180,6 +184,7 @@ testing {
                     implementation(libs.findLibrary("s3mock-testcontainers").get())
                     implementation(libs.findLibrary("testcontainers-juputer").get())
                     runtimeOnly("org.apache.hadoop:hadoop-aws:$compatHadoopVersion")
+                    runtimeOnly("org.apache.spark:spark-hadoop-cloud_2.13:$version") { isTransitive = false }
                     runtimeOnly(libs.findLibrary("slf4j-simple").get())
                 }
             }
@@ -249,6 +254,9 @@ val sparkJvmArgs =
         "--add-opens=java.base/java.nio=ALL-UNNAMED",
         "--add-opens=java.base/sun.util.calendar=ALL-UNNAMED",
         "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
+        // Spark's launcher opens these too; Kryo needs them to serialize closures and collections.
+        "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
+        "--add-opens=java.base/java.util=ALL-UNNAMED",
     )
 
 tasks.withType<Test>().configureEach {
