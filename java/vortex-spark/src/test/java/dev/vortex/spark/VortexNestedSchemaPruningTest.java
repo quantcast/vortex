@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import org.apache.spark.sql.Column;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -126,23 +127,37 @@ public final class VortexNestedSchemaPruningTest {
     @Test
     @DisplayName("Null structs and null fields stay null when the struct is pruned")
     public void nullableStructField() {
-        assertEquals(Arrays.asList(200L, null, 202L, null, null), valuesOf(table, functions.col("n.b")));
+        // Selecting `n.b` next to `n IS NULL` makes Spark read the pruned `n`, so the null check sees its nulls.
+        Dataset<Row> rows = table.select(
+                functions.col("id"), functions.col("n.b"), functions.col("n").isNull());
+        assertEquals("struct<id:bigint,n:struct<b:bigint>>", readSchema(rows));
         assertEquals(
-                List.of(false, true, false, true, false),
-                valuesOf(table, functions.col("n").isNull()));
+                Arrays.asList(
+                        Arrays.asList(0L, 200L, false),
+                        Arrays.asList(1L, null, true),
+                        Arrays.asList(2L, 202L, false),
+                        Arrays.asList(3L, null, true),
+                        Arrays.asList(4L, null, false)),
+                rowsOf(rows));
     }
 
     @Test
     @DisplayName("Nulls at each level of a struct inside a struct survive pruning both levels")
     public void nullableStructInStructField() {
+        Dataset<Row> rows = table.select(
+                functions.col("id"),
+                functions.col("nullable_outer.inner.c"),
+                functions.col("nullable_outer").isNull(),
+                functions.col("nullable_outer.inner").isNull());
+        assertEquals("struct<id:bigint,nullable_outer:struct<inner:struct<c:bigint>>>", readSchema(rows));
         assertEquals(
-                Arrays.asList(300L, null, null, 303L, 304L), valuesOf(table, functions.col("nullable_outer.inner.c")));
-        assertEquals(
-                List.of(false, true, false, false, false),
-                valuesOf(table, functions.col("nullable_outer").isNull()));
-        assertEquals(
-                List.of(false, true, true, false, false),
-                valuesOf(table, functions.col("nullable_outer.inner").isNull()));
+                Arrays.asList(
+                        Arrays.asList(0L, 300L, false, false),
+                        Arrays.asList(1L, null, true, true),
+                        Arrays.asList(2L, null, false, true),
+                        Arrays.asList(3L, 303L, false, false),
+                        Arrays.asList(4L, 304L, false, false)),
+                rowsOf(rows));
     }
 
     @Test
@@ -170,6 +185,23 @@ public final class VortexNestedSchemaPruningTest {
 
     private static Column nullWhen(Column condition, Column value) {
         return functions.when(condition, functions.lit(null)).otherwise(value);
+    }
+
+    /** Returns the schema Spark asks the Vortex scan for. */
+    private static String readSchema(Dataset<Row> rows) {
+        return rows.queryExecution()
+                .optimizedPlan()
+                .collectLeaves()
+                .head()
+                .schema()
+                .simpleString();
+    }
+
+    /** Returns each row of {@code rows}, whose first column is the id, ordered by id. */
+    private static List<List<Object>> rowsOf(Dataset<Row> rows) {
+        return rows.orderBy("id").collectAsList().stream()
+                .map(row -> IntStream.range(0, row.size()).mapToObj(row::get).collect(Collectors.toList()))
+                .collect(Collectors.toList());
     }
 
     /** Returns {@code column} for each row of {@code rows}, ordered by id. */
