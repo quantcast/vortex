@@ -54,6 +54,20 @@ final class VortexOutputWriterTest {
                 .contains("vortex.write.batch.size"));
     }
 
+    @Test
+    void aBatchSizeOutsideItsRangeNamesItsOption() {
+        for (String value : new String[] {"0", "65537"}) {
+            VortexOptions options = options(Map.of("batch.size", value));
+
+            assertTrue(
+                    assertThrows(IllegalArgumentException.class, () -> VortexOutputWriter.configuredBatchSize(options))
+                            .getMessage()
+                            .contains("batch.size"));
+        }
+        assertEquals(65536, VortexOutputWriter.configuredBatchSize(options(Map.of("batch.size", "65536"))));
+        assertEquals(1, VortexOutputWriter.configuredBatchSize(options(Map.of("vortex.write.batch.size", "1"))));
+    }
+
     private static VortexOptions options(Map<String, String> values) {
         return VortexOptions.of(values);
     }
