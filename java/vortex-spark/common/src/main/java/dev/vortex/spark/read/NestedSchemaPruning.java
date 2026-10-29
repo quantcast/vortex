@@ -6,6 +6,7 @@ package dev.vortex.spark.read;
 import dev.vortex.api.Expression;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
@@ -56,45 +57,144 @@ public final class NestedSchemaPruning {
     }
 
     /**
-     * Builds the native projection that returns the {@code fileNames} columns with the types of {@code readSchema},
-     * where each field is either its type in {@code tableSchema} or a {@link #prune pruned} version of it.
-     *
-     * <p>When nothing is pruned this is a plain {@code select} of the columns.
+     * For a struct the file stores, where each field Spark reads comes from: its position in the projected struct, or
+     * {@code -1} for a field the file does not carry. {@code children} holds the shape of each struct field that needs
+     * one, and is {@code null} elsewhere.
      */
-    static Expression projection(String[] fileNames, StructType readSchema, StructType tableSchema) {
-        return structProjection(Expression.root(), false, fileNames, readSchema, tableSchema);
+    static final class Shape {
+        private final int[] slots;
+        private final Shape[] children;
+
+        private Shape(int[] slots, Shape[] children) {
+            this.slots = slots;
+            this.children = children;
+        }
+
+        int slot(int field) {
+            return slots[field];
+        }
+
+        Shape child(int field) {
+            return children[field];
+        }
     }
 
-    private static Expression structProjection(
-            Expression struct, boolean nullable, String[] names, StructType read, StructType table) {
+    /** A native projection, and how each column Spark reads comes out of it. */
+    static final class Projection {
+        private final Expression expression;
+        private final Shape columns;
+
+        private Projection(Expression expression, Shape columns) {
+            this.expression = expression;
+            this.columns = columns;
+        }
+
+        Expression expression() {
+            return expression;
+        }
+
+        /** The shape of read column {@code column}, or {@code null} if it needs no nulls filled in. */
+        Shape shape(int column) {
+            return columns == null ? null : columns.child(column);
+        }
+    }
+
+    /**
+     * Builds the native projection that reads {@code readSchema} from a file whose columns are {@code fileSchema}.
+     *
+     * <p>Fields are matched by name under Spark's case sensitivity, at every level. The file's struct fields are read
+     * under their own names, in the order Spark reads them, and only as far down as Spark reads them. A nullable struct
+     * field the file does not carry is left out and filled in with nulls through {@link Projection#shape}; a struct
+     * keeps its own nulls even when the file carries none of its read fields. Every column of {@code readSchema} must
+     * be in the file, which {@code fileName} names in errors.
+     */
+    static Projection projection(StructType readSchema, StructType fileSchema, boolean caseSensitive, String fileName) {
+        Expression root = Expression.root();
+        Node node = struct(root, false, readSchema, fileSchema, new Resolution(caseSensitive, fileName), "");
+        Expression expression =
+                node.expression() != null ? node.expression() : Expression.select(fileSchema.fieldNames(), root);
+        return new Projection(expression, node.shape());
+    }
+
+    /** The projection of a struct, {@code null} when the file stores it as read, and its shape if it needs one. */
+    private record Node(Expression expression, Shape shape) {}
+
+    private record Resolution(boolean caseSensitive, String fileName) {}
+
+    private static Node struct(
+            Expression struct, boolean nullable, StructType read, StructType file, Resolution resolution, String path) {
         StructField[] fields = read.fields();
-        Expression[] children = new Expression[fields.length];
-        boolean pruned = false;
+        List<String> names = new ArrayList<>(fields.length);
+        List<Expression> children = new ArrayList<>(fields.length);
+        int[] slots = new int[fields.length];
+        Shape[] shapes = new Shape[fields.length];
+        boolean reshaped = fields.length != file.length();
+        boolean nested = false;
+        boolean filled = false;
         for (int i = 0; i < fields.length; i++) {
-            DataType tableType = table.apply(fields[i].name()).dataType();
+            String fieldPath = path.isEmpty() ? fields[i].name() : path + "." + fields[i].name();
+            int index = fieldIndex(file, fields[i].name(), resolution, fieldPath);
+            if (index < 0) {
+                if (!fields[i].nullable()) {
+                    throw new IllegalArgumentException(String.format(
+                            Locale.ROOT,
+                            "%s does not carry the non-nullable field %s that the query requires",
+                            resolution.fileName(),
+                            fieldPath));
+                }
+                slots[i] = -1;
+                reshaped = true;
+                filled = true;
+                continue;
+            }
+            reshaped |= index != names.size();
+            slots[i] = names.size();
+            StructField fileField = file.fields()[index];
+            Expression child = Expression.getItem(fileField.name(), struct);
             if (fields[i].dataType() instanceof StructType readStruct
-                    && tableType instanceof StructType tableStruct
-                    && !readStruct.equals(tableStruct)) {
-                children[i] = structProjection(
-                        Expression.getItem(names[i], struct),
-                        fields[i].nullable(),
-                        readStruct.fieldNames(),
-                        readStruct,
-                        tableStruct);
-                pruned = true;
+                    && fileField.dataType() instanceof StructType fileStruct) {
+                Node node = struct(child, fileField.nullable(), readStruct, fileStruct, resolution, fieldPath);
+                if (node.expression() != null) {
+                    child = node.expression();
+                    nested = true;
+                }
+                shapes[i] = node.shape();
+                filled |= node.shape() != null;
             }
+            names.add(fileField.name());
+            children.add(child);
         }
-        // `select` keeps the struct's own nulls, so use it when no child needs pruning.
-        if (!pruned) {
-            return Expression.select(names, struct);
+        Shape shape = filled ? new Shape(slots, shapes) : null;
+        String[] fileNames = names.toArray(new String[0]);
+        // An empty `select` loses the struct's own nulls, so an empty struct goes through the masked `pack` below.
+        if (!nested && !(nullable && names.isEmpty())) {
+            // `select` keeps the struct's own nulls, so use it when no child needs reshaping.
+            return new Node(reshaped ? Expression.select(fileNames, struct) : null, shape);
         }
-        for (int i = 0; i < fields.length; i++) {
-            if (children[i] == null) {
-                children[i] = Expression.getItem(names[i], struct);
-            }
-        }
-        Expression packed = Expression.pack(names, children, false);
+        Expression packed = Expression.pack(fileNames, children.toArray(new Expression[0]), false);
         // `pack` builds a struct with no nulls, so carry over the source struct's nulls.
-        return nullable ? Expression.mask(packed, Expression.isNotNull(struct)) : packed;
+        return new Node(nullable ? Expression.mask(packed, Expression.isNotNull(struct)) : packed, shape);
+    }
+
+    private static int fieldIndex(StructType struct, String name, Resolution resolution, String path) {
+        int found = -1;
+        StructField[] fields = struct.fields();
+        for (int i = 0; i < fields.length; i++) {
+            if (resolution.caseSensitive()
+                    ? fields[i].name().equals(name)
+                    : fields[i].name().equalsIgnoreCase(name)) {
+                if (found >= 0) {
+                    throw new IllegalArgumentException(String.format(
+                            Locale.ROOT,
+                            "Ambiguous fields %s and %s for %s in %s under Spark's case sensitivity setting",
+                            fields[found].name(),
+                            fields[i].name(),
+                            path,
+                            resolution.fileName()));
+                }
+                found = i;
+            }
+        }
+        return found;
     }
 }
