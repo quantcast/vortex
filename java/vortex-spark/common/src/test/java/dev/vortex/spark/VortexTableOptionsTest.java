@@ -4,6 +4,7 @@
 package dev.vortex.spark;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import dev.vortex.spark.write.VortexWrite;
 import java.nio.file.Path;
@@ -72,6 +73,15 @@ public final class VortexTableOptionsTest {
         assertEquals(
                 Map.of("vortex.write.batch.size", "1024", "batch.size", "64"),
                 write.info().options().asCaseSensitiveMap());
+    }
+
+    @Test
+    void anUnusableWriteOptionFailsWhenTheWriteIsPlanned() {
+        VortexTable table = table(Map.of("vortex.write.batch.size", "512"));
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> table.newWriteBuilder(writeInfo(Map.of("VORTEX.WRITE.BATCH.SIZE", "0"))));
     }
 
     private VortexTable table(Map<String, String> options) {
