@@ -17,6 +17,7 @@ use vortex_array::dtype::RESERVED_VALIDITY_FIELD_NAME;
 use vortex_array::dtype::StructFields;
 use vortex_array::expr::BoundExpression;
 use vortex_array::expr::ExactBoundExpr;
+use vortex_array::expr::bound::and;
 use vortex_array::expr::bound::get_item;
 use vortex_array::expr::bound::is_not_null;
 use vortex_array::expr::bound::mask;
@@ -320,6 +321,23 @@ fn expand_struct_root(
                 .first()
                 .is_some_and(BoundExpression::is_root)
             {
+                // A null check on a masked `$.x` would read all of `x`. Check the path's own nulls
+                // and the mask apart, so only validity is read.
+                if let Some(validity) = validity
+                    && (scalar_fn.is::<IsNotNull>() || scalar_fn.is::<IsNull>())
+                    && let Some(path) = field_path(node.child(0), packed, fields)?
+                {
+                    let valid = and(is_not_null(path), validity.clone());
+                    return Ok(Transformed {
+                        value: if scalar_fn.is::<IsNull>() {
+                            not(valid)
+                        } else {
+                            valid
+                        },
+                        changed: true,
+                        order: TraversalOrder::Skip,
+                    });
+                }
                 // Masking `$.x` inside `$.x.q` would hide the path from the partitioner, which
                 // would then read all of `x`. Mask the whole path instead.
                 if validity.is_some()
@@ -666,6 +684,7 @@ mod tests {
     use vortex_array::expr::is_null;
     use vortex_array::expr::lit;
     use vortex_array::expr::lt;
+    use vortex_array::expr::mask;
     use vortex_array::expr::not;
     use vortex_array::expr::or;
     use vortex_array::expr::pack;
@@ -1879,6 +1898,12 @@ mod tests {
     #[case::select(select(["q"], get_item("x", get_item("t", root()))))]
     #[case::is_not_null_leaf(is_not_null(get_item("q", get_item("x", get_item("t", root())))))]
     #[case::predicate(gt(get_item("q", get_item("x", get_item("t", root()))), lit(5)))]
+    #[case::is_not_null_field(is_not_null(get_item("x", get_item("t", root()))))]
+    #[case::is_null_field(is_null(get_item("x", get_item("t", root()))))]
+    #[case::masked_pack(mask(
+        pack([("q", get_item("q", get_item("x", get_item("t", root()))))], Nullability::NonNullable),
+        is_not_null(get_item("x", get_item("t", root()))),
+    ))]
     fn test_path_below_nullable_struct_field(#[case] expr: Expression) -> VortexResult<()> {
         // t is null in row 1 and t.x is null in row 2.
         let x = StructArray::try_from_iter_with_validity(
