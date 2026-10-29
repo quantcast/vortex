@@ -6,6 +6,7 @@ package dev.vortex.spark;
 import com.google.common.collect.ImmutableMap;
 import java.io.Serializable;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
@@ -38,6 +39,26 @@ public final class VortexOptions implements Serializable {
         Map<String, String> lowerCased = new HashMap<>(original.size());
         original.forEach((key, value) -> lowerCased.put(key.toLowerCase(Locale.ROOT), value));
         return new VortexOptions(original, ImmutableMap.copyOf(lowerCased));
+    }
+
+    /**
+     * {@code base} with {@code overrides} laid over it. An override replaces every entry of {@code base} that matches
+     * it in any case, and keeps the spelling {@code base} used, because Hadoop configuration reads keys
+     * case-sensitively.
+     */
+    public static Map<String, String> overlay(Map<String, String> base, Map<String, String> overrides) {
+        Map<String, String> merged = new LinkedHashMap<>(base);
+        overrides.forEach((key, value) -> {
+            String lowerCased = key.toLowerCase(Locale.ROOT);
+            String spelling = merged.keySet().stream()
+                    .filter(existing -> existing.toLowerCase(Locale.ROOT).equals(lowerCased))
+                    .findFirst()
+                    .orElse(key);
+            merged.keySet()
+                    .removeIf(existing -> existing.toLowerCase(Locale.ROOT).equals(lowerCased));
+            merged.put(spelling, value);
+        });
+        return merged;
     }
 
     /** No options at all, for callers with no Spark read or write to draw them from. */
