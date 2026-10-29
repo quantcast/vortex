@@ -29,7 +29,7 @@ import org.apache.spark.unsafe.types.UTF8String;
 
 /** Utilities for discovering and materializing Hive-style partition columns from file paths. */
 public final class PartitionPathUtils {
-    private static final String HIVE_DEFAULT_PARTITION = "__HIVE_DEFAULT_PARTITION__";
+    static final String HIVE_DEFAULT_PARTITION = "__HIVE_DEFAULT_PARTITION__";
     private static final Splitter PATH_SPLITTER = Splitter.on('/');
 
     private PartitionPathUtils() {}
