@@ -206,6 +206,13 @@ own storage clients are not used by the Spark connector.
 
 Option names are matched without regard to case, as they are everywhere else in Spark.
 
+A `vortex.*` option set in the Spark session, with `spark.conf.set`, SQL `SET`, or the session
+builder, is the default for every Vortex read and write, and an option on the read or write
+overrides it. `spark-submit --conf` and `spark-defaults.conf` drop keys that do not start with
+`spark.`, so for a cluster-wide default write `spark.datasource.vortex.` followed by the option
+name without its `vortex.` prefix, for example `spark.datasource.vortex.workerThreads=8` for
+`vortex.workerThreads`. A plain `vortex.*` setting in the session beats that form.
+
 Scan statistics cost one read per file on the driver, before the job starts. `vortex.stats.maxFiles`
 keeps planning bounded on a large dataset by reporting no row count instead. Raise it when exact
 row counts matter more than planning time, or set `vortex.stats.rowCount` to `false` to stop
