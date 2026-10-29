@@ -243,6 +243,9 @@ val sparkJvmArgs =
         "--add-opens=java.base/java.nio=ALL-UNNAMED",
         "--add-opens=java.base/sun.util.calendar=ALL-UNNAMED",
         "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
+        // Spark's launcher opens these too; Kryo needs them to serialize closures and collections.
+        "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
+        "--add-opens=java.base/java.util=ALL-UNNAMED",
     )
 
 tasks.withType<Test>().configureEach {
