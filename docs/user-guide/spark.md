@@ -7,7 +7,7 @@ artifact matching both the Spark and Scala versions in the application:
 |------------------------------------|-----------------|-------|
 | `dev.vortex:vortex-spark-3.5_2.12` | 3.5.x           | 2.12  |
 | `dev.vortex:vortex-spark-3.5_2.13` | 3.5.x           | 2.13  |
-| `dev.vortex:vortex-spark-4.0_2.13` | 4.0.x and 4.1.x | 2.13  |
+| `dev.vortex:vortex-spark-4.0_2.13` | 4.0.x to 4.2.x  | 2.13  |
 
 Use the `all` classifier JAR. It bundles the Vortex JNI bindings, native libraries for Linux
 (x86_64 and aarch64), macOS (aarch64), and Windows (x86_64), and relocated Arrow, Guava, and
@@ -192,6 +192,11 @@ written through Hadoop streams, so the connector inherits Spark's filesystem imp
 credentials, and retry behavior. Configure remote storage through Spark's Hadoop configuration
 and use the matching Hadoop scheme, for example `s3a://` for S3 and `abfs://` for Azure. Vortex's
 own storage clients are not used by the Spark connector.
+
+The connector does not bundle any Hadoop filesystem. To use `s3a://`, put
+`org.apache.hadoop:hadoop-aws` at the Hadoop version of the Spark distribution, with the AWS SDK it
+depends on, on the driver and executor classpath, for example
+`--packages org.apache.hadoop:hadoop-aws:3.4.1` on Spark 4.0.
 
 | Option                     | Default | Description |
 |----------------------------|---------|-------------|
