@@ -4,6 +4,7 @@
 package dev.vortex.spark;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -173,8 +174,13 @@ public final class VortexTableLayoutTest {
                     data,
                     Files.createDirectories(root.resolve(".hidden-directory")).resolve("copy.vortex"));
 
-            assertRows(input, read("vortex", root, false));
-            assertEquals(1L, read("vortex", root, false).count());
+            Dataset<Row> loaded = read("vortex", root, false);
+            String plan = loaded.queryExecution().executedPlan().toString();
+            // `FileScan vortex` is the V1 node, `BatchScan` the V2 one.
+            assertTrue(plan.contains(v1 ? "FileScan vortex" : "BatchScan"), plan);
+            assertFalse(plan.contains(v1 ? "BatchScan" : "FileScan"), plan);
+            assertRows(input, loaded);
+            assertEquals(1L, loaded.count());
         } finally {
             spark.conf().set("spark.sql.sources.useV1SourceList", previous);
         }

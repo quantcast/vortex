@@ -4,6 +4,7 @@
 package dev.vortex.spark;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -79,7 +80,7 @@ public final class VortexCountReadTest {
                     .load(table)
                     .selectExpr("count(*)");
 
-            String plan = count.queryExecution().executedPlan().toString();
+            String plan = scanPlan(count, v1);
             assertTrue(plan.contains("ReadSchema: struct<>"), plan);
             long counted = bytesRead(count);
             assertEquals((long) ROWS, count.first().getLong(0));
@@ -98,6 +99,7 @@ public final class VortexCountReadTest {
                     .filter("id >= 100")
                     .selectExpr("count(*)");
 
+            scanPlan(count, v1);
             long counted = bytesRead(count);
             assertEquals((long) ROWS - 100, count.first().getLong(0));
             assertTrue(counted < full / 10, "a filtered count read " + counted + " bytes, a full scan " + full);
@@ -112,6 +114,15 @@ public final class VortexCountReadTest {
         } finally {
             spark.conf().set("spark.sql.sources.useV1SourceList", previous);
         }
+    }
+
+    /** Returns the executed plan after checking it scans through the source the test asked for. */
+    private static String scanPlan(Dataset<Row> query, boolean v1) {
+        String plan = query.queryExecution().executedPlan().toString();
+        // `FileScan vortex` is the V1 node, `BatchScan` the V2 one.
+        assertTrue(plan.contains(v1 ? "FileScan vortex" : "BatchScan"), plan);
+        assertFalse(plan.contains(v1 ? "BatchScan" : "FileScan"), plan);
+        return plan;
     }
 
     private static long bytesRead(Dataset<Row> query) {

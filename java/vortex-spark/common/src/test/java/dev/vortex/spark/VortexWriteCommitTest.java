@@ -17,6 +17,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -55,6 +56,7 @@ import org.junit.jupiter.params.provider.ValueSource;
  */
 public final class VortexWriteCommitTest {
     private static final AtomicInteger INJECTED = new AtomicInteger();
+    private static final ConcurrentLinkedQueue<Integer> CLOSE_FAILURE_ATTEMPTS = new ConcurrentLinkedQueue<>();
     private static volatile CountDownLatch firstTaskDone;
     private static volatile CountDownLatch release;
     private static volatile Path failingOutput;
@@ -68,6 +70,7 @@ public final class VortexWriteCommitTest {
     @BeforeEach
     void setUp() {
         INJECTED.set(0);
+        CLOSE_FAILURE_ATTEMPTS.clear();
         start(Map.of());
     }
 
@@ -150,6 +153,10 @@ public final class VortexWriteCommitTest {
         writeRange(format, output, 0, 128, true, "append");
 
         assertEquals(1, INJECTED.get());
+        // A second attempt runs only if the writer let the close failure fail the first one.
+        assertEquals(
+                List.of(0, 1),
+                CLOSE_FAILURE_ATTEMPTS.stream().distinct().sorted().toList());
         assertEquals(range(0, 128), ids(format, output));
         assertEquals(2, dataFiles(output, format).size());
         assertCommitted(output);
@@ -259,10 +266,8 @@ public final class VortexWriteCommitTest {
     // the two runs apart.
     @ParameterizedTest
     @ValueSource(strings = {"vortex", "parquet"})
-    void appendsFromSeparateApplicationsWithoutAJobUuidKeepBothRuns(String format) throws IOException {
-        Map<String, String> conf = Map.of(
-                "spark.sql.sources.writeJobUUID", "false",
-                "spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2");
+    void appendsFromSeparateApplicationsWithTheVersionTwoCommitterKeepBothRuns(String format) throws IOException {
+        Map<String, String> conf = Map.of("spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2");
         Path output = tempDir.resolve("append-v2");
         stop();
         start(conf);
@@ -425,9 +430,11 @@ public final class VortexWriteCommitTest {
             FSDataOutputStream stream =
                     super.create(path, permission, overwrite, bufferSize, replication, blockSize, progress);
             TaskContext context = TaskContext.get();
-            if (context == null
-                    || context.attemptNumber() != 0
-                    || !path.toString().contains("/p=1/")) {
+            if (context == null || !path.toString().contains("/p=1/")) {
+                return stream;
+            }
+            CLOSE_FAILURE_ATTEMPTS.add(context.attemptNumber());
+            if (context.attemptNumber() != 0) {
                 return stream;
             }
             return new FSDataOutputStream(
