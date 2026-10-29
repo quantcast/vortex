@@ -50,7 +50,7 @@ final class VortexFileFormat
       files: Seq[FileStatus]
   ): Option[StructType] = {
     val hadoopConf = spark.sessionState.newHadoopConfWithOptions(options)
-    val vortexOptions = VortexOptions.of(options.asJava)
+    val vortexOptions = withSessionDefaults(spark, options)
     Option(
       VortexFooterReader.inferSchema(
         files.asJava,
@@ -89,7 +89,10 @@ final class VortexFileFormat
       options: Map[String, String],
       dataSchema: StructType
   ): OutputWriterFactory =
-    new VortexOutputWriterFactory(dataSchema, VortexOptions.of(options.asJava))
+    new VortexOutputWriterFactory(
+      dataSchema,
+      withSessionDefaults(spark, options)
+    )
 
   override def buildReader(
       spark: SparkSession,
@@ -100,7 +103,7 @@ final class VortexFileFormat
       options: Map[String, String],
       hadoopConf: Configuration
   ): PartitionedFile => Iterator[InternalRow] = {
-    val optionMap = VortexOptions.of(options.asJava)
+    val optionMap = withSessionDefaults(spark, options)
     val io = VortexIo.create(optionMap, hadoopConf)
     val caseSensitive = spark.sessionState.conf.caseSensitiveAnalysis
     skippingNonVortexFiles { (file: PartitionedFile) =>
@@ -172,7 +175,7 @@ final class VortexFileFormat
       )
     }
 
-    val optionMap = VortexOptions.of(options.asJava)
+    val optionMap = withSessionDefaults(spark, options)
     val io = VortexIo.create(optionMap, hadoopConf)
     val caseSensitive = spark.sessionState.conf.caseSensitiveAnalysis
     skippingNonVortexFiles { (file: PartitionedFile) =>
@@ -217,6 +220,17 @@ final class VortexFileFormat
 
   override def supportDataType(dataType: DataType): Boolean =
     SparkToArrowSchema.supportsDataType(dataType)
+
+  private def withSessionDefaults(
+      spark: SparkSession,
+      options: Map[String, String]
+  ): VortexOptions =
+    VortexOptions.of(
+      VortexOptions.withSessionDefaults(
+        spark.conf.getAll.asJava,
+        options.asJava
+      )
+    )
 
   /** Reads a listed file without the Vortex extension as empty, because it is
     * not part of the dataset.

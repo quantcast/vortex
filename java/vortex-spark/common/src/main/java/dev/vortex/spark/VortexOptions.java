@@ -27,6 +27,15 @@ import java.util.Optional;
 public final class VortexOptions implements Serializable {
     private static final long serialVersionUID = 1L;
 
+    /** Prefix of the Spark session settings that serve every Vortex read and write as defaults. */
+    public static final String SESSION_PREFIX = "vortex.";
+
+    /**
+     * Spark's prefix for settings meant for one data source. {@code spark.datasource.vortex.x} stands for option
+     * {@code vortex.x}, so the name does not repeat {@code vortex}.
+     */
+    public static final String DATA_SOURCE_SESSION_PREFIX = "spark.datasource.vortex.";
+
     private final ImmutableMap<String, String> original;
     private final ImmutableMap<String, String> byLowerCasedKey;
 
@@ -59,6 +68,31 @@ public final class VortexOptions implements Serializable {
             merged.put(spelling, value);
         });
         return merged;
+    }
+
+    /**
+     * {@code options} over the Vortex settings of a Spark session's configuration.
+     *
+     * <p>A {@value #SESSION_PREFIX}* setting beats a {@value #DATA_SOURCE_SESSION_PREFIX}* one. Only the latter
+     * survives {@code spark-submit --conf} and {@code spark-defaults.conf}, which drop keys outside {@code spark.}, so
+     * it is the cluster-wide default and the plain key is the application's own.
+     */
+    public static Map<String, String> withSessionDefaults(
+            Map<String, String> sessionConf, Map<String, String> options) {
+        Map<String, String> dataSourceDefaults = new LinkedHashMap<>();
+        Map<String, String> sessionDefaults = new LinkedHashMap<>();
+        sessionConf.forEach((key, value) -> {
+            if (hasPrefix(key, DATA_SOURCE_SESSION_PREFIX)) {
+                dataSourceDefaults.put(SESSION_PREFIX + key.substring(DATA_SOURCE_SESSION_PREFIX.length()), value);
+            } else if (hasPrefix(key, SESSION_PREFIX)) {
+                sessionDefaults.put(key, value);
+            }
+        });
+        return overlay(overlay(dataSourceDefaults, sessionDefaults), options);
+    }
+
+    private static boolean hasPrefix(String key, String prefix) {
+        return key.regionMatches(true, 0, prefix, 0, prefix.length());
     }
 
     /** No options at all, for callers with no Spark read or write to draw them from. */
