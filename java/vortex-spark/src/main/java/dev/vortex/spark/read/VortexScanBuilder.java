@@ -35,6 +35,7 @@ public final class VortexScanBuilder
     private final Map<String, String> formatOptions;
     private final Set<String> partitionColumnNames;
     private Predicate[] pushedPredicates = new Predicate[0];
+    private Predicate[] partitionFilters = new Predicate[0];
 
     /** Creates a new VortexScanBuilder with empty paths and columns. */
     public VortexScanBuilder(Map<String, String> formatOptions) {
@@ -44,7 +45,7 @@ public final class VortexScanBuilder
     /**
      * Creates a new VortexScanBuilder with empty paths and columns and the supplied partition transforms. Filters that
      * reference partition columns are not pushed down, since the partition columns are not stored inside the Vortex
-     * files.
+     * files; the scan uses them to skip files instead.
      */
     public VortexScanBuilder(Map<String, String> formatOptions, Transform[] partitionTransforms) {
         this.paths = ImmutableList.builder();
@@ -124,6 +125,7 @@ public final class VortexScanBuilder
                 List.copyOf(this.tableColumns),
                 List.copyOf(this.readColumns),
                 pushedPredicates,
+                partitionFilters,
                 this.formatOptions);
     }
 
@@ -162,7 +164,9 @@ public final class VortexScanBuilder
      *
      * <p>A predicate is pushed when it references only data columns (not partition columns) and uses operators and
      * literal types that {@link SparkPredicateToVortexExpression} can map to Vortex expressions. Predicates that
-     * reference partition columns or use unsupported features are returned to Spark for post-scan evaluation.
+     * reference partition columns or use unsupported features are returned to Spark for post-scan evaluation. Those
+     * that reference a partition column are also kept as partition filters, which the scan evaluates against each
+     * file's partition values to skip files that cannot match.
      *
      * @return the predicates that Spark must still evaluate
      */
@@ -184,6 +188,8 @@ public final class VortexScanBuilder
             }
         }
         this.pushedPredicates = pushed.toArray(new Predicate[0]);
+        this.partitionFilters =
+                postScan.stream().filter(this::referencesPartitionColumn).toArray(Predicate[]::new);
         return postScan.toArray(new Predicate[0]);
     }
 
@@ -191,6 +197,16 @@ public final class VortexScanBuilder
     @Override
     public Predicate[] pushedPredicates() {
         return Arrays.copyOf(pushedPredicates, pushedPredicates.length);
+    }
+
+    /** Returns the predicates the scan evaluates against partition values to skip files. */
+    Predicate[] partitionFilters() {
+        return partitionFilters.clone();
+    }
+
+    private boolean referencesPartitionColumn(Predicate predicate) {
+        return Arrays.stream(predicate.references())
+                .anyMatch(ref -> ref.fieldNames().length == 1 && partitionColumnNames.contains(ref.fieldNames()[0]));
     }
 
     private static Set<String> collectPartitionColumnNames(Transform[] transforms) {

@@ -36,6 +36,7 @@ public final class VortexBatchExec implements Batch {
     private final StructType tableSchema;
     private final Map<String, String> formatOptions;
     private final Predicate[] pushedPredicates;
+    private final PartitionPruner partitionPruner;
     private List<String> resolvedPaths;
 
     /**
@@ -53,19 +54,35 @@ public final class VortexBatchExec implements Batch {
             List<Column> tableColumns,
             Map<String, String> formatOptions,
             Predicate[] pushedPredicates) {
+        this(paths, columns, tableColumns, formatOptions, pushedPredicates, null);
+    }
+
+    /**
+     * Creates a new VortexBatchExec that skips files whose Hive-style partition values cannot satisfy
+     * {@code partitionFilters}. Spark still evaluates those filters after the scan.
+     */
+    public VortexBatchExec(
+            List<String> paths,
+            List<Column> columns,
+            List<Column> tableColumns,
+            Map<String, String> formatOptions,
+            Predicate[] pushedPredicates,
+            Predicate[] partitionFilters) {
         this.paths = List.copyOf(paths);
         this.readSchema = CatalogV2Util.v2ColumnsToStructType(columns.toArray(new Column[0]));
         this.tableSchema = CatalogV2Util.v2ColumnsToStructType(tableColumns.toArray(new Column[0]));
         this.formatOptions = Map.copyOf(formatOptions);
         this.pushedPredicates = pushedPredicates == null ? new Predicate[0] : pushedPredicates.clone();
+        this.partitionPruner = new PartitionPruner(partitionFilters, tableSchema);
     }
 
     /**
      * Plans the input partitions for this batch scan.
      *
-     * <p>Directory-like entries are expanded to concrete {@code .vortex} files. Each resolved file becomes one
-     * {@link VortexFilePartition}; the partition carries the paths the reader should open, the requested schema, and
-     * any Hive-style partition values parsed out of the path.
+     * <p>Directory-like entries are expanded to concrete {@code .vortex} files, and files whose partition values cannot
+     * satisfy the partition filters are dropped. Each remaining file becomes one {@link VortexFilePartition}; the
+     * partition carries the paths the reader should open, the requested schema, and any Hive-style partition values
+     * parsed out of the path.
      *
      * <p>With {@code vortex.read.splitFiles=true} a file larger than the split size becomes several partitions covering
      * disjoint row ranges (see {@link FileSplitPlanner}). That reads every file's footer on the driver to learn its row
@@ -125,7 +142,7 @@ public final class VortexBatchExec implements Batch {
     }
 
     private List<String> resolvePaths() {
-        return resolveVortexPaths(VortexSparkSession.get(formatOptions), paths, formatOptions);
+        return partitionPruner.prune(resolveVortexPaths(VortexSparkSession.get(formatOptions), paths, formatOptions));
     }
 
     /**

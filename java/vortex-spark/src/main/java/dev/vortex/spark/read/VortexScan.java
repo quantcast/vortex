@@ -39,6 +39,7 @@ public final class VortexScan implements Scan, SupportsReportStatistics {
     private final List<Column> readColumns;
     private final Map<String, String> formatOptions;
     private final Predicate[] pushedPredicates;
+    private final Predicate[] partitionFilters;
 
     private volatile Statistics cachedStatistics;
 
@@ -57,11 +58,28 @@ public final class VortexScan implements Scan, SupportsReportStatistics {
             List<Column> readColumns,
             Predicate[] pushedPredicates,
             Map<String, String> formatOptions) {
+        this(paths, tableColumns, readColumns, pushedPredicates, null, formatOptions);
+    }
+
+    /**
+     * Creates a new VortexScan that also skips files by their Hive-style partition values.
+     *
+     * @param partitionFilters predicates on partition columns that Spark still evaluates after the scan; files whose
+     *     partition values cannot satisfy them are not read. {@code null} or empty means no pruning.
+     */
+    public VortexScan(
+            List<String> paths,
+            List<Column> tableColumns,
+            List<Column> readColumns,
+            Predicate[] pushedPredicates,
+            Predicate[] partitionFilters,
+            Map<String, String> formatOptions) {
         this.paths = paths;
         this.tableColumns = tableColumns;
         this.readColumns = readColumns;
         this.formatOptions = formatOptions;
         this.pushedPredicates = pushedPredicates == null ? new Predicate[0] : pushedPredicates.clone();
+        this.partitionFilters = partitionFilters == null ? new Predicate[0] : partitionFilters.clone();
     }
 
     /**
@@ -104,8 +122,8 @@ public final class VortexScan implements Scan, SupportsReportStatistics {
     @Override
     public String description() {
         return String.format(
-                "VortexScan{paths=%s, columns=%s, pushedPredicates=%s}",
-                paths, readColumns, Arrays.toString(pushedPredicates));
+                "VortexScan{paths=%s, columns=%s, pushedPredicates=%s, partitionFilters=%s}",
+                paths, readColumns, Arrays.toString(pushedPredicates), Arrays.toString(partitionFilters));
     }
 
     /**
@@ -117,7 +135,7 @@ public final class VortexScan implements Scan, SupportsReportStatistics {
      */
     @Override
     public Batch toBatch() {
-        return new VortexBatchExec(paths, readColumns, tableColumns, formatOptions, pushedPredicates);
+        return new VortexBatchExec(paths, readColumns, tableColumns, formatOptions, pushedPredicates, partitionFilters);
     }
 
     /**
@@ -160,7 +178,8 @@ public final class VortexScan implements Scan, SupportsReportStatistics {
 
     private Statistics computeStatistics() {
         Session session = VortexSparkSession.get(formatOptions);
-        List<String> resolvedPaths = VortexBatchExec.resolveVortexPaths(session, paths, formatOptions);
+        List<String> resolvedPaths = new PartitionPruner(partitionFilters, tableSchema())
+                .prune(VortexBatchExec.resolveVortexPaths(session, paths, formatOptions));
         if (resolvedPaths.isEmpty()) {
             return new VortexStatistics(OptionalLong.empty(), OptionalLong.empty());
         }

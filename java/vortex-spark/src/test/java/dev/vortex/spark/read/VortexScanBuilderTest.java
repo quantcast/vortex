@@ -140,6 +140,21 @@ final class VortexScanBuilderTest {
         assertEquals(0, builder.pushedPredicates().length);
     }
 
+    @Test
+    @DisplayName("Post-scan predicates on partition columns are kept as partition filters")
+    void partitionColumnPredicatesBecomePartitionFilters() {
+        Transform[] transforms = new Transform[] {Expressions.identity("year")};
+        VortexScanBuilder builder = builderWithColumns(
+                transforms, Column.create("id", DataTypes.IntegerType), Column.create("year", DataTypes.IntegerType));
+
+        Predicate onData = equality("id", 7);
+        Predicate onPartition = equality("year", 2024);
+        Predicate unsupportedOnData = new Predicate("UNSUPPORTED", new Expression[] {ref("id")});
+        builder.pushPredicates(new Predicate[] {onData, onPartition, unsupportedOnData});
+
+        assertArrayEquals(new Predicate[] {onPartition}, builder.partitionFilters());
+    }
+
     // --- pushedPredicates ---
 
     @Test
