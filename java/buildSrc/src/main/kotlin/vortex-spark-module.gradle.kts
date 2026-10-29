@@ -29,11 +29,18 @@ val scalaVersion =
         "4.0" to "2.13" -> libs.findVersion("scala213Spark40").get().requiredVersion
         else -> throw GradleException("Unsupported Spark/Scala variant: $sparkLine/$scalaBinaryVersion")
     }
+// The Hadoop release each Spark line ships with, which hadoop-aws must match.
+val hadoopVersion = libs.findVersion("hadoopSpark${sparkLine.replace(".", "")}").get().requiredVersion
 // Later Spark 4 releases run the Spark 4.0 module's tests against its jar to catch binary breaks.
 val sparkCompatVersions =
     if (sparkLine == "4.0") {
-        listOf("4.1" to "spark41", "4.2" to "spark42").map { (line, alias) ->
-            line to libs.findVersion(alias).get().requiredVersion
+        listOf("4.1", "4.2").map { line ->
+            val alias = line.replace(".", "")
+            Triple(
+                line,
+                libs.findVersion("spark$alias").get().requiredVersion,
+                libs.findVersion("hadoopSpark$alias").get().requiredVersion,
+            )
         }
     } else {
         emptyList()
@@ -113,6 +120,7 @@ testing {
                 implementation("org.apache.spark:spark-sql_$scalaBinaryVersion:$sparkVersion")
                 implementation(libs.findLibrary("s3mock-testcontainers").get())
                 implementation(libs.findLibrary("testcontainers-juputer").get())
+                runtimeOnly("org.apache.hadoop:hadoop-aws:$hadoopVersion")
                 runtimeOnly(libs.findLibrary("slf4j-simple").get())
                 if (sparkLine == "3.5") {
                     runtimeOnly("javax.servlet:javax.servlet-api:4.0.1")
@@ -147,7 +155,7 @@ testing {
             targets.all { testTask.configure { enabled = false } }
         }
 
-        sparkCompatVersions.forEach { (line, version) ->
+        sparkCompatVersions.forEach { (line, version, compatHadoopVersion) ->
             register<JvmTestSuite>("spark${line.replace(".", "")}CompatTest") {
                 useJUnitJupiter()
                 sources {
@@ -171,6 +179,7 @@ testing {
                     implementation("org.apache.spark:spark-sql_2.13:$version")
                     implementation(libs.findLibrary("s3mock-testcontainers").get())
                     implementation(libs.findLibrary("testcontainers-juputer").get())
+                    runtimeOnly("org.apache.hadoop:hadoop-aws:$compatHadoopVersion")
                     runtimeOnly(libs.findLibrary("slf4j-simple").get())
                 }
             }
@@ -179,7 +188,7 @@ testing {
 }
 
 tasks.named("check") {
-    sparkCompatVersions.forEach { (line, _) ->
+    sparkCompatVersions.forEach { (line, _, _) ->
         dependsOn("spark${line.replace(".", "")}CompatTest")
     }
 }
