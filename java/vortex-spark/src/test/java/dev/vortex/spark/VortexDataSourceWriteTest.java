@@ -24,6 +24,7 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.catalyst.catalog.ExternalCatalogUtils;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.MapType;
 import org.apache.spark.sql.types.StructField;
@@ -35,6 +36,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 /**
  * Integration test for Vortex DataSource write and read functionality.
@@ -554,6 +557,41 @@ public final class VortexDataSourceWriteTest {
     }
 
     /** Finds all Vortex files in the given directory. */
+    @ParameterizedTest
+    @CsvSource(
+            delimiter = '|',
+            value = {
+                "100%|false", "100%|true",
+                "with space|false", "with space|true",
+                "Côte|false", "Côte|true",
+                "a/b|false", "a/b|true",
+                "C++|false", "C++|true",
+                "x=y|false", "x=y|true",
+                "literal%20name|false", "literal%20name|true",
+            })
+    @DisplayName("Partition values round-trip under Spark's directory names, for bare paths and URIs")
+    public void testPartitionValuesRoundTrip(String value, boolean uri) throws IOException {
+        Path dir = tempDir.resolve("partition_values_" + uri + "_" + Integer.toHexString(value.hashCode()));
+        String target = uri ? dir.toUri().toString() : dir.toString();
+        Dataset<Row> df = spark.createDataFrame(
+                List.of(RowFactory.create(1, value)),
+                DataTypes.createStructType(List.of(
+                        DataTypes.createStructField("id", DataTypes.IntegerType, false),
+                        DataTypes.createStructField("p", DataTypes.StringType, true))));
+        df.write().format("vortex").partitionBy("p").mode(SaveMode.Append).save(target);
+        // Overwrite must find and delete the first file through the listing.
+        df.write().format("vortex").partitionBy("p").mode(SaveMode.Overwrite).save(target);
+
+        List<Path> files = findVortexFiles(dir);
+        assertEquals(1, files.size());
+        assertEquals(
+                "p=" + ExternalCatalogUtils.escapePathName(value),
+                files.get(0).getParent().getFileName().toString());
+        List<Row> read =
+                spark.read().format("vortex").load(target).select("id", "p").collectAsList();
+        assertEquals(List.of(RowFactory.create(1, value)), read);
+    }
+
     private List<Path> findVortexFiles(Path directory) throws IOException {
         if (!Files.exists(directory)) {
             return List.of();

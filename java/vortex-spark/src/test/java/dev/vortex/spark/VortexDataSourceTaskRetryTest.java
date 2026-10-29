@@ -58,10 +58,10 @@ public final class VortexDataSourceTaskRetryTest {
 
     /**
      * The aborted attempt flushed three batches before failing. Its file must not survive, or the retry's rows are
-     * duplicated. The output is a {@code file://} URL rather than a plain path.
+     * duplicated. The output is a {@code file://} URL rather than a plain path, percent-encoded when it has a space.
      */
     @ParameterizedTest
-    @CsvSource({"retried, false", "partitioned, true"})
+    @CsvSource({"retried, false", "with space, false", "partitioned, true"})
     public void abortedAttemptLeavesNoFile(String dirName, boolean partitioned) throws IOException {
         Path dir = tempDir.resolve(dirName);
         String url = dir.toUri().toString();

@@ -20,12 +20,15 @@ import dev.vortex.api.VortexWriteSummary;
 import dev.vortex.api.VortexWriter;
 import dev.vortex.arrow.ArrowAllocation;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
@@ -167,6 +170,37 @@ public final class JNIWriterTest {
                         Field.notNullable("name", new ArrowType.Utf8View()),
                         Field.notNullable("age", new ArrowType.Int(32, true)))),
                 source.arrowSchema(allocator));
+    }
+
+    /** Listed URIs must delete the files they name, including names that need percent-encoding. */
+    @Test
+    public void testListedFilesDeleteByUri() throws IOException {
+        Path dir = tempDir.resolve("list delete");
+        List<Path> files = List.of(dir.resolve("with space.vortex"), dir.resolve("literal%20name.vortex"));
+        Path decodedSibling = Files.createDirectories(dir).resolve("literal name.vortex");
+        Files.write(decodedSibling, new byte[] {1});
+
+        BufferAllocator allocator = ArrowAllocation.rootAllocator();
+        Session session = Session.create();
+        for (Path file : files) {
+            VortexWriter.builder(session, file.toUri().toString(), personSchema(), allocator)
+                    .build()
+                    .close();
+        }
+
+        List<String> listed = NativeFiles.listFiles(session, dir.toUri().toString(), Map.of());
+        assertEquals(
+                Set.of(files.get(0), files.get(1), decodedSibling),
+                listed.stream().map(uri -> Path.of(URI.create(uri))).collect(Collectors.toSet()));
+        listed.removeIf(uri -> Path.of(URI.create(uri)).equals(files.get(1)));
+        NativeFiles.delete(session, listed.toArray(new String[0]), Map.of());
+
+        assertTrue(Files.exists(files.get(1)), "a file not passed to delete must survive");
+        assertFalse(Files.exists(files.get(0)));
+        assertFalse(Files.exists(decodedSibling));
+
+        NativeFiles.delete(session, new String[] {files.get(1).toUri().toString()}, Map.of());
+        assertFalse(Files.exists(files.get(1)));
     }
 
     @Test

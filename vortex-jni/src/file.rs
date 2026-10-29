@@ -16,6 +16,8 @@ use jni::objects::JObjectArray;
 use jni::objects::JString;
 use jni::sys::jlong;
 use jni::sys::jobject;
+use object_store::path::Path;
+use url::Url;
 use vortex::buffer::ByteBuffer;
 use vortex::error::VortexResult;
 use vortex::error::vortex_err;
@@ -205,6 +207,25 @@ pub extern "system" fn Java_dev_vortex_jni_NativeFiles_readMetadataFromReadable(
     })
 }
 
+/// The decoded part of `url`'s path above the store-relative `prefix` it resolved to, with a trailing
+/// `/` when non-empty.
+fn mount_prefix(url: &Url, prefix: &str) -> String {
+    // Empty segments, as in `bucket//dir`, would make the decode fail and lose the mount.
+    let segments: Vec<&str> = url.path().split('/').filter(|s| !s.is_empty()).collect();
+    let root = Path::from_url_path(segments.join("/"))
+        .map(|path| path.to_string())
+        .unwrap_or_default();
+    let mount = root
+        .strip_suffix(prefix)
+        .unwrap_or("")
+        .trim_end_matches('/');
+    if mount.is_empty() {
+        String::new()
+    } else {
+        format!("{mount}/")
+    }
+}
+
 /// List Vortex files under the given URI prefix. Returns a `java.util.ArrayList<String>`.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_vortex_jni_NativeFiles_listFiles(
@@ -222,6 +243,8 @@ pub extern "system" fn Java_dev_vortex_jni_NativeFiles_listFiles(
         let properties = extract_properties(env, &options)?;
 
         let (fs, prefix) = object_store_fs(&url, &properties, session.handle())?;
+        // A store mounted below the URL root, like a path-style bucket, lists keys without that part.
+        let mount = mount_prefix(&url, &prefix);
 
         let mut stream = fs.list(&prefix);
 
@@ -229,7 +252,8 @@ pub extern "system" fn Java_dev_vortex_jni_NativeFiles_listFiles(
             let mut paths = Vec::new();
             while let Some(file) = stream.next().await {
                 let mut found = url.clone();
-                found.set_path(&file?.path);
+                // `set_path` keeps `%` as is, so escape it for the URI to decode back to this key.
+                found.set_path(&format!("/{mount}{}", file?.path).replace('%', "%25"));
                 paths.push(found.to_string());
             }
 
@@ -276,20 +300,52 @@ pub extern "system" fn Java_dev_vortex_jni_NativeFiles_delete(
             return Ok(());
         }
 
-        let store_url = parse_uri_or_path(&delete_uris[0])?;
-
         let properties = extract_properties(env, &options)?;
 
-        let (fs, _path) = object_store_fs(&store_url, &properties, session.handle())?;
+        // Resolve each URI as the writer did, so the decoded, store-relative key is deleted.
+        let targets = delete_uris
+            .iter()
+            .map(|uri| object_store_fs(&parse_uri_or_path(uri)?, &properties, session.handle()))
+            .collect::<VortexResult<Vec<_>>>()?;
 
         RUNTIME.block_on(async {
-            for uri in delete_uris {
-                let url = parse_uri_or_path(&uri)?;
-                fs.delete(url.path()).await?;
+            for (fs, path) in targets {
+                fs.delete(&path).await?;
             }
             VortexResult::Ok(())
         })?;
 
         Ok(())
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+    use url::Url;
+
+    use super::mount_prefix;
+
+    #[rstest]
+    #[case::path_style_bucket("https://s3.us-east-1.amazonaws.com/bucket/dir", "dir", "bucket/")]
+    #[case::path_style_bucket_root("https://s3.us-east-1.amazonaws.com/bucket", "", "bucket/")]
+    #[case::virtual_host_bucket("s3://bucket/dir", "dir", "")]
+    #[case::local_file("file:///tmp/table", "tmp/table", "")]
+    #[case::repeated_separators(
+        "https://s3.us-east-1.amazonaws.com/bucket//dir//",
+        "dir",
+        "bucket/"
+    )]
+    #[case::encoded_bucket_path(
+        "https://s3.us-east-1.amazonaws.com/bucket/with%20space",
+        "with space",
+        "bucket/"
+    )]
+    fn mount_prefix_keeps_what_the_store_strips(
+        #[case] url: &str,
+        #[case] prefix: &str,
+        #[case] mount: &str,
+    ) {
+        assert_eq!(mount_prefix(&Url::parse(url).unwrap(), prefix), mount);
+    }
 }
