@@ -131,6 +131,8 @@ tasks.withType<Test>().all {
             .get()
             .outputs.files
     jvmArgs(
+        "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
+        "--add-opens=java.base/java.util=ALL-UNNAMED",
         "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
         "--add-opens=java.base/java.nio=ALL-UNNAMED",
         "--add-opens=java.base/sun.util.calendar=ALL-UNNAMED",

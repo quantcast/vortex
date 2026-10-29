@@ -3,6 +3,8 @@
 
 package dev.vortex.spark.write;
 
+import com.esotericsoftware.kryo.DefaultSerializer;
+import com.esotericsoftware.kryo.serializers.JavaSerializer;
 import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.ImmutableIntArray;
 import java.io.IOException;
@@ -445,6 +447,8 @@ public final class PartitionedVortexDataWriter implements DataWriter<InternalRow
      *
      * @param bucketCount -1 if not a bucket transform
      */
+    // Kryo's FieldSerializer cannot rebuild records, so under KryoSerializer this uses Java serialization.
+    @DefaultSerializer(JavaSerializer.class)
     record ResolvedTransform(
             String directoryKey,
             String transformName,
@@ -457,7 +461,13 @@ public final class PartitionedVortexDataWriter implements DataWriter<InternalRow
         }
     }
 
-    /** Commit message that aggregates results from multiple partition writers. */
+    /**
+     * Commit message that aggregates results from multiple partition writers.
+     *
+     * <p>Kryo's {@code FieldSerializer} rebuilds collections by calling {@code add}, which the immutable lists this
+     * holds reject, so under {@code KryoSerializer} it uses Java serialization.
+     */
+    @DefaultSerializer(JavaSerializer.class)
     public static final class PartitionedWriterCommitMessage implements WriterCommitMessage, Serializable {
         private final List<VortexWriterCommitMessage> partitionMessages;
 

@@ -5,6 +5,8 @@ package dev.vortex.spark;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
+import com.esotericsoftware.kryo.DefaultSerializer;
+import com.esotericsoftware.kryo.serializers.JavaSerializer;
 import java.io.Serializable;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +31,8 @@ import org.apache.spark.sql.types.StructType;
  * @param rowRange the rows of the single file in {@link #paths()} this partition reads, or {@code null} to read the
  *     whole of every path
  */
+// Kryo's FieldSerializer cannot rebuild records, so under KryoSerializer this uses Java serialization.
+@DefaultSerializer(JavaSerializer.class)
 public record VortexFilePartition(
         List<String> paths,
         StructType readSchema,
