@@ -35,6 +35,8 @@ final class VortexScanBuilder(
 ) extends FileScanBuilder(sparkSession, fileIndex, dataSchema)
     with SupportsPushDownAggregates {
 
+  override protected val supportsNestedSchemaPruning: Boolean = true
+
   private var finalSchema = new StructType()
   private var pushedAggregation = Option.empty[Aggregation]
 
@@ -62,7 +64,9 @@ final class VortexScanBuilder(
 
   override def build(): VortexScan = {
     if (pushedAggregation.isEmpty) {
-      finalSchema = readDataSchema()
+      // Spark also prunes structs inside arrays and maps, which the reader returns whole.
+      finalSchema =
+        NestedSchemaPruning.pruneFields(readDataSchema(), dataSchema)
     }
     new VortexScan(
       sparkSession,

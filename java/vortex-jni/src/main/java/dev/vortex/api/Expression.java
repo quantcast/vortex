@@ -145,6 +145,11 @@ public final class Expression {
         return new Expression(NativeExpression.isNotNull(child.nativePointer()));
     }
 
+    /** Nulls out {@code child} wherever {@code mask}, a non-nullable boolean, is false. */
+    public static Expression mask(Expression child, Expression mask) {
+        return new Expression(NativeExpression.mask(child.nativePointer(), mask.nativePointer()));
+    }
+
     /**
      * SQL {@code LIKE} pattern match.
      *
