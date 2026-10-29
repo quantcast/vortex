@@ -81,9 +81,11 @@ final class VortexTable(
 
   private def mergeOptions(
       operationOptions: CaseInsensitiveStringMap
-  ): CaseInsensitiveStringMap = {
-    val merged =
-      options.asCaseSensitiveMap.asScala ++ operationOptions.asCaseSensitiveMap.asScala
-    new CaseInsensitiveStringMap(merged.asJava)
-  }
+  ): CaseInsensitiveStringMap =
+    new CaseInsensitiveStringMap(
+      VortexOptions.overlay(
+        options.asCaseSensitiveMap,
+        operationOptions.asCaseSensitiveMap
+      )
+    )
 }
