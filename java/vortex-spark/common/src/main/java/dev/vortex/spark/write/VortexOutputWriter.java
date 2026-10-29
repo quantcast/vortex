@@ -35,6 +35,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.SpecializedGetters;
 import org.apache.spark.sql.catalyst.util.ArrayData;
@@ -107,21 +108,7 @@ public final class VortexOutputWriter extends OutputWriter {
         this.options = options;
         this.writable = writable;
 
-        int configuredBatchSize = configuredBatchSize(options);
-        if (configuredBatchSize < MIN_BATCH_SIZE || configuredBatchSize > MAX_BATCH_SIZE) {
-            logger.warn(
-                    "Batch size {} is out of valid range [{}, {}], using default: {}",
-                    configuredBatchSize,
-                    MIN_BATCH_SIZE,
-                    MAX_BATCH_SIZE,
-                    DEFAULT_BATCH_SIZE);
-            this.batchSize = DEFAULT_BATCH_SIZE;
-        } else {
-            this.batchSize = configuredBatchSize;
-            if (this.batchSize != DEFAULT_BATCH_SIZE) {
-                logger.debug("Using configured batch size: {}", this.batchSize);
-            }
-        }
+        this.batchSize = configuredBatchSize(options);
 
         try {
             this.allocator = new RootAllocator();
@@ -147,13 +134,16 @@ public final class VortexOutputWriter extends OutputWriter {
      * {@value #WRITE_BATCH_SIZE_OPTION} overrides it, so a job that sets one batch size across formats can still say
      * something different for Vortex.
      *
-     * <p>Package-private so the precedence between the two can be tested without a native writer.
+     * @throws IllegalArgumentException if the value is not an integer from 1 to 65536
      */
     static int configuredBatchSize(VortexOptions options) {
-        if (options.get(WRITE_BATCH_SIZE_OPTION).isPresent()) {
-            return options.getInt(WRITE_BATCH_SIZE_OPTION, DEFAULT_BATCH_SIZE);
+        String key = options.get(WRITE_BATCH_SIZE_OPTION).isPresent() ? WRITE_BATCH_SIZE_OPTION : BATCH_SIZE_OPTION;
+        int batchSize = options.getInt(key, DEFAULT_BATCH_SIZE);
+        if (batchSize < MIN_BATCH_SIZE || batchSize > MAX_BATCH_SIZE) {
+            throw new IllegalArgumentException(String.format(
+                    Locale.ROOT, "%s must be from %d to %d, got %d", key, MIN_BATCH_SIZE, MAX_BATCH_SIZE, batchSize));
         }
-        return options.getInt(BATCH_SIZE_OPTION, DEFAULT_BATCH_SIZE);
+        return batchSize;
     }
 
     /**
