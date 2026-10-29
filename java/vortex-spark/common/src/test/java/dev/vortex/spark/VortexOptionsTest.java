@@ -75,6 +75,18 @@ final class VortexOptionsTest {
     }
 
     @Test
+    void anOverlayReplacesEverySpellingOfItsKey() {
+        Map<String, String> base = Map.of("vortex.x", "a", "VORTEX.X", "b", "vortex.y", "c");
+
+        Map<String, String> merged = VortexOptions.overlay(base, Map.of("Vortex.X", "d", "vortex.z", "e"));
+
+        assertEquals("d", VortexOptions.of(merged).get("vortex.x").orElseThrow());
+        assertEquals(3, merged.size());
+        assertEquals("c", merged.get("vortex.y"));
+        assertEquals("e", merged.get("vortex.z"));
+    }
+
+    @Test
     void optionsSurviveSerialization() throws IOException, ClassNotFoundException {
         VortexOptions options = VortexOptions.of(Map.of("vortex.workerThreads", "2"));
 
