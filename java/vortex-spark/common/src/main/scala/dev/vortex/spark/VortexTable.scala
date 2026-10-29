@@ -47,7 +47,7 @@ final class VortexTable(
     )
 
   override def inferSchema(files: Seq[FileStatus]): Option[StructType] = {
-    val vortexOptions = VortexOptions.of(options.asCaseSensitiveMap)
+    val vortexOptions = VortexOptions.of(withSessionDefaults(options))
     val hadoopConf = sparkSession.sessionState.newHadoopConfWithOptions(
       vortexOptions.asCaseSensitiveMap.asScala.toMap
     )
@@ -84,8 +84,16 @@ final class VortexTable(
   ): CaseInsensitiveStringMap =
     new CaseInsensitiveStringMap(
       VortexOptions.overlay(
-        options.asCaseSensitiveMap,
+        withSessionDefaults(options),
         operationOptions.asCaseSensitiveMap
       )
+    )
+
+  private def withSessionDefaults(
+      options: CaseInsensitiveStringMap
+  ): java.util.Map[String, String] =
+    VortexOptions.withSessionDefaults(
+      sparkSession.conf.getAll.asJava,
+      options.asCaseSensitiveMap
     )
 }

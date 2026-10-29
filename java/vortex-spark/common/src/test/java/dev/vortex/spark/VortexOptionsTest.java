@@ -87,6 +87,56 @@ final class VortexOptionsTest {
     }
 
     @Test
+    void onlyVortexSessionSettingsAreDefaultsAndExplicitOptionsWin() {
+        Map<String, String> session =
+                Map.of("vortex.workerThreads", "8", "vortex.readConcurrency", "2", "spark.sql.shuffle.partitions", "4");
+
+        VortexOptions resolved =
+                VortexOptions.of(VortexOptions.withSessionDefaults(session, Map.of("VORTEX.WORKERTHREADS", "1")));
+
+        assertEquals(1, resolved.getInt("vortex.workerThreads", 0));
+        assertEquals(2, resolved.getInt("vortex.readConcurrency", 0));
+        assertEquals(Optional.empty(), resolved.get("spark.sql.shuffle.partitions"));
+    }
+
+    @Test
+    void sessionPrefixesMatchInAnyCase() {
+        Map<String, String> session = Map.of(
+                "VORTEX.READCONCURRENCY", "3",
+                "Vortex.FooterParallelism", "5",
+                "spark.datasource.VORTEX.write.batch.size", "512",
+                "Spark.DataSource.Vortex.Stats.MaxFiles", "7");
+
+        VortexOptions resolved = VortexOptions.of(VortexOptions.withSessionDefaults(session, Map.of()));
+
+        assertEquals(3, resolved.getInt("vortex.readConcurrency", 0));
+        assertEquals(5, resolved.getInt("vortex.footerParallelism", 0));
+        assertEquals(512, resolved.getInt("vortex.write.batch.size", 0));
+        assertEquals(7, resolved.getInt("vortex.stats.maxFiles", 0));
+    }
+
+    @Test
+    void dataSourceSessionSettingsNameTheirOptionWithoutRepeatingVortex() {
+        Map<String, String> session = Map.of(
+                "spark.datasource.vortex.write.batch.size", "512",
+                "spark.datasource.vortex.workerThreads", "8",
+                "vortex.workerThreads", "2",
+                "spark.datasource.parquet.mergeSchema", "true");
+
+        VortexOptions resolved = VortexOptions.of(VortexOptions.withSessionDefaults(session, Map.of()));
+
+        assertEquals(512, resolved.getInt("vortex.write.batch.size", 0));
+        // A plain vortex.* setting is set by the application itself, so it beats the cluster-wide form.
+        assertEquals(2, resolved.getInt("vortex.workerThreads", 0));
+        assertEquals(Optional.empty(), resolved.get("vortex.mergeSchema"));
+        assertEquals(Optional.empty(), resolved.get("mergeSchema"));
+        assertEquals(
+                3,
+                VortexOptions.of(VortexOptions.withSessionDefaults(session, Map.of("vortex.workerthreads", "3")))
+                        .getInt("vortex.workerThreads", 0));
+    }
+
+    @Test
     void optionsSurviveSerialization() throws IOException, ClassNotFoundException {
         VortexOptions options = VortexOptions.of(Map.of("vortex.workerThreads", "2"));
 
