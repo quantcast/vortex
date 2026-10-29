@@ -5,10 +5,9 @@ package dev.vortex.spark.write;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.ImmutableIntArray;
+import dev.vortex.spark.read.PartitionPathUtils;
 import java.io.IOException;
 import java.io.Serializable;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -23,6 +22,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.hadoop.shaded.com.google.common.collect.Streams;
 import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.catalyst.catalog.ExternalCatalogUtils;
 import org.apache.spark.sql.catalyst.expressions.BoundReference;
 import org.apache.spark.sql.catalyst.expressions.UnsafeProjection;
 import org.apache.spark.sql.connector.expressions.Expression;
@@ -209,7 +209,10 @@ public final class PartitionedVortexDataWriter implements DataWriter<InternalRow
 
     private VortexDataWriter createWriterForPartition(String partitionPath) {
         String fileName = String.format("part-%05d-%d.vortex", partitionId, taskId);
-        String fileUri = baseOutputUri + partitionPath + "/" + fileName;
+        // The native writer decodes URIs but takes bare paths literally, so only a URI needs `%` escaped to
+        // land on the same directory name.
+        String directory = PartitionPathUtils.isUri(baseOutputUri) ? partitionPath.replace("%", "%25") : partitionPath;
+        String fileUri = baseOutputUri + directory + "/" + fileName;
         logger.debug("Creating writer for partition path: {}", fileUri);
         return new VortexDataWriter(fileUri, dataSchema, options);
     }
@@ -221,11 +224,10 @@ public final class PartitionedVortexDataWriter implements DataWriter<InternalRow
                 sb.append("/");
             }
             ResolvedTransform rt = resolvedTransforms[i];
-            sb.append(URLEncoder.encode(rt.directoryKey, StandardCharsets.UTF_8));
+            // Spark's own directory names, so Spark's file index and Hive read the same values back.
+            sb.append(ExternalCatalogUtils.escapePathName(rt.directoryKey));
             sb.append("=");
-
-            String value = evaluateTransform(rt, row);
-            sb.append(URLEncoder.encode(value, StandardCharsets.UTF_8));
+            sb.append(ExternalCatalogUtils.escapePathName(evaluateTransform(rt, row)));
         }
         return sb.toString();
     }

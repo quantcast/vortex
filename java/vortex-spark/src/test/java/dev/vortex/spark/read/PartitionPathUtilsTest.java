@@ -14,6 +14,8 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.unsafe.types.UTF8String;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 /**
  * Unit tests for {@link PartitionPathUtils}, which discovers and materializes Hive-style partition columns from file
@@ -66,6 +68,24 @@ final class PartitionPathUtilsTest {
     void splitsOnFirstEquals() {
         Map<String, String> values = PartitionPathUtils.parsePartitionValues("/tbl/k=a=b/file.vortex");
         assertEquals(Map.of("k", "a=b"), values);
+    }
+
+    @ParameterizedTest
+    @CsvSource(
+            delimiter = '|',
+            value = {
+                "file:///tbl/p=100%2525/f.vortex|100%",
+                "file:///tbl/p=C%C3%B4te/f.vortex|Côte",
+                "file:///tbl/p=a%252Fb/f.vortex|a/b",
+                "file:///tbl/p=C++/f.vortex|C++",
+                "s3://bucket/tbl/p=with%20space/f.vortex|with space",
+                "/tbl/p=a%2Fb/f.vortex|a/b",
+                "/tbl/p=C++/f.vortex|C++",
+                "file:///tbl/p=\uD83D\uDE00%2525/f.vortex|\uD83D\uDE00%",
+            })
+    @DisplayName("Decodes a URI path, then Spark's partition escaping")
+    void decodesUriThenSparkEscaping(String path, String value) {
+        assertEquals(Map.of("p", value), PartitionPathUtils.parsePartitionValues(path));
     }
 
     // --- inferPartitionColumnType ---
