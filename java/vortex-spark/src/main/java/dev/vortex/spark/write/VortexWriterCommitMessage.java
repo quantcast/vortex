@@ -3,6 +3,8 @@
 
 package dev.vortex.spark.write;
 
+import com.esotericsoftware.kryo.DefaultSerializer;
+import com.esotericsoftware.kryo.serializers.JavaSerializer;
 import java.io.Serializable;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
 
@@ -10,7 +12,9 @@ import org.apache.spark.sql.connector.write.WriterCommitMessage;
  * Commit message containing information about a successfully written Vortex file.
  *
  * <p>This message is passed from executors back to the driver to coordinate the commit phase of the write operation.
+ * Kryo's {@code FieldSerializer} cannot rebuild records, so under {@code KryoSerializer} it uses Java serialization.
  */
+@DefaultSerializer(JavaSerializer.class)
 public record VortexWriterCommitMessage(String filePath, long recordCount, long bytesWritten)
         implements WriterCommitMessage, Serializable {
 
