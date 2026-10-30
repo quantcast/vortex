@@ -211,8 +211,10 @@ public final class VortexOutputWriter extends OutputWriter {
     /**
      * Flushes the last batch and finalizes the file.
      *
-     * <p>After a failed {@link #write}, the rows appended since the last batch are dropped and this throws once every
-     * resource is released, so the incomplete file is never committed.
+     * <p>After a failed {@link #write}, the rows appended since the last batch are dropped and this only releases
+     * resources: it does not throw, because Spark's abort closes a task's writers one after another and stops at the
+     * first that throws. The incomplete file is never committed, since Spark commits only after every write returned
+     * and {@link #write} refuses every row once one has failed.
      */
     @Override
     public void close() {
@@ -252,12 +254,10 @@ public final class VortexOutputWriter extends OutputWriter {
         session = null;
         closed = true;
         if (writeFailure != null) {
-            IllegalStateException incomplete = new IllegalStateException(
-                    "VortexOutputWriter for " + filePath + " failed on an earlier write", writeFailure);
             if (failure != null) {
-                incomplete.addSuppressed(failure);
+                logger.warn("Failed to release the writer for {} after an earlier write failed", filePath, failure);
             }
-            throw incomplete;
+            return;
         }
         if (failure != null) {
             throw new UncheckedIOException("Failed to close Vortex output " + filePath, failure);
