@@ -5,8 +5,27 @@ package dev.vortex.spark;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import dev.vortex.api.Session;
+import dev.vortex.api.VortexWriter;
+import dev.vortex.arrow.ArrowAllocation;
+import dev.vortex.relocated.org.apache.arrow.c.ArrowArray;
+import dev.vortex.relocated.org.apache.arrow.c.ArrowSchema;
+import dev.vortex.relocated.org.apache.arrow.c.Data;
+import dev.vortex.relocated.org.apache.arrow.memory.BufferAllocator;
+import dev.vortex.relocated.org.apache.arrow.vector.BigIntVector;
+import dev.vortex.relocated.org.apache.arrow.vector.Decimal256Vector;
+import dev.vortex.relocated.org.apache.arrow.vector.UInt4Vector;
+import dev.vortex.relocated.org.apache.arrow.vector.VectorSchemaRoot;
+import dev.vortex.relocated.org.apache.arrow.vector.complex.StructVector;
+import dev.vortex.relocated.org.apache.arrow.vector.types.pojo.ArrowType;
+import dev.vortex.relocated.org.apache.arrow.vector.types.pojo.Field;
+import dev.vortex.relocated.org.apache.arrow.vector.types.pojo.FieldType;
+import dev.vortex.relocated.org.apache.arrow.vector.types.pojo.Schema;
+import java.io.IOException;
+import java.math.BigDecimal;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -26,7 +45,7 @@ import org.junit.jupiter.params.provider.ValueSource;
  *
  * <p>Every file holds {@code id} and {@code s = {a, b, t: {a, b}}}, with {@code s} null in one row and {@code s.t} in
  * another. Each query reads the same rows from Parquet and Vortex with the same supplied schema, with nested schema
- * pruning on and off.
+ * pruning on and off. The tests of columns Spark cannot read write their own files through the native writer.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public final class VortexNestedSchemaResolutionTest {
@@ -133,12 +152,72 @@ public final class VortexNestedSchemaResolutionTest {
                 schema, data -> data.where("s.c IS NULL AND s.t.c IS NULL").selectExpr("id", "s.a"));
     }
 
+    @Test
+    @DisplayName("A column Spark cannot read does not fail a query that does not read it")
+    public void unreadColumnSparkCannotRead(@TempDir Path tempDir) throws IOException {
+        Schema schema = new Schema(List.of(
+                Field.nullable("id", new ArrowType.Int(64, true)),
+                Field.nullable("d", new ArrowType.Decimal(50, 2, 256))));
+        String path = tempDir.resolve("decimal.vortex").toString();
+        writeOneRow(path, schema, root -> {
+            ((BigIntVector) root.getVector("id")).setSafe(0, 7);
+            ((Decimal256Vector) root.getVector("d")).setSafe(0, new BigDecimal("1.23"));
+        });
+        // A supplied schema, since inferring one converts every column.
+        assertRows(path, "id BIGINT", data -> data, "[[7]]");
+    }
+
+    @Test
+    @DisplayName("A struct field Spark cannot read does not fail a query that reads its siblings")
+    public void unreadStructFieldSparkCannotRead(@TempDir Path tempDir) throws IOException {
+        Schema schema = new Schema(List.of(
+                Field.nullable("id", new ArrowType.Int(64, true)),
+                new Field(
+                        "s",
+                        FieldType.nullable(ArrowType.Struct.INSTANCE),
+                        List.of(
+                                Field.nullable("a", new ArrowType.Int(64, true)),
+                                Field.nullable("b", new ArrowType.Int(64, true)),
+                                Field.nullable("u", new ArrowType.Int(32, false))))));
+        String path = tempDir.resolve("unsigned.vortex").toString();
+        writeOneRow(path, schema, root -> {
+            ((BigIntVector) root.getVector("id")).setSafe(0, 0);
+            StructVector s = (StructVector) root.getVector("s");
+            ((BigIntVector) s.getChild("a")).setSafe(0, 10);
+            ((BigIntVector) s.getChild("b")).setSafe(0, 20);
+            ((UInt4Vector) s.getChild("u")).setSafe(0, 30);
+            s.setIndexDefined(0);
+        });
+        String readSchema = "id BIGINT, s STRUCT<a: BIGINT, b: BIGINT>";
+        assertRows(path, readSchema, data -> data.selectExpr("id", "s.b"), "[[0,20]]");
+        assertRows(path, readSchema, data -> data.selectExpr("id", "s"), "[[0,[10,20]]]");
+    }
+
+    private static void writeOneRow(String path, Schema schema, Consumer<VectorSchemaRoot> fill) throws IOException {
+        BufferAllocator allocator = ArrowAllocation.rootAllocator();
+        try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator);
+                VortexWriter writer = VortexWriter.builder(Session.create(), path, schema, allocator)
+                        .build();
+                ArrowArray array = ArrowArray.allocateNew(allocator);
+                ArrowSchema arrowSchema = ArrowSchema.allocateNew(allocator)) {
+            root.allocateNew();
+            fill.accept(root);
+            root.setRowCount(1);
+            Data.exportVectorSchemaRoot(allocator, root, null, array, arrowSchema);
+            writer.writeBatch(array.memoryAddress(), arrowSchema.memoryAddress());
+        }
+    }
+
     /** Asserts that {@code query} returns {@code expected} from Vortex, with pruning off and on. */
     private void assertRows(String schema, Function<Dataset<Row>, Dataset<Row>> query, String expected) {
+        assertRows(vortexPath, schema, query, expected);
+    }
+
+    private void assertRows(String path, String schema, Function<Dataset<Row>, Dataset<Row>> query, String expected) {
         for (boolean pruning : new boolean[] {false, true}) {
             spark.conf().set(PRUNING, pruning);
             List<Row> actual = query.apply(
-                            spark.read().schema(schema).format("vortex").load(vortexPath))
+                            spark.read().schema(schema).format("vortex").load(path))
                     .orderBy("id")
                     .collectAsList();
             assertEquals(expected, actual.toString(), schema + " with pruning " + (pruning ? "on" : "off"));

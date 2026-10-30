@@ -14,8 +14,8 @@ import dev.vortex.io.NativeReadable;
 import dev.vortex.relocated.org.apache.arrow.memory.BufferAllocator;
 import dev.vortex.relocated.org.apache.arrow.vector.VectorSchemaRoot;
 import dev.vortex.relocated.org.apache.arrow.vector.ipc.ArrowReader;
+import dev.vortex.relocated.org.apache.arrow.vector.types.pojo.ArrowType;
 import dev.vortex.relocated.org.apache.arrow.vector.types.pojo.Field;
-import dev.vortex.spark.ArrowUtils;
 import dev.vortex.spark.VortexOptions;
 import dev.vortex.spark.VortexSparkSession;
 import dev.vortex.spark.io.VortexFile;
@@ -141,12 +141,14 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
     }
 
     private static DataType sparkType(Field field) {
-        try {
-            return ArrowUtils.fromArrowField(field);
-        } catch (UnsupportedOperationException e) {
-            // Only a column's name and struct shape are matched against, so one Spark cannot read stays matchable.
+        // Only names, nullability and struct shapes are matched against, so leaf types are left unconverted: a file
+        // column Spark cannot read only fails a query that reads it.
+        if (!(field.getType() instanceof ArrowType.Struct)) {
             return DataTypes.NullType;
         }
+        return new StructType(field.getChildren().stream()
+                .map(child -> new StructField(child.getName(), sparkType(child), child.isNullable(), Metadata.empty()))
+                .toArray(StructField[]::new));
     }
 
     private Map<String, String> fieldNames(StructType fileSchema, boolean caseSensitive) {
