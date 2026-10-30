@@ -230,6 +230,60 @@ public final class VortexReadTypeParityTest {
                         "SELECT id, x FROM t",
                         false),
                 new Case(
+                        "array struct field BIGINT as TIMESTAMP",
+                        "SELECT id, IF(x IS NULL, NULL, array(named_struct('a', x, 'b', CAST(id AS STRING)))) AS x"
+                                + " FROM (" + longs + ")",
+                        "ARRAY<STRUCT<a: TIMESTAMP, b: STRING>>",
+                        "x.element.a",
+                        "TIMESTAMP",
+                        "SELECT id, x FROM t",
+                        false),
+                new Case(
+                        "array struct fields in another order",
+                        "SELECT id, IF(x IS NULL, NULL, array(named_struct('a', x, 'b', CAST(id AS STRING)))) AS x"
+                                + " FROM (" + longs + ")",
+                        "ARRAY<STRUCT<b: STRING, a: BIGINT>>",
+                        "x.element",
+                        "STRUCT<b: STRING, a: BIGINT>",
+                        "SELECT id, x FROM t",
+                        false),
+                new Case(
+                        "map value struct field BIGINT as TIMESTAMP",
+                        "SELECT id, IF(x IS NULL, NULL, map('k', named_struct('a', x, 'b', CAST(id AS STRING)))) AS x"
+                                + " FROM (" + longs + ")",
+                        "MAP<STRING, STRUCT<a: TIMESTAMP, b: STRING>>",
+                        "x.value.a",
+                        "TIMESTAMP",
+                        "SELECT id, x FROM t",
+                        false),
+                new Case(
+                        "map value array struct field BIGINT as TIMESTAMP",
+                        "SELECT id, IF(x IS NULL, NULL, map('k', array(named_struct('a', x)))) AS x" + " FROM (" + longs
+                                + ")",
+                        "MAP<STRING, ARRAY<STRUCT<a: TIMESTAMP>>>",
+                        "x.value.element.a",
+                        "TIMESTAMP",
+                        "SELECT id, x FROM t",
+                        false),
+                // The vectors return a map's structs by position, so Vortex may refuse what Parquet matches by name.
+                new Case(
+                        "map value struct fields in another order",
+                        "SELECT id, IF(x IS NULL, NULL, map('k', named_struct('a', x, 'b', CAST(id AS STRING)))) AS x"
+                                + " FROM (" + longs + ")",
+                        "MAP<STRING, STRUCT<b: STRING, a: BIGINT>>",
+                        "x.value",
+                        "STRUCT<b: STRING, a: BIGINT>",
+                        "SELECT id, x FROM t",
+                        true),
+                new Case(
+                        "map value struct with a field the file lacks",
+                        "SELECT id, IF(x IS NULL, NULL, map('k', named_struct('a', x))) AS x FROM (" + longs + ")",
+                        "MAP<STRING, STRUCT<a: BIGINT, c: INT>>",
+                        "x.value",
+                        "STRUCT<a: BIGINT, c: INT>",
+                        "SELECT id, x FROM t",
+                        true),
+                new Case(
                         "filtered BIGINT as TIMESTAMP",
                         longs,
                         "TIMESTAMP",
