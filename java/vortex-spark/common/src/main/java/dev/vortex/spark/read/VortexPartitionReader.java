@@ -15,6 +15,7 @@ import dev.vortex.relocated.org.apache.arrow.memory.BufferAllocator;
 import dev.vortex.relocated.org.apache.arrow.vector.VectorSchemaRoot;
 import dev.vortex.relocated.org.apache.arrow.vector.ipc.ArrowReader;
 import dev.vortex.relocated.org.apache.arrow.vector.types.pojo.Field;
+import dev.vortex.spark.ArrowUtils;
 import dev.vortex.spark.VortexOptions;
 import dev.vortex.spark.VortexSparkSession;
 import dev.vortex.spark.io.VortexFile;
@@ -34,6 +35,8 @@ import org.apache.spark.sql.execution.datasources.PartitionedFile;
 import org.apache.spark.sql.execution.vectorized.ConstantColumnVector;
 import org.apache.spark.sql.sources.Filter;
 import org.apache.spark.sql.types.DataType;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnVector;
@@ -52,6 +55,9 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
      * before a column was added returns fewer columns than the query asked for.
      */
     private final int[] vectorSlots;
+
+    /** For each field of {@code readDataSchema}, how to lay it out as Spark reads it, or {@code null} as returned. */
+    private final NestedSchemaPruning.Shape[] columnShapes;
 
     private NativeReadable readable;
     private Session session;
@@ -81,17 +87,15 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
             readable = io.openReadable(new VortexFile(file.toPath().toString(), file.fileSize()));
             dataSource = DataSource.open(session, List.of(readable), io.readConcurrency());
 
-            Map<String, String> fileFields = fieldNames(dataSource, caseSensitive);
-            List<String> projection = new ArrayList<>(readDataSchema.length());
-            List<StructField> projectedFields = new ArrayList<>(readDataSchema.length());
+            StructType fileSchema = fileSchema(dataSource);
+            Map<String, String> fileFields = fieldNames(fileSchema, caseSensitive);
+            List<StructField> projected = new ArrayList<>(readDataSchema.length());
             this.vectorSlots = new int[readDataSchema.length()];
             StructField[] fields = readDataSchema.fields();
             for (int i = 0; i < fields.length; i++) {
-                String fileName = fileFields.get(fields[i].name());
-                if (fileName != null) {
-                    vectorSlots[i] = projection.size();
-                    projection.add(fileName);
-                    projectedFields.add(fields[i]);
+                if (fileFields.containsKey(fields[i].name())) {
+                    vectorSlots[i] = projected.size();
+                    projected.add(fields[i]);
                 } else if (fields[i].nullable()) {
                     vectorSlots[i] = -1;
                 } else {
@@ -107,13 +111,21 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
             // Always project, an empty read schema included: a query that needs only partition columns or only a
             // row count must not pull every data column off storage. Struct columns that Spark pruned read only the
             // nested fields the query uses.
-            options.projection(NestedSchemaPruning.projection(
-                    projection.toArray(new String[0]),
-                    new StructType(projectedFields.toArray(new StructField[0])),
-                    dataSchema));
+            NestedSchemaPruning.Projection projection = NestedSchemaPruning.projection(
+                    new StructType(projected.toArray(new StructField[0])),
+                    fileSchema,
+                    caseSensitive,
+                    file.toPath().toString());
+            options.projection(projection.expression());
+            this.columnShapes = new NestedSchemaPruning.Shape[fields.length];
+            for (int i = 0; i < fields.length; i++) {
+                if (vectorSlots[i] >= 0) {
+                    columnShapes[i] = projection.shape(vectorSlots[i]);
+                }
+            }
             // Filters are converted against this file's own columns. Spark evaluates every data filter above the
             // scan anyway, so one that reads a column this file lacks is dropped rather than pushed.
-            buildFilterExpression(pushedFilters, restrictTo(dataSchema, fileFields))
+            buildFilterExpression(pushedFilters, restrictTo(dataSchema, fileSchema))
                     .ifPresent(options::filter);
             scan = dataSource.scan(options.build());
         } catch (RuntimeException e) {
@@ -122,10 +134,24 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
         }
     }
 
-    private Map<String, String> fieldNames(DataSource source, boolean caseSensitive) {
+    private StructType fileSchema(DataSource source) {
+        return new StructType(source.arrowSchema(allocator).getFields().stream()
+                .map(field -> new StructField(field.getName(), sparkType(field), field.isNullable(), Metadata.empty()))
+                .toArray(StructField[]::new));
+    }
+
+    private static DataType sparkType(Field field) {
+        try {
+            return ArrowUtils.fromArrowField(field);
+        } catch (UnsupportedOperationException e) {
+            // Only a column's name and struct shape are matched against, so one Spark cannot read stays matchable.
+            return DataTypes.NullType;
+        }
+    }
+
+    private Map<String, String> fieldNames(StructType fileSchema, boolean caseSensitive) {
         Map<String, String> names = caseSensitive ? new HashMap<>() : new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-        for (Field field : source.arrowSchema(allocator).getFields()) {
-            String name = field.getName();
+        for (String name : fileSchema.fieldNames()) {
             String previous = names.putIfAbsent(name, name);
             if (previous != null) {
                 throw new IllegalArgumentException(String.format(
@@ -139,12 +165,25 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
         return names;
     }
 
-    private static StructType restrictTo(StructType schema, Map<String, String> names) {
-        // Native filters use physical field names. Filters with different casing stay with Spark.
-        StructField[] present = Arrays.stream(schema.fields())
-                .filter(field -> field.name().equals(names.get(field.name())))
-                .toArray(StructField[]::new);
-        return present.length == schema.length() ? schema : new StructType(present);
+    private static StructType restrictTo(StructType schema, StructType fileSchema) {
+        // Native filters use physical field names, at every level. Filters on other paths stay with Spark.
+        List<StructField> present = new ArrayList<>(schema.length());
+        for (StructField field : schema.fields()) {
+            Optional<StructField> fileField = Arrays.stream(fileSchema.fields())
+                    .filter(candidate -> candidate.name().equals(field.name()))
+                    .findFirst();
+            if (fileField.isEmpty()) {
+                continue;
+            }
+            if (field.dataType() instanceof StructType struct
+                    && fileField.get().dataType() instanceof StructType fileStruct) {
+                present.add(new StructField(
+                        field.name(), restrictTo(struct, fileStruct), field.nullable(), field.metadata()));
+            } else {
+                present.add(field);
+            }
+        }
+        return new StructType(present.toArray(new StructField[0]));
     }
 
     private static Optional<Expression> buildFilterExpression(Filter[] filters, StructType dataSchema) {
@@ -205,9 +244,16 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
         StructField[] fields = readDataSchema.fields();
         ColumnVector[] dataVectors = new ColumnVector[fields.length];
         for (int i = 0; i < dataVectors.length; i++) {
-            dataVectors[i] = vectorSlots[i] < 0
-                    ? nullColumn(rowCount, fields[i].dataType())
-                    : new VortexArrowColumnVector(root.getFieldVectors().get(vectorSlots[i]));
+            if (vectorSlots[i] < 0) {
+                dataVectors[i] = nullColumn(rowCount, fields[i].dataType());
+                continue;
+            }
+            ColumnVector vector =
+                    new VortexArrowColumnVector(root.getFieldVectors().get(vectorSlots[i]));
+            NestedSchemaPruning.Shape shape = columnShapes[i];
+            dataVectors[i] = shape == null
+                    ? vector
+                    : NullFilledStructVector.of(vector, (StructType) fields[i].dataType(), shape, rowCount);
         }
         ColumnVector[] partitionVectors =
                 PartitionColumnVectors.create(rowCount, readPartitionSchema, file.partitionValues());
