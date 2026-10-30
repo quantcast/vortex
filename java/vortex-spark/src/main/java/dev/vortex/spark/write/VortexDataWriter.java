@@ -5,6 +5,7 @@ package dev.vortex.spark.write;
 
 import dev.vortex.api.Session;
 import dev.vortex.api.VortexWriter;
+import dev.vortex.jni.NativeFiles;
 import dev.vortex.relocated.org.apache.arrow.c.ArrowArray;
 import dev.vortex.relocated.org.apache.arrow.c.ArrowSchema;
 import dev.vortex.relocated.org.apache.arrow.c.Data;
@@ -14,8 +15,7 @@ import dev.vortex.relocated.org.apache.arrow.vector.FieldVector;
 import dev.vortex.relocated.org.apache.arrow.vector.VectorSchemaRoot;
 import dev.vortex.spark.VortexSparkSession;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Paths;
+import java.util.Map;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.write.DataWriter;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
@@ -53,6 +53,7 @@ public final class VortexDataWriter implements DataWriter<InternalRow>, AutoClos
     private long recordCount = 0;
     private long bytesWritten = 0;
     private boolean failed = false;
+    private boolean fileCreated = false;
     private boolean closed = false;
 
     /**
@@ -93,6 +94,7 @@ public final class VortexDataWriter implements DataWriter<InternalRow>, AutoClos
             this.vortexWriter = VortexWriter.builder(session, filePath, arrowSchema, allocator)
                     .options(options.asCaseSensitiveMap())
                     .build();
+            this.fileCreated = true;
             this.vectorSchemaRoot = VectorSchemaRoot.create(arrowSchema, allocator);
             // Small start so writers that see few rows hold little memory; Arrow grows on demand.
             // It also keeps the largest capacity a batch needed, so one batch of huge values makes
@@ -112,9 +114,17 @@ public final class VortexDataWriter implements DataWriter<InternalRow>, AutoClos
 
             logger.debug("Initialized VortexDataWriter for {}", filePath);
 
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException e) {
             logger.error("Failed to initialize VortexDataWriter for {}", filePath, e);
-            throw new RuntimeException("Failed to initialize VortexDataWriter", e);
+            // Spark gets no writer to abort, so release what was opened here, the file included.
+            try {
+                abort();
+            } catch (IOException | RuntimeException cleanup) {
+                e.addSuppressed(cleanup);
+            }
+            throw e instanceof RuntimeException runtime
+                    ? runtime
+                    : new RuntimeException("Failed to initialize VortexDataWriter", e);
         }
     }
 
@@ -168,7 +178,15 @@ public final class VortexDataWriter implements DataWriter<InternalRow>, AutoClos
 
         try (ArrowArray arrowArray = ArrowArray.allocateNew(allocator)) {
             Data.exportVectorSchemaRoot(allocator, vectorSchemaRoot, null, arrowArray);
-            vortexWriter.writeBatch(arrowArray.memoryAddress(), exportedSchema.memoryAddress());
+            try {
+                vortexWriter.writeBatch(arrowArray.memoryAddress(), exportedSchema.memoryAddress());
+            } catch (IOException | RuntimeException e) {
+                // Native code takes the batch, and clears its release callback, only once it starts importing it.
+                if (arrowArray.snapshot().release != 0) {
+                    arrowArray.release();
+                }
+                throw e;
+            }
         }
 
         vectorSchemaRoot.clear();
@@ -199,60 +217,33 @@ public final class VortexDataWriter implements DataWriter<InternalRow>, AutoClos
             checkNotFailed();
         }
         if (!closed) {
-            IOException exception = null;
-
             try {
                 // Write any remaining rows
                 flushBatch();
 
                 // Finalize the file; the summary carries its physical size
                 if (vortexWriter != null) {
-                    try {
-                        bytesWritten = vortexWriter.finish().fileSize();
-                    } finally {
-                        vortexWriter = null; // Always null out the reference
-                    }
+                    bytesWritten = vortexWriter.finish().fileSize();
+                    vortexWriter = null;
                 }
-            } catch (IOException e) {
-                exception = e;
-            }
-
-            // Clean up Arrow resources - always attempt cleanup even if there was an error
-            try {
                 closeArrowResources();
-            } catch (Exception e) {
-                if (exception == null) {
-                    exception = new IOException("Failed to close VectorSchemaRoot", e);
-                } else {
-                    exception.addSuppressed(e);
+            } catch (IOException | RuntimeException e) {
+                // Spark aborts a task whose commit throws, but abort() would then find this writer closed.
+                try {
+                    abort();
+                } catch (IOException | RuntimeException cleanup) {
+                    e.addSuppressed(cleanup);
                 }
+                throw e;
             }
 
-            // The Arrow C Data Interface export (Data.exportVectorSchemaRoot) creates structural
-            // allocations from this allocator. When flushBatch passes the ArrowArray to Rust,
-            // FFI_ArrowArray::from_raw() takes ownership and nullifies the release callback on
-            // the Java side. The Rust side calls release asynchronously on its own thread, so
-            // small structural allocations may still be outstanding when the allocator is closed.
-            // These are reclaimed when the allocator is garbage collected.
-            if (allocator != null) {
-                try {
-                    allocator.close();
-                } catch (IllegalStateException e) {
-                    logger.debug("Allocator closed with outstanding FFI allocations: {}", e.getMessage());
-                }
-                allocator = null;
-            }
+            closeAllocator();
 
             // Session is the JVM-wide singleton held by VortexSparkSession; we just
             // drop our local handle to it here.
             session = null;
 
             closed = true;
-
-            // Throw any exception that occurred during cleanup
-            if (exception != null) {
-                throw exception;
-            }
         }
 
         return new VortexWriterCommitMessage(filePath, recordCount, bytesWritten);
@@ -267,8 +258,11 @@ public final class VortexDataWriter implements DataWriter<InternalRow>, AutoClos
      */
     @Override
     public void abort() throws IOException {
-        if (!closed) {
-            // Close resources
+        if (closed) {
+            return;
+        }
+        RuntimeException failure = null;
+        try {
             if (vortexWriter != null) {
                 try {
                     vortexWriter.close();
@@ -278,45 +272,79 @@ public final class VortexDataWriter implements DataWriter<InternalRow>, AutoClos
                     vortexWriter = null; // Always null out the reference
                 }
             }
-
-            closeArrowResources();
-
-            if (allocator != null) {
+            failure = runGuarded(failure, this::closeArrowResources);
+            failure = runGuarded(failure, this::closeAllocator);
+            // Closing the native writer finalizes a valid file of the batches flushed so far, and a retried
+            // attempt writes its own, so this one must go.
+            if (fileCreated) {
                 try {
-                    allocator.close();
-                } catch (IllegalStateException e) {
-                    logger.debug("Allocator closed with outstanding FFI allocations: {}", e.getMessage());
+                    deleteFile(filePath, options);
+                } catch (RuntimeException e) {
+                    logger.warn("Failed to delete the file of an aborted write attempt: {}", filePath, e);
                 }
-                allocator = null;
             }
-
-            // Session is the JVM-wide singleton held by VortexSparkSession; we just
-            // drop our local handle to it here.
+        } finally {
             session = null;
-
-            // Delete the partial file if it exists
-            try {
-                Files.deleteIfExists(Paths.get(filePath));
-            } catch (IOException e) {
-                // Ignore - we're already aborting
-            }
-
             closed = true;
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 
+    /** Deletes a file a writer created. Only the native layer resolves {@code file://} and {@code s3://} URLs. */
+    static void deleteFile(String path, CaseInsensitiveStringMap options) {
+        Map<String, String> properties = options.asCaseSensitiveMap();
+        NativeFiles.delete(VortexSparkSession.get(properties), new String[] {path}, properties);
+    }
+
     private void closeArrowResources() {
-        if (vectorSchemaRoot != null) {
-            vectorSchemaRoot.close();
-            vectorSchemaRoot = null;
+        RuntimeException failure = runGuarded(null, () -> {
+            if (vectorSchemaRoot != null) {
+                VectorSchemaRoot root = vectorSchemaRoot;
+                vectorSchemaRoot = null;
+                root.close();
+            }
+        });
+        failure = runGuarded(failure, () -> {
+            if (exportedSchema != null) {
+                ArrowSchema schema = exportedSchema;
+                exportedSchema = null;
+                // close() frees only the struct; the children the export allocated are freed by the release
+                // callback, which the native side never calls because it only borrows the schema.
+                schema.release();
+                schema.close();
+            }
+        });
+        if (failure != null) {
+            throw failure;
         }
-        if (exportedSchema != null) {
-            // close() frees only the struct; the children the export allocated are freed by the release
-            // callback, which the native side never calls because it only borrows the schema.
-            exportedSchema.release();
-            exportedSchema.close();
-            exportedSchema = null;
+    }
+
+    // Rust releases imported batches on its own thread, so some may still be outstanding here.
+    private void closeAllocator() {
+        if (allocator != null) {
+            BufferAllocator closing = allocator;
+            allocator = null;
+            try {
+                closing.close();
+            } catch (IllegalStateException e) {
+                logger.debug("Allocator closed with outstanding FFI allocations: {}", e.getMessage());
+            }
         }
+    }
+
+    /** Runs {@code step}, adding its failure to {@code failure}, so that later cleanup steps still run. */
+    private static RuntimeException runGuarded(RuntimeException failure, Runnable step) {
+        try {
+            step.run();
+        } catch (RuntimeException e) {
+            if (failure == null) {
+                return e;
+            }
+            failure.addSuppressed(e);
+        }
+        return failure;
     }
 
     /**
