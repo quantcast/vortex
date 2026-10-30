@@ -202,9 +202,22 @@ path:
 Filter pushdown, column pruning, nested field pruning, partition pruning, and partitioned writes
 work on both paths. On the V1 path Spark prunes nested fields only for Parquet and ORC, so the
 connector registers an optimizer rule that does the same for Vortex. Spark loads it from the
-connector jar through `SparkSessionExtensionsProvider`; listing
-`dev.vortex.spark.VortexSparkSessionExtensions` in `spark.sql.extensions` as well is harmless.
-`spark.sql.optimizer.nestedSchemaPruning.enabled=false` turns it off with Spark's own pruning.
+connector jar through `SparkSessionExtensionsProvider`, except on Spark 3.5 in PySpark: PySpark 3.5
+creates its session with a constructor that applies only `spark.sql.extensions`, unless a JVM
+session already exists. There, set the extensions before the SparkContext starts, for example with
+`--conf` or in the builder of the first session:
+
+```python
+spark = (
+    SparkSession.builder
+    .config("spark.sql.extensions", "dev.vortex.spark.VortexSparkSessionExtensions")
+    .getOrCreate()
+)
+```
+
+Without it, queries still return the same results but read whole structs. Listing the class there
+on other versions is harmless. `spark.sql.optimizer.nestedSchemaPruning.enabled=false` turns the
+rule off with Spark's own pruning.
 `COUNT(*)` footer pushdown and footer-backed scan statistics are V2 only.
 
 ## I/O and Remote Storage
