@@ -15,7 +15,6 @@ import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.unsafe.types.UTF8String;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -24,8 +23,7 @@ final class VortexOutputWriterMemoryTest {
     Path tempDir;
 
     @Test
-    @Disabled("each batch's schema is exported and closed without being released, so its children stay allocated")
-    void closingAWriterReleasesEveryArrowAllocation() throws Exception {
+    void closingAWriterReleasesEveryArrowAllocation() {
         StructType schema = new StructType()
                 .add("id", DataTypes.LongType, false)
                 .add("name", DataTypes.StringType, true)
@@ -36,10 +34,7 @@ final class VortexOutputWriterMemoryTest {
                 schema,
                 VortexOptions.of(Map.of("vortex.write.batch.size", "8")),
                 HadoopWritable.create(new Configuration(), path));
-        // Spark exposes no allocator metrics, so look at the writer's own allocator.
-        var field = VortexOutputWriter.class.getDeclaredField("allocator");
-        field.setAccessible(true);
-        BufferAllocator allocator = (BufferAllocator) field.get(writer);
+        BufferAllocator allocator = writer.allocator();
 
         for (long id = 0; id < 40; id++) {
             writer.write(new GenericInternalRow(new Object[] {
