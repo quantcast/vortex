@@ -35,6 +35,7 @@ import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.sql.execution.datasources.PartitionedFile;
 import org.apache.spark.sql.execution.vectorized.ConstantColumnVector;
 import org.apache.spark.sql.sources.Filter;
+import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
@@ -161,8 +162,12 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
     }
 
     private static DataType sparkType(Field field) {
-        // Only names, nullability and struct shapes are matched against, so leaf types are left unconverted: a file
-        // column Spark cannot read only fails a query that reads it.
+        // Only names, nullability and struct and array shapes are matched against, so leaf types are left unconverted:
+        // a file column Spark cannot read only fails a query that reads it.
+        if (field.getType() instanceof ArrowType.List || field.getType() instanceof ArrowType.ListView) {
+            Field element = field.getChildren().get(0);
+            return new ArrayType(sparkType(element), element.isNullable());
+        }
         if (!(field.getType() instanceof ArrowType.Struct)) {
             return DataTypes.NullType;
         }
@@ -273,9 +278,8 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
             ColumnVector vector =
                     new VortexArrowColumnVector(root.getFieldVectors().get(vectorSlots[i]));
             NestedSchemaPruning.Shape shape = columnShapes[i];
-            dataVectors[i] = shape == null
-                    ? vector
-                    : NullFilledStructVector.of(vector, (StructType) fields[i].dataType(), shape, rowCount);
+            dataVectors[i] =
+                    shape == null ? vector : NullFilledStructVector.fill(vector, fields[i].dataType(), shape, rowCount);
         }
         ColumnVector[] partitionVectors =
                 PartitionColumnVectors.create(rowCount, readPartitionSchema, file.partitionValues());
