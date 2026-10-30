@@ -57,6 +57,29 @@ public final class ExpressionTest {
     }
 
     @Test
+    public void listTransformComposesNested() {
+        Expression inner = Expression.listTransform(
+                Expression.getItem("g", Expression.variable("x")),
+                "y",
+                Expression.select(new String[] {"h"}, Expression.variable("y")));
+        Expression body = Expression.pack(
+                new String[] {"a", "g"},
+                new Expression[] {Expression.getItem("a", Expression.variable("x")), inner},
+                false);
+        assertNotNull(Expression.listTransform(Expression.column("l"), "x", body));
+    }
+
+    @Test
+    public void listTransformRejectsABodyReadingOutsideTheLambda() {
+        RuntimeException exception = assertThrows(
+                RuntimeException.class,
+                () -> Expression.listTransform(Expression.column("l"), "x", Expression.column("o")));
+        assertTrue(
+                exception.getMessage().contains("can only read its parameters"),
+                () -> "unexpected message: " + exception.getMessage());
+    }
+
+    @Test
     public void mergeComposes() {
         // Default duplicate handling (ERROR).
         assertNotNull(Expression.merge(Expression.column("a"), Expression.column("b")));
