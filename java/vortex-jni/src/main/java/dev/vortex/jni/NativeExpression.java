@@ -46,6 +46,10 @@ public final class NativeExpression {
 
     public static native long listContains(long listPointer, long needlePointer, boolean sqlNullSemantics);
 
+    public static native long variable(String name);
+
+    public static native long listTransform(long listPointer, String param, long bodyPointer);
+
     public static native long literalBool(boolean value, boolean isNull);
 
     public static native long literalI8(byte value, boolean isNull);

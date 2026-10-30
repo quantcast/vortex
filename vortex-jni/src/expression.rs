@@ -41,12 +41,14 @@ use vortex::encodings::uuid::Uuid;
 use vortex::encodings::uuid::UuidMetadata;
 use vortex::error::vortex_err;
 use vortex::expr::Expression;
+use vortex::expr::Lambda;
 use vortex::expr::and_collect;
 use vortex::expr::between;
 use vortex::expr::get_item;
 use vortex::expr::is_not_null;
 use vortex::expr::is_null;
 use vortex::expr::list_contains_opts;
+use vortex::expr::list_transform;
 use vortex::expr::lit;
 use vortex::expr::mask;
 use vortex::expr::merge_opts;
@@ -55,6 +57,7 @@ use vortex::expr::or_collect;
 use vortex::expr::pack;
 use vortex::expr::root;
 use vortex::expr::select;
+use vortex::expr::var;
 use vortex::extension::datetime::Date;
 use vortex::extension::datetime::Time;
 use vortex::extension::datetime::TimeUnit;
@@ -452,6 +455,37 @@ pub extern "system" fn Java_dev_vortex_jni_NativeExpression_listContains(
         needle,
         ListContainsOptions { sql_null_semantics },
     ))
+}
+
+/// A lambda's parameter, read inside the lambda's body.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_vortex_jni_NativeExpression_variable(
+    mut env: EnvUnowned,
+    _class: JClass,
+    name: JString,
+) -> jlong {
+    try_or_throw(&mut env, |env| {
+        let name: String = name.try_to_string(env)?;
+        Ok(into_raw(var(name.as_str())))
+    })
+}
+
+/// `body` applied to every element of each list, with the element bound to `param`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_vortex_jni_NativeExpression_listTransform(
+    mut env: EnvUnowned,
+    _class: JClass,
+    list: jlong,
+    param: JString,
+    body: jlong,
+) -> jlong {
+    try_or_throw(&mut env, |env| {
+        let param: String = param.try_to_string(env)?;
+        let list = unsafe { expr_ref(list) }.clone();
+        let body = unsafe { expr_ref(body) }.clone();
+        let lambda = Lambda::new([param.as_str()], body)?;
+        Ok(into_raw(list_transform(list, lambda)))
+    })
 }
 
 #[unsafe(no_mangle)]
