@@ -145,10 +145,9 @@ array's offsets, nulls, and elements apart, and splits struct elements into one 
 at every level of nesting. A query that reads `items.price` from an `array<struct<...>>` then
 reads only the offsets, the nulls, and `price`.
 
-Spark decides which fields to read, and it prunes fields inside arrays only on the V2 path; V1
-scans read the whole array. It prunes direct field access such as `items.price`, and below two
-levels of arrays only access through an index, such as `orders.items[0].price`. Through `explode`
-Spark prunes only the fields of the exploded structs, so `explode(orders)` followed by
+Spark decides which fields to read. It prunes direct field access such as `items.price`, and
+below two levels of arrays only access through an index, such as `orders.items[0].price`. Through
+`explode` Spark prunes only the fields of the exploded structs, so `explode(orders)` followed by
 `order.items.price` reads all of `items`. After `inline` or `transform` it reads the whole array.
 
 This layout belongs to the unstable Vortex edition, which the option enables for that write only.
@@ -200,8 +199,13 @@ path:
 - the `_metadata` column, which Spark's V2 file API does not expose;
 - dynamic partition pruning, which Spark applies to V1 relations only.
 
-Filter pushdown, column pruning, partition pruning, and partitioned writes work on both paths.
-`COUNT(*)` footer pushdown, nested struct pruning, and footer-backed scan statistics are V2 only.
+Filter pushdown, column pruning, nested field pruning, partition pruning, and partitioned writes
+work on both paths. On the V1 path Spark prunes nested fields only for Parquet and ORC, so the
+connector registers an optimizer rule that does the same for Vortex. Spark loads it from the
+connector jar through `SparkSessionExtensionsProvider`; listing
+`dev.vortex.spark.VortexSparkSessionExtensions` in `spark.sql.extensions` as well is harmless.
+`spark.sql.optimizer.nestedSchemaPruning.enabled=false` turns it off with Spark's own pruning.
+`COUNT(*)` footer pushdown and footer-backed scan statistics are V2 only.
 
 ## I/O and Remote Storage
 
