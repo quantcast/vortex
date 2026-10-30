@@ -137,6 +137,18 @@ derive the column and partition by it, for example `withColumn("year", year(col(
 |---------------------------|---------|-------------|
 | `batch.size`              | `2048`  | Rows buffered per write batch; range 1–65536. |
 | `vortex.write.batch.size` | —       | Rows buffered per write batch for Vortex alone, overriding `batch.size`. |
+| `vortex.listLayout`       | `false` | Store array columns in the unstable list layout; see below. |
+
+By default an array column is stored as whole chunks, so reading one field of the structs in an
+array reads every field of them. With `vortex.listLayout` set to `true`, the writer stores each
+array's offsets, nulls, and elements apart, and splits struct elements into one column per field,
+at every level of nesting. A query that reads `items.price` from an `array<struct<...>>` then
+reads only the offsets, the nulls, and `price`.
+
+This layout belongs to the unstable Vortex edition, which the option enables for that write only.
+The files may also use other unstable encodings, and future Vortex versions may not read them.
+Use it only for data you can rewrite. Files written with and without the option can share a
+table.
 
 ## Spark SQL
 
