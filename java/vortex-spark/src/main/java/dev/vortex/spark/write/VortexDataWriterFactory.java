@@ -3,6 +3,7 @@
 
 package dev.vortex.spark.write;
 
+import dev.vortex.jni.NativeRuntime;
 import java.io.Serializable;
 import java.util.Map;
 import org.apache.spark.sql.catalyst.InternalRow;
@@ -28,6 +29,7 @@ public final class VortexDataWriterFactory implements DataWriterFactory, Seriali
     // Store options as a serializable Map instead of CaseInsensitiveStringMap
     private final Map<String, String> options;
     private final PartitionedVortexDataWriter.ResolvedTransform[] resolvedTransforms;
+    private final int workerThreads;
 
     /**
      * Creates a new VortexDataWriterFactory.
@@ -46,6 +48,24 @@ public final class VortexDataWriterFactory implements DataWriterFactory, Seriali
         this.schema = schema;
         this.options = options;
         this.resolvedTransforms = resolvedTransforms;
+        // Options executors parse must fail here on the driver, before overwrite deletes the old files.
+        CaseInsensitiveStringMap parsed = new CaseInsensitiveStringMap(options);
+        this.workerThreads = parseWorkerThreads(parsed);
+        parsed.getInt("vortex.write.batch.size", parsed.getInt("batch.size", 0));
+    }
+
+    private static int parseWorkerThreads(CaseInsensitiveStringMap options) {
+        String value = options.getOrDefault("vortex.workerThreads", "4");
+        int threads;
+        try {
+            threads = Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            threads = -1;
+        }
+        if (threads < 0) {
+            throw new IllegalArgumentException("vortex.workerThreads must be a non-negative integer, got: " + value);
+        }
+        return threads;
     }
 
     /**
@@ -63,6 +83,8 @@ public final class VortexDataWriterFactory implements DataWriterFactory, Seriali
         log.debug("Creating writer for partition={} task={}", partitionId, taskId);
 
         CaseInsensitiveStringMap optionsMap = new CaseInsensitiveStringMap(options);
+        // Without workers the native encoder only runs while this task thread blocks on it.
+        NativeRuntime.setWorkerThreads(workerThreads);
 
         if (resolvedTransforms.length > 0) {
             log.debug("Creating partitioned writer with {} transforms", resolvedTransforms.length);
