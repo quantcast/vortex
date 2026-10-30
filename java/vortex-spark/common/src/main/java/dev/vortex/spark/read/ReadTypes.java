@@ -8,12 +8,15 @@ import dev.vortex.relocated.org.apache.arrow.vector.types.pojo.ArrowType;
 import dev.vortex.relocated.org.apache.arrow.vector.types.pojo.Field;
 import dev.vortex.spark.ArrowUtils;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.function.Function;
+import org.apache.spark.sql.sources.Filter;
 import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
@@ -172,30 +175,46 @@ final class ReadTypes {
     }
 
     /**
-     * Returns the fields of {@code schema} that filters can be pushed down on for this file: those it carries under the
-     * same name, at every level, with the type filter literals are built in.
+     * Returns the columns {@code filters} reference that can be pushed down on for this file: those it carries under
+     * the same name, at every level. A column stored in another type than filter literals are built in keeps only its
+     * null checks, which hold for any type, as {@code NullType}, for which no literal is built.
      */
-    static StructType filterable(StructType schema, List<Field> fileFields) {
+    static StructType filterable(StructType schema, List<Field> fileFields, Filter[] filters) {
+        List<String[]> paths = new ArrayList<>();
+        for (Filter filter : filters) {
+            paths.addAll(Arrays.asList(filter.v2references()));
+        }
+        return filterable(schema, fileFields, paths, 0);
+    }
+
+    private static StructType filterable(StructType schema, List<Field> fileFields, List<String[]> paths, int depth) {
+        Map<String, List<String[]>> referenced = new LinkedHashMap<>();
+        for (String[] path : paths) {
+            if (path.length > depth) {
+                referenced
+                        .computeIfAbsent(path[depth], name -> new ArrayList<>())
+                        .add(path);
+            }
+        }
+        // Filters name columns as the table does, and the native scan reads them under those names.
         Function<String, Field> lookup = lookup(fileFields, true);
-        List<StructField> present = new ArrayList<>(schema.length());
-        for (StructField field : schema.fields()) {
-            Field fileField = lookup.apply(field.name());
-            if (fileField == null) {
+        List<StructField> present = new ArrayList<>(referenced.size());
+        for (Map.Entry<String, List<String[]>> entry : referenced.entrySet()) {
+            Field fileField = lookup.apply(entry.getKey());
+            if (fileField == null || schema.getFieldIndex(entry.getKey()).isEmpty()) {
                 continue;
             }
+            StructField field = schema.apply(entry.getKey());
+            DataType type;
             if (field.dataType() instanceof StructType struct) {
-                if (fileField.getType() instanceof ArrowType.Struct) {
-                    present.add(new StructField(
-                            field.name(),
-                            filterable(struct, fileField.getChildren()),
-                            field.nullable(),
-                            field.metadata()));
+                if (!(fileField.getType() instanceof ArrowType.Struct)) {
+                    continue;
                 }
-            } else if (field.dataType() instanceof ArrayType
-                    || field.dataType() instanceof MapType
-                    || literalType(fileField, field.dataType())) {
-                present.add(field);
+                type = filterable(struct, fileField.getChildren(), entry.getValue(), depth + 1);
+            } else {
+                type = literalType(fileField, field.dataType()) ? field.dataType() : DataTypes.NullType;
             }
+            present.add(new StructField(field.name(), type, field.nullable(), field.metadata()));
         }
         return new StructType(present.toArray(new StructField[0]));
     }
