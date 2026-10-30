@@ -5,9 +5,6 @@ package dev.vortex.spark.write;
 
 import dev.vortex.api.Session;
 import dev.vortex.api.VortexWriter;
-import dev.vortex.relocated.org.apache.arrow.c.ArrowArray;
-import dev.vortex.relocated.org.apache.arrow.c.ArrowSchema;
-import dev.vortex.relocated.org.apache.arrow.c.Data;
 import dev.vortex.relocated.org.apache.arrow.memory.BufferAllocator;
 import dev.vortex.relocated.org.apache.arrow.memory.RootAllocator;
 import dev.vortex.relocated.org.apache.arrow.vector.FieldVector;
@@ -47,7 +44,6 @@ public final class VortexDataWriter implements DataWriter<InternalRow>, AutoClos
     private VortexWriter vortexWriter;
     private BufferAllocator allocator;
     private VectorSchemaRoot vectorSchemaRoot;
-    private ArrowSchema exportedSchema;
     private ArrowFieldWriter[] fieldWriters;
     private int batchRowCount = 0;
     private long recordCount = 0;
@@ -106,9 +102,6 @@ public final class VortexDataWriter implements DataWriter<InternalRow>, AutoClos
             for (int i = 0; i < fields.length; i++) {
                 fieldWriters[i] = ArrowFieldWriter.create(vectorSchemaRoot.getVector(i), fields[i].dataType());
             }
-            // The native writer only reads the schema struct, so one export serves every batch.
-            this.exportedSchema = ArrowSchema.allocateNew(allocator);
-            Data.exportSchema(allocator, arrowSchema, null, exportedSchema);
 
             logger.debug("Initialized VortexDataWriter for {}", filePath);
 
@@ -166,10 +159,7 @@ public final class VortexDataWriter implements DataWriter<InternalRow>, AutoClos
         }
         vectorSchemaRoot.setRowCount(batchRowCount);
 
-        try (ArrowArray arrowArray = ArrowArray.allocateNew(allocator)) {
-            Data.exportVectorSchemaRoot(allocator, vectorSchemaRoot, null, arrowArray);
-            vortexWriter.writeBatch(arrowArray.memoryAddress(), exportedSchema.memoryAddress());
-        }
+        vortexWriter.writeBatch(vectorSchemaRoot, allocator);
 
         vectorSchemaRoot.clear();
         for (ArrowFieldWriter writer : fieldWriters) {
@@ -309,13 +299,6 @@ public final class VortexDataWriter implements DataWriter<InternalRow>, AutoClos
         if (vectorSchemaRoot != null) {
             vectorSchemaRoot.close();
             vectorSchemaRoot = null;
-        }
-        if (exportedSchema != null) {
-            // close() frees only the struct; the children the export allocated are freed by the release
-            // callback, which the native side never calls because it only borrows the schema.
-            exportedSchema.release();
-            exportedSchema.close();
-            exportedSchema = null;
         }
     }
 
