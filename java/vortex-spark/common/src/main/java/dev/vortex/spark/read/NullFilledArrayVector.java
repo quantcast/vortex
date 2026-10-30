@@ -54,6 +54,7 @@ final class NullFilledArrayVector extends ColumnVector {
 
     @Override
     public ColumnarArray getArray(int rowId) {
+        if (array.isNullAt(rowId)) return null;
         return new ColumnarArray(
                 elements, array.arrayOffset(rowId), array.getArray(rowId).numElements());
     }
