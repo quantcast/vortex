@@ -49,6 +49,7 @@ use vortex::array::stream::ArrayStreamAdapter;
 use vortex::dtype::DType;
 use vortex::dtype::FieldPath;
 use vortex::editions::EditionSessionExt;
+use vortex::editions::EnabledEditions;
 use vortex::editions::UNSTABLE;
 use vortex::error::VortexError;
 use vortex::error::VortexResult;
@@ -76,7 +77,6 @@ use crate::file::extract_metadata;
 use crate::file::extract_properties;
 use crate::io::JavaWrite;
 use crate::object_store::make_object_store;
-use crate::session::new_session;
 use crate::session::session_ref;
 
 /// Capacity of the in-flight write queue. Small on purpose so that back-pressure from
@@ -366,14 +366,19 @@ fn write_summary_to_java<'local>(
 /// The session a write runs in.
 ///
 /// The list layout is only written while the unstable edition is enabled, and enabled editions
-/// are shared by every clone of a session, so a list-layout write gets a session of its own.
+/// are shared by every clone of a session. A list-layout write therefore runs in a fork of the
+/// session, which keeps its registrations, with an enabled-editions set of its own.
 fn write_session(session: &VortexSession, list_layout: bool) -> VortexResult<VortexSession> {
     if !list_layout {
         return Ok(session.clone());
     }
-    let session = *new_session();
-    session.enable_edition(UNSTABLE)?;
-    Ok(session)
+    let fork = session.fork();
+    fork.register(EnabledEditions::default());
+    for edition in session.enabled_editions().editions() {
+        fork.enable_edition(edition)?;
+    }
+    fork.enable_edition(UNSTABLE)?;
+    Ok(fork)
 }
 
 #[unsafe(no_mangle)]
@@ -610,4 +615,53 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_close(
         writer.close()?;
         Ok(())
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::any::Any;
+
+    use vortex::editions::EditionSessionExt;
+    use vortex::editions::UNSTABLE;
+    use vortex::error::VortexResult;
+    use vortex::session::SessionExt;
+    use vortex::session::SessionVar;
+
+    use super::write_session;
+    use crate::session::new_session;
+
+    #[derive(Clone, Debug)]
+    struct Custom;
+
+    impl SessionVar for Custom {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
+    #[test]
+    fn list_layout_write_keeps_the_session_and_leaves_its_editions() -> VortexResult<()> {
+        let session = *new_session();
+        session.register(Custom);
+        let mut editions = session.enabled_editions().editions();
+        editions.sort();
+
+        let write = write_session(&session, true)?;
+
+        assert!(write.get_opt::<Custom>().is_some());
+        let mut write_editions = write.enabled_editions().editions();
+        write_editions.sort();
+        let mut expected = editions.clone();
+        expected.push(UNSTABLE);
+        expected.sort();
+        assert_eq!(write_editions, expected);
+        let mut after = session.enabled_editions().editions();
+        after.sort();
+        assert_eq!(after, editions);
+        Ok(())
+    }
 }
