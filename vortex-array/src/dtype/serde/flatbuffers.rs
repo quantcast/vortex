@@ -53,12 +53,12 @@ impl ViewedDType {
     }
 
     /// The viewed [`fbd::DType`] instance.
-    fn flatbuffer(&self) -> fbd::DType<'_> {
+    pub(crate) fn flatbuffer(&self) -> fbd::DType<'_> {
         unsafe { fbd::DType::follow(self.flatbuffer.as_ref(), self.flatbuffer_loc) }
     }
 
     /// Returns the underlying shared buffer
-    fn buffer(&self) -> &FlatBuffer {
+    pub(crate) fn buffer(&self) -> &FlatBuffer {
         &self.flatbuffer
     }
 }
@@ -754,6 +754,41 @@ mod test {
         let viewed = DType::try_from(view).unwrap();
         assert_eq!(eager, viewed);
         assert_eq!(viewed, eager);
+    }
+
+    #[test]
+    fn raw_fields_leave_lazy_views_unparsed() {
+        let eager = DType::Struct(
+            StructFields::from_iter([
+                ("a", DType::Primitive(PType::I32, Nullability::NonNullable)),
+                ("b", DType::Utf8(Nullability::Nullable)),
+            ]),
+            Nullability::NonNullable,
+        );
+        let eager_fields = eager.as_struct_fields_opt().unwrap().raw_fields();
+        assert!(eager_fields.iter().all(|field| field.parsed().is_some()));
+        assert!(eager_fields.iter().all(|field| field.view().is_none()));
+
+        let bytes = eager.write_flatbuffer_bytes().unwrap();
+        let viewed = DType::from_flatbuffer(FlatBuffer::from(bytes.clone()), &SESSION).unwrap();
+        let fields = viewed.as_struct_fields_opt().unwrap().raw_fields();
+        assert!(fields.iter().all(|field| field.parsed().is_none()));
+        assert!(
+            fields
+                .iter()
+                .all(|field| field.view().map(|view| view.buffer().len()) == Some(bytes.len()))
+        );
+
+        viewed
+            .as_struct_fields_opt()
+            .unwrap()
+            .field_by_index(0)
+            .unwrap();
+        let parsed: Vec<_> = fields
+            .iter()
+            .map(|field| field.parsed().is_some())
+            .collect();
+        assert_eq!(parsed, [true, false]);
     }
 
     #[test]
