@@ -252,7 +252,7 @@ final class VortexOutputWriterTest {
         assertEquals(expected, readRows(writer.path()));
     }
 
-    /** A write that fails part-way leaves the batch misaligned: the writer refuses more rows and close fails. */
+    /** A failed write leaves the batch misaligned: the writer refuses more rows and close only releases. */
     @Test
     void closeAfterFailedWriteReleasesTheWriter() {
         StructType schema =
@@ -265,7 +265,7 @@ final class VortexOutputWriterTest {
         assertThrows(
                 IllegalStateException.class,
                 () -> writer.write(new GenericInternalRow(new Object[] {3L, UTF8String.fromString("c")})));
-        assertThrows(RuntimeException.class, writer::close);
+        writer.close();
         assertEquals(0, allocator.getAllocatedMemory());
     }
 
