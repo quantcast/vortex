@@ -53,6 +53,7 @@ public final class VortexWriteOptionValidationTest {
         "batch.size, lots",
         "batch.size, 0",
         "vortex.write.batch.size, 65537",
+        "vortex.listLayout, yes",
         "vortex.session.provider, dev.vortex.spark.NoSuchProvider",
         "vortex.session.provider, java.lang.String",
         "vortex.session.provider, dev.vortex.spark.VortexSessionProvider",
