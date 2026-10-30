@@ -17,7 +17,6 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.io.TempDir;
@@ -216,8 +215,6 @@ public final class VortexParquetParityTest {
     }
 
     @Test
-    @Disabled("the reader takes a struct's children by position, so a narrower struct in the read schema gets the"
-            + " wrong fields")
     void aNarrowerStructInTheUserSchemaReadsLikeParquet() {
         assertMatchesParquet("narrow-struct", (format, root) -> {
             writeWideTable(format, root);
