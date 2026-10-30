@@ -554,13 +554,12 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_writeBatch(
             unsafe { FFI_ArrowArray::from_raw(arrow_array_addr as *mut FFI_ArrowArray) };
         let ffi_schema = unsafe { &*(arrow_schema_addr as *const FFI_ArrowSchema) };
 
-        let array_data = unsafe { arrow_array::ffi::from_ffi(ffi_array, ffi_schema) }
+        let mut array_data = unsafe { arrow_array::ffi::from_ffi(ffi_array, ffi_schema) }
             .map_err(|e| JNIError::Vortex(vortex_err!("failed to import Arrow FFI data: {e}")))?;
-        let array_data = if writer.copy_batches {
-            deep_copy(&array_data)?
-        } else {
-            array_data
-        };
+        if writer.copy_batches {
+            // Release the import before conversion or waiting for channel capacity.
+            array_data = deep_copy(&array_data)?;
+        }
 
         let batch = RecordBatch::from(StructArray::from(array_data));
         writer.write_record_batch(batch)?;

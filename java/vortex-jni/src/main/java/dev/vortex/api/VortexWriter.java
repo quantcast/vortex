@@ -101,8 +101,9 @@ public final class VortexWriter implements AutoCloseable {
         }
 
         /**
-         * Object-store credentials and options, replacing any set so far. Only the URI destination reaches a storage
-         * client, so this is rejected on a writer built over a {@link NativeWritable}.
+         * Object-store credentials and writer options, replacing any set so far, including {@link #copyBatches}. Only
+         * the URI destination reaches a storage client, so this is rejected on a writer built over a
+         * {@link NativeWritable}.
          */
         public Builder options(Map<String, String> newOptions) {
             checkOptionsApply();
@@ -117,6 +118,10 @@ public final class VortexWriter implements AutoCloseable {
          * once. Without it, the native writer can keep most of a file's batches alive until the file finishes, which
          * for a file of many large batches is many times the memory of one. Costs a copy of each batch.
          *
+         * <p>Defaults to false and applies only to URI destinations. Stored in the options map, so a later call to
+         * {@link #options(Map)} replaces this setting. Dictionary values and the data buffers of Arrow view arrays
+         * remain shared and can keep the imported batch alive.
+         *
          * <p>A workaround until the native writer stops holding imported batches; see <a
          * href="https://github.com/quantcast/vortex/issues/46">quantcast/vortex#46</a>.
          */
@@ -124,7 +129,7 @@ public final class VortexWriter implements AutoCloseable {
             return putOption(COPY_BATCHES_OPTION, String.valueOf(copyBatches));
         }
 
-        /** Add a single object-store option. See {@link #options(Map)}. */
+        /** Add a single object-store or writer option. See {@link #options(Map)}. */
         public Builder putOption(String key, String value) {
             checkOptionsApply();
             Objects.requireNonNull(key, "key");

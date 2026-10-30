@@ -17,6 +17,7 @@ import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -73,11 +74,12 @@ public final class CopyBatchesTest {
                 held.add(batchAllocator.getAllocatedMemory());
             }
             writer.finish();
+        } finally {
+            allocators.forEach(BufferAllocator::close);
         }
-        allocators.forEach(BufferAllocator::close);
 
         assertTrue(held.stream().allMatch(bytes -> bytes < 1024), "bytes each batch still held: " + held);
-        assertEquals(expectedIds(), readIds(session, uri));
+        assertEquals(expectedRows(), readRows(session, uri));
     }
 
     /** Writes batch {@code b}: ids {@code b * ROWS} on, every seventh row a null request. */
@@ -101,45 +103,51 @@ public final class CopyBatchesTest {
             try (ArrowArray array = ArrowArray.allocateNew(allocator);
                     ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
                 Data.exportVectorSchemaRoot(allocator, batch, null, array, schema);
-                writer.writeBatch(array.memoryAddress(), schema.memoryAddress());
-                // The writer only reads the schema, so its export is ours to release.
-                schema.release();
-            }
-        }
-    }
-
-    private static List<Integer> expectedIds() {
-        List<Integer> ids = new ArrayList<>();
-        for (int b = 0; b < BATCHES; b++) {
-            for (int i = 0; i < ROWS; i++) {
-                if (i % 7 != 0) {
-                    ids.add(b * ROWS + i);
+                try {
+                    writer.writeBatch(array.memoryAddress(), schema.memoryAddress());
+                } finally {
+                    // The writer only reads the schema, so its export is ours to release.
+                    schema.release();
                 }
             }
         }
-        return ids;
     }
 
-    /** The ids of the non-null requests, in file order. */
-    private static List<Integer> readIds(Session session, String uri) throws IOException {
+    private static List<Request> expectedRows() {
+        List<Request> rows = new ArrayList<>();
+        for (int b = 0; b < BATCHES; b++) {
+            for (int i = 0; i < ROWS; i++) {
+                rows.add(i % 7 == 0 ? null : new Request(b * ROWS + i, "name-" + i));
+            }
+        }
+        return rows;
+    }
+
+    private record Request(int id, String name) {}
+
+    /** All requests, including nulls, in file order. */
+    private static List<Request> readRows(Session session, String uri) throws IOException {
         BufferAllocator allocator = ArrowAllocation.rootAllocator();
         Scan scan = DataSource.open(session, uri)
                 .scan(ScanOptions.builder().ordered(true).build());
-        List<Integer> ids = new ArrayList<>();
+        List<Request> rows = new ArrayList<>();
         while (scan.hasNext()) {
             try (ArrowReader reader = scan.next().scanArrow(allocator)) {
                 while (reader.loadNextBatch()) {
                     StructVector request =
                             (StructVector) reader.getVectorSchemaRoot().getVector("request");
                     IntVector id = request.getChild("id", IntVector.class);
+                    FieldVector name = request.getChild("name");
                     for (int i = 0; i < request.getValueCount(); i++) {
-                        if (!request.isNull(i)) {
-                            ids.add(id.get(i));
-                        }
+                        rows.add(
+                                request.isNull(i)
+                                        ? null
+                                        : new Request(
+                                                id.get(i), name.getObject(i).toString()));
                     }
                 }
             }
         }
-        return ids;
+        return rows;
     }
 }
