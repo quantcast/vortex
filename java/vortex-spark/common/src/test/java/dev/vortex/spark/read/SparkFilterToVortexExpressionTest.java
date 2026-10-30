@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.math.BigDecimal;
 import java.sql.Date;
 import java.sql.Timestamp;
+import java.util.stream.IntStream;
 import org.apache.spark.sql.sources.And;
 import org.apache.spark.sql.sources.EqualNullSafe;
 import org.apache.spark.sql.sources.EqualTo;
@@ -66,6 +67,33 @@ final class SparkFilterToVortexExpressionTest {
         assertPushable(new In("id", new Object[] {1, null}));
         // Nothing but nulls can never match, so the filter becomes a constant false.
         assertPushable(new In("id", new Object[] {null}));
+    }
+
+    @Test
+    void convertsInListsOfEveryLiteralType() {
+        assertPushable(new In("id", IntStream.range(0, 1000).boxed().toArray()));
+        assertPushable(new In(
+                "name", IntStream.range(0, 1000).mapToObj(n -> "key-" + n).toArray()));
+        assertPushable(new In("date", new Object[] {Date.valueOf("2024-01-02"), Date.valueOf("2024-01-03")}));
+        assertPushable(new In(
+                "timestamp",
+                new Object[] {Timestamp.valueOf("2024-01-02 03:04:05"), Timestamp.valueOf("2024-01-02 03:04:06")}));
+        assertPushable(new In("decimal", new Object[] {new BigDecimal("1.50"), new BigDecimal("2.25"), null}));
+        assertPushable(new In("nested.value", new Object[] {1L, 2L, 2L}));
+        assertPushable(new Not(new In("name", new Object[] {"a", "b"})));
+        assertPushable(new Not(new In("name", new Object[] {"a", null})));
+        assertPushable(new In("id", new Object[] {7}));
+        assertPushable(new In(
+                "binary",
+                IntStream.range(0, 20).mapToObj(n -> new byte[] {(byte) n}).toArray()));
+        assertPushable(new In("id", new Object[0]));
+    }
+
+    @Test
+    void rejectsAnInListWithOneUnconvertibleValue() {
+        assertFalse(SparkFilterToVortexExpression.isPushable(new In("id", new Object[] {1, "two", 3}), SCHEMA));
+        assertFalse(SparkFilterToVortexExpression.isPushable(
+                new In("decimal", new Object[] {new BigDecimal("1.50"), new BigDecimal("1.005")}), SCHEMA));
     }
 
     @Test
