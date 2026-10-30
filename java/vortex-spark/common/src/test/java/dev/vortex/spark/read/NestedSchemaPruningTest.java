@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.DisplayName;
@@ -65,5 +66,38 @@ final class NestedSchemaPruningTest {
         assertEquals(
                 -1,
                 NestedSchemaPruning.projection(read, FILE, false, "f").shape(0).slot(0));
+    }
+
+    @Test
+    @DisplayName("Struct fields are pruned through arrays, keeping each array's element nullability")
+    void pruneThroughArrays() {
+        StructType inner = new StructType().add("h", DataTypes.LongType).add("x", DataTypes.StringType);
+        StructType table = new StructType()
+                .add("a", DataTypes.LongType)
+                .add("g", new ArrayType(inner, true))
+                .add("w", DataTypes.StringType);
+        StructType required =
+                new StructType().add("g", new ArrayType(new StructType().add("h", DataTypes.LongType), true));
+
+        assertEquals(
+                new ArrayType(required, false),
+                NestedSchemaPruning.prune(new ArrayType(table, false), new ArrayType(required, true)));
+    }
+
+    @Test
+    @DisplayName("Fields of array elements the file lacks are filled in at the positions Spark reads them")
+    void absentArrayElementFieldSlots() {
+        StructType file =
+                new StructType().add("arr", new ArrayType(new StructType().add("a", DataTypes.LongType), true));
+        StructType read = new StructType()
+                .add(
+                        "arr",
+                        new ArrayType(
+                                new StructType().add("b", DataTypes.LongType).add("a", DataTypes.LongType), true));
+
+        NestedSchemaPruning.Shape element =
+                NestedSchemaPruning.projection(read, file, false, "f").shape(0).element();
+
+        assertArrayEquals(new int[] {-1, 0}, new int[] {element.slot(0), element.slot(1)});
     }
 }

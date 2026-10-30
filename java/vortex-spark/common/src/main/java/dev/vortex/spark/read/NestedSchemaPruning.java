@@ -7,6 +7,7 @@ import dev.vortex.api.Expression;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
@@ -14,17 +15,21 @@ import org.apache.spark.sql.types.StructType;
 /**
  * Pushes Spark's nested schema pruning down to the native scan.
  *
- * <p>Only struct fields are pruned. Fields inside arrays and maps keep their full table type, since projecting each
- * element needs a per-element expression the native scan does not expose yet.
+ * <p>Struct fields are pruned, through arrays too: an array of structs is read through a {@code list_transform} that
+ * keeps only the element fields Spark reads, which a file in the list layout reads without the other fields. Fields
+ * inside maps keep their full table type.
  */
 final class NestedSchemaPruning {
     private NestedSchemaPruning() {}
 
     /**
-     * Returns {@code tableType} pruned to the struct fields present in {@code requiredType}, in table order. Any type
-     * that is not a struct on both sides keeps its table type.
+     * Returns {@code tableType} pruned to the struct fields present in {@code requiredType}, in table order, through
+     * arrays too. Any other type that is not a struct on both sides keeps its table type.
      */
     static DataType prune(DataType tableType, DataType requiredType) {
+        if (tableType instanceof ArrayType table && requiredType instanceof ArrayType required) {
+            return new ArrayType(prune(table.elementType(), required.elementType()), table.containsNull());
+        }
         if (!(tableType instanceof StructType table) || !(requiredType instanceof StructType required)) {
             return tableType;
         }
@@ -43,15 +48,17 @@ final class NestedSchemaPruning {
     /**
      * For a struct the file stores, where each field Spark reads comes from: its position in the projected struct, or
      * {@code -1} for a field the file does not carry. {@code children} holds the shape of each struct field that needs
-     * one, and is {@code null} elsewhere.
+     * one, and is {@code null} elsewhere. For an array, {@code element} is the shape of its elements instead.
      */
     static final class Shape {
         private final int[] slots;
         private final Shape[] children;
+        private final Shape element;
 
-        private Shape(int[] slots, Shape[] children) {
+        private Shape(int[] slots, Shape[] children, Shape element) {
             this.slots = slots;
             this.children = children;
+            this.element = element;
         }
 
         int slot(int field) {
@@ -60,6 +67,10 @@ final class NestedSchemaPruning {
 
         Shape child(int field) {
             return children[field];
+        }
+
+        Shape element() {
+            return element;
         }
     }
 
@@ -87,14 +98,14 @@ final class NestedSchemaPruning {
      * Builds the native projection that reads {@code readSchema} from a file whose columns are {@code fileSchema}.
      *
      * <p>Fields are matched by name under Spark's case sensitivity, at every level. The file's struct fields are read
-     * under their own names, in the order Spark reads them, and only as far down as Spark reads them. A nullable struct
-     * field the file does not carry is left out and filled in with nulls through {@link Projection#shape}; a struct
-     * keeps its own nulls even when the file carries none of its read fields. Every column of {@code readSchema} must
-     * be in the file, which {@code fileName} names in errors.
+     * under their own names, in the order Spark reads them, and only as far down as Spark reads them, through arrays
+     * too. A nullable struct field the file does not carry is left out and filled in with nulls through
+     * {@link Projection#shape}; a struct keeps its own nulls even when the file carries none of its read fields. Every
+     * column of {@code readSchema} must be in the file, which {@code fileName} names in errors.
      */
     static Projection projection(StructType readSchema, StructType fileSchema, boolean caseSensitive, String fileName) {
         Expression root = Expression.root();
-        Node node = struct(root, false, readSchema, fileSchema, new Resolution(caseSensitive, fileName), "");
+        Node node = struct(root, false, readSchema, fileSchema, new Resolution(caseSensitive, fileName), "", 0);
         Expression expression =
                 node.expression() != null ? node.expression() : Expression.select(fileSchema.fieldNames(), root);
         return new Projection(expression, node.shape());
@@ -106,7 +117,13 @@ final class NestedSchemaPruning {
     private record Resolution(boolean caseSensitive, String fileName) {}
 
     private static Node struct(
-            Expression struct, boolean nullable, StructType read, StructType file, Resolution resolution, String path) {
+            Expression struct,
+            boolean nullable,
+            StructType read,
+            StructType file,
+            Resolution resolution,
+            String path,
+            int arrays) {
         StructField[] fields = read.fields();
         List<String> names = new ArrayList<>(fields.length);
         List<Expression> children = new ArrayList<>(fields.length);
@@ -135,20 +152,24 @@ final class NestedSchemaPruning {
             slots[i] = names.size();
             StructField fileField = file.fields()[index];
             Expression child = Expression.getItem(fileField.name(), struct);
-            if (fields[i].dataType() instanceof StructType readStruct
-                    && fileField.dataType() instanceof StructType fileStruct) {
-                Node node = struct(child, fileField.nullable(), readStruct, fileStruct, resolution, fieldPath);
-                if (node.expression() != null) {
-                    child = node.expression();
-                    nested = true;
-                }
-                shapes[i] = node.shape();
-                filled |= node.shape() != null;
+            Node node = value(
+                    child,
+                    fileField.nullable(),
+                    fields[i].dataType(),
+                    fileField.dataType(),
+                    resolution,
+                    fieldPath,
+                    arrays);
+            if (node.expression() != null) {
+                child = node.expression();
+                nested = true;
             }
+            shapes[i] = node.shape();
+            filled |= node.shape() != null;
             names.add(fileField.name());
             children.add(child);
         }
-        Shape shape = filled ? new Shape(slots, shapes) : null;
+        Shape shape = filled ? new Shape(slots, shapes, null) : null;
         String[] fileNames = names.toArray(new String[0]);
         // An empty `select` loses the struct's own nulls, so an empty struct goes through the masked `pack` below.
         if (!nested && !(nullable && names.isEmpty())) {
@@ -158,6 +179,36 @@ final class NestedSchemaPruning {
         Expression packed = Expression.pack(fileNames, children.toArray(new Expression[0]), false);
         // `pack` builds a struct with no nulls, so carry over the source struct's nulls.
         return new Node(nullable ? Expression.mask(packed, Expression.isNotNull(struct)) : packed, shape);
+    }
+
+    /** The projection of a value the file stores as {@code file}, read as {@code read}. */
+    private static Node value(
+            Expression value,
+            boolean nullable,
+            DataType read,
+            DataType file,
+            Resolution resolution,
+            String path,
+            int arrays) {
+        if (read instanceof StructType readStruct && file instanceof StructType fileStruct) {
+            return struct(value, nullable, readStruct, fileStruct, resolution, path, arrays);
+        }
+        if (read instanceof ArrayType readArray && file instanceof ArrayType fileArray) {
+            // A lambda body reads only its own parameter, so each level of arrays names its own.
+            String element = "e" + arrays;
+            Node node = value(
+                    Expression.variable(element),
+                    fileArray.containsNull(),
+                    readArray.elementType(),
+                    fileArray.elementType(),
+                    resolution,
+                    path,
+                    arrays + 1);
+            return new Node(
+                    node.expression() == null ? null : Expression.listTransform(value, element, node.expression()),
+                    node.shape() == null ? null : new Shape(null, null, node.shape()));
+        }
+        return new Node(null, null);
     }
 
     private static int fieldIndex(StructType struct, String name, Resolution resolution, String path) {
