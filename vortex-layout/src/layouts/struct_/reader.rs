@@ -30,6 +30,8 @@ use vortex_array::scalar_fn::fns::binary::Binary;
 use vortex_array::scalar_fn::fns::get_item::GetItem;
 use vortex_array::scalar_fn::fns::is_not_null::IsNotNull;
 use vortex_array::scalar_fn::fns::is_null::IsNull;
+use vortex_array::scalar_fn::fns::list_transform::ListTransform;
+use vortex_array::scalar_fn::fns::list_transform::ListTransformOptions;
 use vortex_array::scalar_fn::fns::mask::Mask as MaskFn;
 use vortex_array::scalar_fn::fns::operators::Operator;
 use vortex_array::scalar_fn::fns::select::Select;
@@ -409,8 +411,12 @@ fn expand_struct_root(
         .into_inner())
 }
 
-/// Rebuilds a chain of `get_item` and `select` that starts at `$.field` on the field's expression
-/// in `packed`, or returns `None` if `node` is not such a chain.
+/// Rebuilds a chain of `get_item`, `select` and infallible `list_transform` that starts at
+/// `$.field` on the field's expression in `packed`, or returns `None` if `node` is not such a
+/// chain.
+///
+/// An infallible transform yields the same values whether its list is masked before or after it,
+/// and masking after keeps the transform where the list reader can push it into its elements.
 fn field_path(
     node: &BoundExpression,
     packed: &BoundExpression,
@@ -419,7 +425,11 @@ fn field_path(
     let Some(scalar_fn) = node.as_scalar() else {
         return Ok(None);
     };
-    if !scalar_fn.is::<GetItem>() && !scalar_fn.is::<Select>() {
+    let infallible_transform = matches!(
+        node.as_opt::<ListTransform>(),
+        Some(ListTransformOptions::Bound(lambda)) if lambda.is_infallible()
+    );
+    if !scalar_fn.is::<GetItem>() && !scalar_fn.is::<Select>() && !infallible_transform {
         return Ok(None);
     }
     let child = node.child(0);
