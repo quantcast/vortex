@@ -8,6 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import dev.vortex.relocated.org.apache.arrow.memory.BufferAllocator;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -59,14 +61,14 @@ final class VortexOutputWriterAbortTest {
                 rows.add(RowFactory.create("x".repeat(2 << 20), failed));
                 Path output = tempDir.resolve("failed=" + failed);
 
-                assertThrows(Exception.class, () -> spark.createDataFrame(rows, schema)
+                Exception thrown = assertThrows(Exception.class, () -> spark.createDataFrame(rows, schema)
                         .coalesce(1)
                         .write()
                         .format("dev.vortex.spark.write.LimitedVortexFileFormat")
                         .partitionBy("p")
                         .save(output.toString()));
 
-                assertEquals(PARTITIONS, WRITERS.size());
+                assertEquals(PARTITIONS, WRITERS.size(), () -> stackTrace(thrown));
                 for (int i = 0; i < WRITERS.size(); i++) {
                     VortexOutputWriter writer = WRITERS.get(i);
                     long held = ALLOCATORS.get(i).getAllocatedMemory();
@@ -98,6 +100,12 @@ final class VortexOutputWriterAbortTest {
             ALLOCATORS.clear();
         }
         assertEquals(List.of(), stranded, "writers left open after the task aborted");
+    }
+
+    private static String stackTrace(Throwable t) {
+        StringWriter out = new StringWriter();
+        t.printStackTrace(new PrintWriter(out));
+        return out.toString();
     }
 
     /** Called for every writer LimitedVortexFileFormat opens, which is Scala and compiled after this class. */
