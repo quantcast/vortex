@@ -464,6 +464,7 @@ public final class VortexReadTypeParityTest {
                 schema,
                 data -> columns.apply(data.where("s = 'b2' OR s = 'a0'")),
                 "[[0,1000000,a0,0.25,10,null], [2,3000000,b2,1234567890.12,12,x]]");
+        assertRows(dir, schema, data -> columns.apply(data.where("ts IS NULL")), "[[3,null,null,null,null,null]]");
         assertRows(dir, schema, data -> data.selectExpr("id", "st").where("st.a > 10"), "[[1,[11,null]], [2,[12,x]]]");
     }
 
