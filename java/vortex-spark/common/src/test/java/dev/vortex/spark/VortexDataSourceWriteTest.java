@@ -598,7 +598,8 @@ public final class VortexDataSourceWriteTest {
     @Test
     @DisplayName("Every type round-trips with nulls at every nesting level, at any batch size")
     public void testNullsAtEveryNestingLevelRoundTrip() {
-        Dataset<Row> expected = spark.range(0, 10_000, 1, 2)
+        // Kept small: the native writer holds every one-row batch, and its Arrow bookkeeping, until the file is done.
+        Dataset<Row> expected = spark.range(0, 2_000, 1, 2)
                 .selectExpr(
                         "id",
                         "if(id % 7 = 0, null, id % 2 = 0) as bool",
@@ -633,7 +634,7 @@ public final class VortexDataSourceWriteTest {
                             'null-field', named_struct('v', cast(null as double)),
                             'null-value', cast(null as struct<v: double>))) as m""");
 
-        for (int batchSize : new int[] {1, 2048, 65536}) {
+        for (int batchSize : new int[] {1, 300, 65536}) {
             Path outputPath = tempDir.resolve("nulls_batch_" + batchSize);
             expected.write()
                     .format("vortex")
