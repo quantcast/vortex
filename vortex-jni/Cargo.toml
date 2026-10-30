@@ -37,6 +37,7 @@ vortex-parquet-variant = { workspace = true }
 vortex-spatial = { workspace = true }
 
 [dev-dependencies]
+arrow-buffer = { workspace = true }
 jni = { workspace = true, features = ["invocation"] }
 rstest = { workspace = true }
 
