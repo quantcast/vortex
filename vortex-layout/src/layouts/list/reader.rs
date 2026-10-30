@@ -832,7 +832,9 @@ mod tests {
     use vortex_array::expr::list_sum;
     use vortex_array::expr::list_transform;
     use vortex_array::expr::lit;
+    use vortex_array::expr::mask;
     use vortex_array::expr::pack;
+    use vortex_array::expr::select;
     use vortex_array::expr::var;
     use vortex_buffer::buffer;
     use vortex_io::session::RuntimeSession;
@@ -1583,6 +1585,17 @@ mod tests {
         ),
         &["l.offsets", "l.elements.f"],
     )]
+    #[case::selected_fields(transform(select(["a", "f"], var("x"))), &["l.offsets", "l.elements.a", "l.elements.f"])]
+    #[case::pack_over_nested(
+        transform(pack(
+            [
+                ("a", get_item("a", var("x"))),
+                ("g", list_transform(get_item("g", var("x")), lambda("y", select(["h"], var("y"))))),
+            ],
+            Nullability::NonNullable,
+        )),
+        &["l.offsets", "l.elements.a", "l.elements.g.offsets", "l.elements.g.elements.h"],
+    )]
     #[case::beside_the_whole_list(
         pack([("t", transform(get_item("f", var("x")))), ("l", col("l"))], Nullability::NonNullable),
         EVERY_LIST_COLUMN,
@@ -1625,6 +1638,145 @@ mod tests {
             expected_read.insert("l.validity");
         }
         assert_eq!(read, expected_read);
+        Ok(())
+    }
+
+    /// Nullable struct elements keep their nulls, and a read of some of their fields, or of fields
+    /// of a list inside them, skips the rest.
+    #[rstest]
+    #[case::masked_pack(
+        transform(mask(
+            pack([("a", get_item("a", var("x")))], Nullability::NonNullable),
+            is_not_null(var("x")),
+        )),
+        &["l.offsets", "l.validity", "l.elements.validity", "l.elements.a"],
+    )]
+    #[case::nested_transform(
+        transform(mask(
+            pack(
+                [(
+                    "g",
+                    list_transform(get_item("g", var("x")), lambda("y", select(["h"], var("y")))),
+                )],
+                Nullability::NonNullable,
+            ),
+            is_not_null(var("x")),
+        )),
+        &[
+            "l.offsets",
+            "l.validity",
+            "l.elements.validity",
+            "l.elements.g.offsets",
+            "l.elements.g.elements.validity",
+            "l.elements.g.elements.h",
+        ],
+    )]
+    #[case::nested_masked_transform(
+        transform(mask(
+            pack(
+                [(
+                    "g",
+                    list_transform(
+                        get_item("g", var("x")),
+                        lambda(
+                            "y",
+                            mask(
+                                pack([("h", get_item("h", var("y")))], Nullability::NonNullable),
+                                is_not_null(var("y")),
+                            ),
+                        ),
+                    ),
+                )],
+                Nullability::NonNullable,
+            ),
+            is_not_null(var("x")),
+        )),
+        &[
+            "l.offsets",
+            "l.validity",
+            "l.elements.validity",
+            "l.elements.g.offsets",
+            "l.elements.g.elements.validity",
+            "l.elements.g.elements.h",
+        ],
+    )]
+    #[tokio::test]
+    async fn nullable_elements_read_only_what_is_used(
+        #[case] expr: Expression,
+        #[case] columns: &[&str],
+        #[values(Mask::new_true(4), Mask::from_iter([true, false, true, true]))] mask_rows: Mask,
+    ) -> VortexResult<()> {
+        let mut ctx = SESSION.create_execution_ctx();
+        let inner = StructArray::try_new(
+            FieldNames::from(["h", "i"]),
+            [
+                PrimitiveArray::from_iter(0..9_i32).into_array(),
+                PrimitiveArray::from_iter(100..109_i32).into_array(),
+            ],
+            9,
+            Validity::Array(
+                BoolArray::from_iter([true, true, false, true, true, true, false, true, true])
+                    .into_array(),
+            ),
+        )?
+        .into_array();
+        let g = ListArray::try_new(
+            inner,
+            buffer![0u32, 1, 3, 3, 4, 6, 9].into_array(),
+            Validity::NonNullable,
+            &mut ctx,
+        )?
+        .into_array();
+        let elements = StructArray::try_new(
+            FieldNames::from(["a", "f", "g"]),
+            [
+                PrimitiveArray::from_iter(0..6_i32).into_array(),
+                PrimitiveArray::from_iter(10..16_i32).into_array(),
+                g,
+            ],
+            6,
+            Validity::Array(
+                BoolArray::from_iter([true, false, true, true, false, true]).into_array(),
+            ),
+        )?
+        .into_array();
+        let l = ListArray::try_new(
+            elements,
+            buffer![0u32, 2, 2, 5, 6].into_array(),
+            Validity::Array(BoolArray::from_iter([true, true, false, true]).into_array()),
+            &mut ctx,
+        )?
+        .into_array();
+        let table = StructArray::from_fields(&[("l", l)])?.into_array();
+
+        let strategy = TableStrategy::new(chunked_elements_strategy(), chunked_elements_strategy())
+            .with_list_layout();
+        let (segments, layout, session) = write_layout(&strategy, table.clone()).await?;
+        let requested = Arc::new(Mutex::new(Vec::new()));
+        let source = Arc::new(RecordingSegmentSource {
+            inner: segments,
+            requested: Arc::clone(&requested),
+        });
+        let reader = layout.new_reader("".into(), source, &session, &LayoutReaderContext::new())?;
+        let result = reader
+            .projection_evaluation(
+                &(0..4),
+                &expr.bind(reader.dtype())?,
+                MaskFuture::ready(mask_rows.clone()),
+            )?
+            .await?;
+        let expected = table.filter(mask_rows)?.apply(&expr)?;
+        let mut exec_ctx = session.create_execution_ctx();
+        assert_arrays_eq!(result, expected, &mut exec_ctx);
+
+        let mut segment_column = HashMap::new();
+        segment_columns(&layout, "", &mut segment_column)?;
+        let read = requested
+            .lock()
+            .iter()
+            .map(|id| segment_column[id].as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(read, columns.iter().copied().collect::<BTreeSet<_>>());
         Ok(())
     }
 
