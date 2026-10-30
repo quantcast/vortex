@@ -248,6 +248,21 @@ public class VortexArrowColumnVector extends ColumnVector {
         return accessor.getMap(rowId);
     }
 
+    /** The elements of this array column, end to end, which {@link #arrayOffset} indexes. */
+    VortexArrowColumnVector arrayElements() {
+        return accessor.arrayElements();
+    }
+
+    /** How many elements {@link #arrayElements} holds. */
+    int arrayElementCount() {
+        return accessor.arrayElements().accessor.vector.getValueCount();
+    }
+
+    /** Where in {@link #arrayElements} the array at {@code rowId} starts. */
+    int arrayOffset(int rowId) {
+        return accessor.arrayOffset(rowId);
+    }
+
     /**
      * Returns the child column at the specified ordinal.
      * <p>
@@ -376,6 +391,14 @@ public class VortexArrowColumnVector extends ColumnVector {
 
         ArrowVectorAccessor(ValueVector vector) {
             this.vector = vector;
+        }
+
+        VortexArrowColumnVector arrayElements() {
+            throw new UnsupportedOperationException(getClass().getName());
+        }
+
+        int arrayOffset(int rowId) {
+            throw new UnsupportedOperationException(getClass().getName());
         }
 
         final boolean isNullAt(int rowId) {
@@ -803,6 +826,16 @@ public class VortexArrowColumnVector extends ColumnVector {
         }
 
         @Override
+        final VortexArrowColumnVector arrayElements() {
+            return arrayData;
+        }
+
+        @Override
+        final int arrayOffset(int rowId) {
+            return accessor.getElementStartIndex(rowId);
+        }
+
+        @Override
         final ColumnarArray getArray(int rowId) {
             int start = accessor.getElementStartIndex(rowId);
             int end = accessor.getElementEndIndex(rowId);
@@ -820,6 +853,16 @@ public class VortexArrowColumnVector extends ColumnVector {
             super(vector);
             this.accessor = vector;
             this.arrayData = new VortexArrowColumnVector(vector.getDataVector());
+        }
+
+        @Override
+        final VortexArrowColumnVector arrayElements() {
+            return arrayData;
+        }
+
+        @Override
+        final int arrayOffset(int rowId) {
+            return accessor.getElementStartIndex(rowId);
         }
 
         @Override

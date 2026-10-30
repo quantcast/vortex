@@ -262,10 +262,10 @@ public final class VortexNestedSchemaPruningTest {
     }
 
     @Test
-    @DisplayName("Arrays and maps of structs are read with their full table type")
-    public void readSchemaKeepsArrayAndMapTypes() {
+    @DisplayName("Arrays of structs are read pruned, and maps of structs with their full table type")
+    public void readSchemaPrunesArraysAndKeepsMapTypes() {
         assertReadSchema(
-                "struct<arr:array<struct<a:bigint,b:bigint,c:bigint>>,m:map<string,struct<a:bigint,b:bigint,c:bigint>>>",
+                "struct<arr:array<struct<c:bigint>>,m:map<string,struct<a:bigint,b:bigint,c:bigint>>>",
                 table.select(
                         functions.element_at(functions.col("arr.c"), 1),
                         functions.col("m").getItem("k").getField("c")));
