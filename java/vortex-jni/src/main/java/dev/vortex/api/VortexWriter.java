@@ -32,6 +32,10 @@ import org.apache.arrow.vector.types.pojo.Schema;
  * callers should always finalize explicitly so that I/O errors surface through the normal call path.
  */
 public final class VortexWriter implements AutoCloseable {
+
+    /** The writer option {@link Builder#copyBatches} sets. */
+    public static final String COPY_BATCHES_OPTION = "vortex.write.copy_batches";
+
     private final long pointer;
     private final AtomicBoolean closed = new AtomicBoolean(false);
     private volatile VortexWriteSummary summary;
@@ -106,6 +110,18 @@ public final class VortexWriter implements AutoCloseable {
             options.clear();
             newOptions.forEach(this::putOption);
             return this;
+        }
+
+        /**
+         * Copy each batch into native memory of its own as it's written, so the batch's Arrow buffers can be freed at
+         * once. Without it, the native writer can keep most of a file's batches alive until the file finishes, which
+         * for a file of many large batches is many times the memory of one. Costs a copy of each batch.
+         *
+         * <p>A workaround until the native writer stops holding imported batches; see <a
+         * href="https://github.com/quantcast/vortex/issues/46">quantcast/vortex#46</a>.
+         */
+        public Builder copyBatches(boolean copyBatches) {
+            return putOption(COPY_BATCHES_OPTION, String.valueOf(copyBatches));
         }
 
         /** Add a single object-store option. See {@link #options(Map)}. */

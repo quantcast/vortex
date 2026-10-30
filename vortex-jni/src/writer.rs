@@ -15,6 +15,8 @@ use arrow_array::RecordBatch;
 use arrow_array::StructArray;
 use arrow_array::ffi::FFI_ArrowArray;
 use arrow_array::ffi::FFI_ArrowSchema;
+use arrow_data::ArrayData;
+use arrow_data::transform::MutableArrayData;
 use arrow_schema::Schema;
 use arrow_schema::SchemaRef;
 use async_fs::File;
@@ -80,6 +82,17 @@ use crate::session::session_ref;
 /// the writer is felt on the Java thread producing batches.
 const WRITE_CHANNEL_CAPACITY: usize = 4;
 
+/// Writer option: `"true"` copies each imported batch into memory of its own.
+///
+/// A batch imported from the C Data Interface is freed only once nothing holds any of its
+/// buffers. The layout writers keep slices of earlier batches until late in the file, so each
+/// slice keeps its whole batch alive, and a file of many batches can hold most of them at once.
+/// Copying lets each batch go as soon as it's converted, at the cost of one copy per batch.
+///
+/// A stopgap until the writers stop holding imported buffers (quantcast/vortex#46). It's read
+/// here and not passed on to the object store.
+pub const COPY_BATCHES_OPTION: &str = "vortex.write.copy_batches";
+
 enum ResolvedStore {
     ObjectStore(Arc<dyn ObjectStore>, ObjectStorePath),
     Path(PathBuf),
@@ -110,9 +123,12 @@ pub struct NativeWriter {
     bytes_written: Arc<AtomicU64>,
     buffered_bytes: BufferedBytesTracker,
     sender: mpsc::Sender<VortexResult<ArrayRef>>,
+    /// See [`COPY_BATCHES_OPTION`].
+    copy_batches: bool,
 }
 
 impl NativeWriter {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session: VortexSession,
         arrow_schema: SchemaRef,
@@ -121,6 +137,7 @@ impl NativeWriter {
         buffered_bytes: BufferedBytesTracker,
         handle: Task<VortexResult<WriteSummary>>,
         sender: mpsc::Sender<VortexResult<ArrayRef>>,
+        copy_batches: bool,
     ) -> Self {
         Self {
             handle: Some(handle),
@@ -130,6 +147,7 @@ impl NativeWriter {
             bytes_written,
             buffered_bytes,
             sender,
+            copy_batches,
         }
     }
 
@@ -384,7 +402,8 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_create(
         let write_schema = session.arrow().from_arrow_schema(arrow_schema.as_ref())?;
 
         let file_path: String = uri.try_to_string(env)?;
-        let properties: HashMap<String, String> = extract_properties(env, &options)?;
+        let mut properties: HashMap<String, String> = extract_properties(env, &options)?;
+        let copy_batches = take_copy_batches(&mut properties)?;
         let metadata = extract_metadata(env, &metadata)?;
         let resolved = resolve_store(&file_path, &properties)?;
         let (tx, rx) = mpsc::channel(WRITE_CHANNEL_CAPACITY);
@@ -434,9 +453,21 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_create(
             buffered_bytes,
             handle,
             tx,
+            copy_batches,
         ))
         .into_raw())
     })
+}
+
+/// Removes [`COPY_BATCHES_OPTION`] from `properties`, returning whether it's on.
+fn take_copy_batches(properties: &mut HashMap<String, String>) -> VortexResult<bool> {
+    match properties.remove(COPY_BATCHES_OPTION).as_deref() {
+        None | Some("false") => Ok(false),
+        Some("true") => Ok(true),
+        Some(other) => Err(vortex_err!(
+            "{COPY_BATCHES_OPTION} must be true or false, got {other}"
+        )),
+    }
 }
 
 /// Create a writer that streams the file into a caller-provided
@@ -496,6 +527,8 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_createStream(
             buffered_bytes,
             handle,
             tx,
+            // The stream writer takes no options.
+            false,
         ))
         .into_raw())
     })
@@ -523,11 +556,25 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_writeBatch(
 
         let array_data = unsafe { arrow_array::ffi::from_ffi(ffi_array, ffi_schema) }
             .map_err(|e| JNIError::Vortex(vortex_err!("failed to import Arrow FFI data: {e}")))?;
+        let array_data = if writer.copy_batches {
+            deep_copy(&array_data)?
+        } else {
+            array_data
+        };
 
         let batch = RecordBatch::from(StructArray::from(array_data));
         writer.write_record_batch(batch)?;
         Ok(JNI_TRUE)
     })
+}
+
+/// `data` in buffers of its own. Dictionary values and the data buffers of view arrays are still
+/// shared with the original, which the Java writer doesn't produce.
+fn deep_copy(data: &ArrayData) -> VortexResult<ArrayData> {
+    let mut copy = MutableArrayData::new(vec![data], false, data.len());
+    copy.try_extend(0, 0, data.len())
+        .map_err(|e| vortex_err!("failed to copy Arrow batch: {e}"))?;
+    Ok(copy.freeze())
 }
 
 #[unsafe(no_mangle)]
@@ -592,4 +639,90 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_close(
         writer.close()?;
         Ok(())
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow_array::Array;
+    use arrow_array::ArrayRef as ArrowArrayRef;
+    use arrow_array::Int64Array;
+    use arrow_array::StringArray;
+    use arrow_array::StructArray;
+    use arrow_array::ffi::FFI_ArrowArray;
+    use arrow_array::ffi::FFI_ArrowSchema;
+    use arrow_array::ffi::from_ffi;
+    use arrow_buffer::NullBuffer;
+    use arrow_data::ArrayData;
+    use arrow_schema::DataType;
+    use arrow_schema::Field;
+    use arrow_schema::Fields;
+
+    use super::*;
+
+    /// Every buffer of `data` and its children, by address.
+    fn addresses(data: &ArrayData) -> Vec<usize> {
+        let mut out: Vec<usize> = data.buffers().iter().map(|b| b.as_ptr() as usize).collect();
+        out.extend(data.nulls().map(|n| n.buffer().as_ptr() as usize));
+        for child in data.child_data() {
+            out.extend(addresses(child));
+        }
+        out
+    }
+
+    /// A nullable struct of a nullable struct of an id and a string, imported over the C Data
+    /// Interface as the writer gets it.
+    fn imported() -> ArrayData {
+        let inner = StructArray::new(
+            Fields::from(vec![
+                Field::new("id", DataType::Int64, true),
+                Field::new("name", DataType::Utf8, true),
+            ]),
+            vec![
+                Arc::new(Int64Array::from_iter(
+                    (0..100).map(|i| (i % 7 != 0).then_some(i)),
+                )) as ArrowArrayRef,
+                Arc::new(StringArray::from_iter(
+                    (0..100).map(|i| (i % 3 != 0).then(|| format!("v{i}"))),
+                )),
+            ],
+            Some(NullBuffer::from_iter((0..100).map(|i| i % 5 != 0))),
+        );
+        let outer = StructArray::new(
+            Fields::from(vec![Field::new("inner", inner.data_type().clone(), true)]),
+            vec![Arc::new(inner) as ArrowArrayRef],
+            None,
+        );
+        let data = outer.to_data();
+        let ffi_array = FFI_ArrowArray::new(&data);
+        let ffi_schema = FFI_ArrowSchema::try_from(data.data_type()).unwrap();
+        // SAFETY: both were just exported from `data`.
+        unsafe { from_ffi(ffi_array, &ffi_schema) }.unwrap()
+    }
+
+    #[test]
+    fn a_copied_batch_shares_no_buffer_with_the_import() {
+        let import = imported();
+        let copy = deep_copy(&import).unwrap();
+
+        assert_eq!(copy, import);
+        let original = addresses(&import);
+        assert!(addresses(&copy).iter().all(|a| !original.contains(a)));
+    }
+
+    #[test]
+    fn the_copy_option_is_read_and_removed() {
+        let mut properties = HashMap::new();
+        properties.insert(COPY_BATCHES_OPTION.to_string(), "true".to_string());
+        properties.insert("aws_region".to_string(), "us-west-2".to_string());
+
+        assert!(take_copy_batches(&mut properties).unwrap());
+        assert!(!properties.contains_key(COPY_BATCHES_OPTION));
+        assert_eq!(properties.len(), 1);
+        assert!(!take_copy_batches(&mut properties).unwrap());
+
+        properties.insert(COPY_BATCHES_OPTION.to_string(), "yes".to_string());
+        assert!(take_copy_batches(&mut properties).is_err());
+    }
 }
