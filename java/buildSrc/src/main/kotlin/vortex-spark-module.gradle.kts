@@ -169,6 +169,12 @@ testing {
                             versionSourceDir.resolve("test/java"),
                         ),
                     )
+                    scala.setSrcDirs(
+                        listOf(
+                            commonSourceDir.resolve("test/scala"),
+                            versionSourceDir.resolve("test/scala"),
+                        ),
+                    )
                     resources.setSrcDirs(
                         listOf(
                             commonSourceDir.resolve("test/resources"),
@@ -257,6 +263,8 @@ val sparkJvmArgs =
         // Spark's launcher opens these too; Kryo needs them to serialize closures and collections.
         "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
         "--add-opens=java.base/java.util=ALL-UNNAMED",
+        // Spark 4.2's SerializationDebugger fails to initialize without it when a task failure won't serialize.
+        "--add-opens=java.base/java.io=ALL-UNNAMED",
     )
 
 tasks.withType<Test>().configureEach {
