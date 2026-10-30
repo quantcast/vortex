@@ -78,6 +78,12 @@ public final class VortexOutputWriter extends OutputWriter {
     /** Option sizing the write batch for Vortex alone, overriding {@value #BATCH_SIZE_OPTION}. */
     public static final String WRITE_BATCH_SIZE_OPTION = "vortex.write.batch.size";
 
+    /**
+     * Option storing list columns in the unstable list layout, so a read of some fields of array elements skips the
+     * others. Off by default; future versions may not read files written with it.
+     */
+    public static final String LIST_LAYOUT_OPTION = "vortex.listLayout";
+
     private static final int DEFAULT_BATCH_SIZE = 2048;
     private static final int MIN_BATCH_SIZE = 1;
     private static final int MAX_BATCH_SIZE = 65536; // 64K rows max per batch
@@ -116,6 +122,7 @@ public final class VortexOutputWriter extends OutputWriter {
 
             this.session = VortexSparkSession.get(options);
             this.vortexWriter = VortexWriter.builder(session, writable, arrowSchema, allocator)
+                    .listLayout(listLayout(options))
                     .build();
             this.vectorSchemaRoot = VectorSchemaRoot.create(arrowSchema, allocator);
 
@@ -125,6 +132,15 @@ public final class VortexOutputWriter extends OutputWriter {
             closeAfterInitializationFailure(e);
             throw new UncheckedIOException("Failed to initialize VortexOutputWriter for " + filePath, e);
         }
+    }
+
+    /**
+     * Whether {@value #LIST_LAYOUT_OPTION} is on.
+     *
+     * @throws IllegalArgumentException if the value is neither {@code true} nor {@code false}
+     */
+    static boolean listLayout(VortexOptions options) {
+        return options.getBoolean(LIST_LAYOUT_OPTION, false);
     }
 
     /**

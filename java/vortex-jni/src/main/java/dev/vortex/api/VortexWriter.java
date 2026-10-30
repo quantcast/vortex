@@ -86,6 +86,7 @@ public final class VortexWriter implements AutoCloseable {
         private final BufferAllocator allocator;
         private final Map<String, String> options = new HashMap<>();
         private final Map<String, byte[]> metadata = new HashMap<>();
+        private boolean listLayout;
 
         private Builder(
                 Session session, String uri, NativeWritable writable, Schema arrowSchema, BufferAllocator allocator) {
@@ -140,6 +141,18 @@ public final class VortexWriter implements AutoCloseable {
         }
 
         /**
+         * Whether to store each list column as separate offsets, validity and elements, with struct elements split
+         * further into one column per field, so a read of some element fields skips the others. Off by default.
+         *
+         * <p>The list layout belongs to the unstable edition, which this write enables, so the file may hold other
+         * unstable encodings too. Future versions may not read it. The session's own enabled editions are left alone.
+         */
+        public Builder listLayout(boolean enabled) {
+            this.listLayout = enabled;
+            return this;
+        }
+
+        /**
          * Open the writer.
          *
          * @throws IOException if the writer cannot be opened, including when the native side rejects the configured
@@ -152,9 +165,10 @@ public final class VortexWriter implements AutoCloseable {
                 final long pointer;
                 try {
                     pointer = uri != null
-                            ? NativeWriter.create(session.nativePointer(), uri, ffi.memoryAddress(), options, metadata)
+                            ? NativeWriter.create(
+                                    session.nativePointer(), uri, ffi.memoryAddress(), options, metadata, listLayout)
                             : NativeWriter.createStream(
-                                    session.nativePointer(), writable, ffi.memoryAddress(), metadata);
+                                    session.nativePointer(), writable, ffi.memoryAddress(), metadata, listLayout);
                 } catch (RuntimeException e) {
                     // Native failures arrive as RuntimeException. Wrap them so callers can handle every
                     // failure to open a writer as an IOException, as writeBatch and finish already do.
