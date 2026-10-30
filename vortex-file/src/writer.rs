@@ -23,6 +23,8 @@ use vortex_array::ArrayContext;
 use vortex_array::ArrayId;
 use vortex_array::ArrayRef;
 use vortex_array::aggregate_fn::AggregateFnRef;
+use vortex_array::aggregate_fn::AggregateFnVTable;
+use vortex_array::aggregate_fn::fns::min::Min;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::FieldPath;
 use vortex_array::iter::ArrayIterator;
@@ -281,6 +283,7 @@ impl VortexWriteOptions {
             .with_buffered_bytes_tracker(self.buffered_bytes.clone());
         let ctx = if enforce_editions {
             ctx.with_allowed_aggregates(edition_filter(&self.session, ComponentKind::Aggregate))
+                .with_allowed_layouts(edition_filter(&self.session, ComponentKind::Layout))
         } else {
             ctx
         };
@@ -368,9 +371,11 @@ impl VortexWriteOptions {
         let (layout, segment_specs) = layout_fut.await?;
 
         // Assemble the Footer object now that we have all the segments.
+        // Older editions do not permit Min, so readers must use the legacy statistics even
+        // when nested statistics were requested.
         let statistics = if omit_statistics {
             None
-        } else if self.write_nested_statistics {
+        } else if self.write_nested_statistics && ctx.allows_aggregate(&Min.id()) {
             Some(FileStatistics::new_with_dtype(
                 file_stats.aggregate_stats()?.into(),
                 file_stats.legacy_aggregate_stats()?.into(),
