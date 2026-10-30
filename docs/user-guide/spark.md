@@ -145,9 +145,11 @@ array's offsets, nulls, and elements apart, and splits struct elements into one 
 at every level of nesting. A query that reads `items.price` from an `array<struct<...>>` then
 reads only the offsets, the nulls, and `price`.
 
-Spark decides which fields to read. Below two levels of arrays it prunes only through an index, as
-in `orders.items[0].price`. After `explode`, `inline`, or `transform` it keeps every field of the
-inner structs, so `explode(orders)` followed by `items.price` reads all of `items`.
+Spark decides which fields to read, and it prunes fields inside arrays only on the V2 path; V1
+scans read the whole array. It prunes direct field access such as `items.price`, and below two
+levels of arrays only access through an index, such as `orders.items[0].price`. Through `explode`
+Spark prunes only the fields of the exploded structs, so `explode(orders)` followed by
+`order.items.price` reads all of `items`. After `inline` or `transform` it reads the whole array.
 
 This layout belongs to the unstable Vortex edition, which the option enables for that write only.
 The files may also use other unstable encodings, and future Vortex versions may not read them.
