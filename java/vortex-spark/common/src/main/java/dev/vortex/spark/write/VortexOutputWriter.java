@@ -294,13 +294,17 @@ public final class VortexOutputWriter extends OutputWriter {
             exportedSchema = null;
         }
         if (allocator != null) {
-            try {
+            long leftover = allocator.getAllocatedMemory();
+            if (leftover == 0) {
                 allocator.close();
-            } catch (IllegalStateException e) {
-                failure = addFailure(failure, new IOException("Arrow memory was still allocated", e));
-            } finally {
-                allocator = null;
+            } else {
+                // Left open: a batch the native side releases late must still be freed, and must not fail the task.
+                logger.warn(
+                        "{} bytes of Arrow memory were still allocated when the writer for {} closed",
+                        leftover,
+                        filePath);
             }
+            allocator = null;
         }
         return failure;
     }

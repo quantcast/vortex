@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import dev.vortex.api.DataSource;
 import dev.vortex.api.Scan;
 import dev.vortex.api.ScanOptions;
+import dev.vortex.relocated.org.apache.arrow.memory.ArrowBuf;
 import dev.vortex.relocated.org.apache.arrow.memory.BufferAllocator;
 import dev.vortex.relocated.org.apache.arrow.memory.RootAllocator;
 import dev.vortex.relocated.org.apache.arrow.vector.FieldVector;
@@ -266,6 +267,21 @@ final class VortexOutputWriterTest {
                 () -> writer.write(new GenericInternalRow(new Object[] {3L, UTF8String.fromString("c")})));
         assertThrows(RuntimeException.class, writer::close);
         assertEquals(0, allocator.getAllocatedMemory());
+    }
+
+    /** A buffer released after close stands in for a late native release: close succeeds and the memory is freed. */
+    @Test
+    void aLateReleaseDoesNotFailCloseAndIsStillFreed() {
+        StructType schema = new StructType().add("id", DataTypes.LongType, false);
+        VortexOutputWriter writer = writer("late-release.vortex", schema, Map.of());
+        BufferAllocator allocator = writer.allocator();
+        writer.write(new GenericInternalRow(new Object[] {1L}));
+        ArrowBuf held = allocator.buffer(64);
+        writer.close();
+        held.close();
+
+        assertEquals(0, allocator.getAllocatedMemory());
+        assertEquals(1, readRows(writer.path()).size());
     }
 
     @Test
