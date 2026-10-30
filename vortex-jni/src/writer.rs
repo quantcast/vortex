@@ -48,6 +48,8 @@ use vortex::array::scalar::ScalarValue;
 use vortex::array::stream::ArrayStreamAdapter;
 use vortex::dtype::DType;
 use vortex::dtype::FieldPath;
+use vortex::editions::EditionSessionExt;
+use vortex::editions::UNSTABLE;
 use vortex::error::VortexError;
 use vortex::error::VortexResult;
 use vortex::error::vortex_err;
@@ -74,6 +76,7 @@ use crate::file::extract_metadata;
 use crate::file::extract_properties;
 use crate::io::JavaWrite;
 use crate::object_store::make_object_store;
+use crate::session::new_session;
 use crate::session::session_ref;
 
 /// Capacity of the in-flight write queue. Small on purpose so that back-pressure from
@@ -360,6 +363,19 @@ fn write_summary_to_java<'local>(
     )?)
 }
 
+/// The session a write runs in.
+///
+/// The list layout is only written while the unstable edition is enabled, and enabled editions
+/// are shared by every clone of a session, so a list-layout write gets a session of its own.
+fn write_session(session: &VortexSession, list_layout: bool) -> VortexResult<VortexSession> {
+    if !list_layout {
+        return Ok(session.clone());
+    }
+    let session = *new_session();
+    session.enable_edition(UNSTABLE)?;
+    Ok(session)
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_vortex_jni_NativeWriter_create(
     mut env: EnvUnowned,
@@ -369,6 +385,7 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_create(
     arrow_schema_addr: jlong,
     options: JObject,
     metadata: JObject,
+    list_layout: jboolean,
 ) -> jlong {
     try_or_throw(&mut env, |env| {
         if session_ptr == 0 {
@@ -377,7 +394,7 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_create(
         if arrow_schema_addr == 0 {
             throw_runtime!("null arrow schema address");
         }
-        let session = unsafe { session_ref(session_ptr) };
+        let session = &write_session(unsafe { session_ref(session_ptr) }, list_layout)?;
 
         let ffi_schema = unsafe { &*(arrow_schema_addr as *const FFI_ArrowSchema) };
         let arrow_schema = Arc::new(Schema::try_from(ffi_schema)?);
@@ -453,6 +470,7 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_createStream(
     writable: JObject,
     arrow_schema_addr: jlong,
     metadata: JObject,
+    list_layout: jboolean,
 ) -> jlong {
     try_or_throw(&mut env, |env| {
         if session_ptr == 0 {
@@ -464,7 +482,7 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_createStream(
         if writable.is_null() {
             throw_runtime!("null writable");
         }
-        let session = unsafe { session_ref(session_ptr) };
+        let session = &write_session(unsafe { session_ref(session_ptr) }, list_layout)?;
 
         let ffi_schema = unsafe { &*(arrow_schema_addr as *const FFI_ArrowSchema) };
         let arrow_schema = Arc::new(Schema::try_from(ffi_schema)?);
