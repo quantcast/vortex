@@ -83,6 +83,7 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
 
             Map<String, String> fileFields = fieldNames(dataSource, caseSensitive);
             List<String> projection = new ArrayList<>(readDataSchema.length());
+            List<StructField> projectedFields = new ArrayList<>(readDataSchema.length());
             this.vectorSlots = new int[readDataSchema.length()];
             StructField[] fields = readDataSchema.fields();
             for (int i = 0; i < fields.length; i++) {
@@ -90,6 +91,7 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
                 if (fileName != null) {
                     vectorSlots[i] = projection.size();
                     projection.add(fileName);
+                    projectedFields.add(fields[i]);
                 } else if (fields[i].nullable()) {
                     vectorSlots[i] = -1;
                 } else {
@@ -103,8 +105,12 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
 
             var options = ScanOptions.builder();
             // Always project, an empty read schema included: a query that needs only partition columns or only a
-            // row count must not pull every data column off storage.
-            options.projection(Expression.select(projection.toArray(new String[0]), Expression.root()));
+            // row count must not pull every data column off storage. Struct columns that Spark pruned read only the
+            // nested fields the query uses.
+            options.projection(NestedSchemaPruning.projection(
+                    projection.toArray(new String[0]),
+                    new StructType(projectedFields.toArray(new StructField[0])),
+                    dataSchema));
             // Filters are converted against this file's own columns. Spark evaluates every data filter above the
             // scan anyway, so one that reads a column this file lacks is dropped rather than pushed.
             buildFilterExpression(pushedFilters, restrictTo(dataSchema, fileFields))

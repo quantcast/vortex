@@ -203,7 +203,7 @@ public final class VortexNestedSchemaPruningTest {
                                 functions.col("id"),
                                 nullWhen(functions.col("id").equalTo(3), o).alias("o")),
                 "with-null-" + nullableInferred);
-        // Schema inference reads the last path.
+        // Both orders of the footers that schema inference reads are covered.
         String[] paths = nullableInferred ? new String[] {noNulls, withNull} : new String[] {withNull, noNulls};
         Dataset<Row> rows = spark.read()
                 .format("vortex")

@@ -8,6 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
@@ -18,7 +20,6 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.functions;
-import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -27,7 +28,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.io.TempDir;
 
-/** Tests for schema inference failure reporting in {@link VortexDataSourceV2}. */
+/** Tests for the schema {@link VortexDataSourceV2} reads tables with. */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public final class VortexDataSourceInferSchemaTest {
 
@@ -55,8 +56,8 @@ public final class VortexDataSourceInferSchemaTest {
 
     @Test
     @DisplayName("Reading a directory without Vortex files reports schema inference failure")
-    public void inferSchemaFailureUsesSparkFileSourceError() {
-        String emptyDir = tempDir.toString();
+    public void inferSchemaFailureUsesSparkFileSourceError() throws IOException {
+        String emptyDir = Files.createDirectories(tempDir.resolve("empty")).toString();
 
         Throwable thrown = assertThrows(
                 Throwable.class, () -> spark.read().format("vortex").load(emptyDir));
@@ -110,8 +111,8 @@ public final class VortexDataSourceInferSchemaTest {
     }
 
     /**
-     * Reads two files that differ only in whether struct {@code s} has nulls. Schema inference reads the last path, so
-     * {@code inferFromNulls} picks the file it infers from.
+     * Reads two files that differ only in whether struct {@code s} has nulls. {@code inferFromNulls} lists the file
+     * with nulls last, so both orders of the footers that schema inference reads are covered.
      */
     private void assertFilesDifferingInNullabilityRead(boolean inferFromNulls) {
         Column s = functions.struct(
