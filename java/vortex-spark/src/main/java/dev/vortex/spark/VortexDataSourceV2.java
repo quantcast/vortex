@@ -8,9 +8,9 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import dev.vortex.api.DataSource;
-import dev.vortex.jni.NativeFiles;
 import dev.vortex.spark.config.HadoopUtils;
 import dev.vortex.spark.read.PartitionPathUtils;
+import dev.vortex.spark.read.VortexFileListing;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -83,7 +83,8 @@ public final class VortexDataSourceV2 implements TableProvider, DataSourceRegist
         // If the path is a directory, scan the directory for a file and use that file
         if (!pathToInfer.endsWith(".vortex")) {
             Optional<String> firstFile =
-                    NativeFiles.listFiles(VortexSparkSession.get(formatOptions), pathToInfer, formatOptions).stream()
+                    VortexFileListing.listDataFiles(VortexSparkSession.get(formatOptions), pathToInfer, formatOptions)
+                            .stream()
                             .findFirst();
 
             if (firstFile.isEmpty()) {
@@ -145,7 +146,8 @@ public final class VortexDataSourceV2 implements TableProvider, DataSourceRegist
         String pathToInfer = Objects.requireNonNull(Iterables.getLast(paths));
         if (!pathToInfer.endsWith(".vortex")) {
             Optional<String> firstFile =
-                    NativeFiles.listFiles(VortexSparkSession.get(formatOptions), pathToInfer, formatOptions).stream()
+                    VortexFileListing.listDataFiles(VortexSparkSession.get(formatOptions), pathToInfer, formatOptions)
+                            .stream()
                             .findFirst();
             if (firstFile.isEmpty()) {
                 return new Transform[0];
