@@ -733,6 +733,17 @@ async fn serialization_context_accepts_supported_compressor_output() -> VortexRe
 /// zone maps use the legacy `vortex.stats` layout, and the file has only `core2025.10.0` layouts.
 #[tokio::test]
 async fn core_2025_10_0_writes_legacy_zone_maps() -> VortexResult<()> {
+    assert_core_2025_10_0_writes_legacy_statistics(false).await
+}
+
+#[tokio::test]
+async fn core_2025_10_0_keeps_legacy_statistics_when_nested_requested() -> VortexResult<()> {
+    assert_core_2025_10_0_writes_legacy_statistics(true).await
+}
+
+async fn assert_core_2025_10_0_writes_legacy_statistics(
+    include_nested_statistics: bool,
+) -> VortexResult<()> {
     let session = VortexSession::default();
     session.enable_edition(CORE_2025_10_0)?;
 
@@ -769,7 +780,16 @@ async fn core_2025_10_0_writes_legacy_zone_maps() -> VortexResult<()> {
     ])?
     .into_array();
 
-    let buffer = write_with(&session, array.clone()).await?;
+    let options = session.write_options();
+    let options = if include_nested_statistics {
+        options.include_nested_statistics()
+    } else {
+        options
+    };
+    let mut buffer = ByteBufferMut::empty();
+    options
+        .write(&mut buffer, array.clone().to_array_stream())
+        .await?;
 
     let written = written_layout_ids(&session, buffer.clone())?;
     let permitted: Vec<Id> = session
