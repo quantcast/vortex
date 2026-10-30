@@ -128,10 +128,9 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
                 }
             }
             // Filters are converted against this file's own columns. Spark evaluates every data filter above the
-            // scan anyway, so one that reads a column this file lacks, or stores in another type, is dropped rather
-            // than pushed.
-            buildFilterExpression(pushedFilters, ReadTypes.filterable(dataSchema, arrowFields))
-                    .ifPresent(options::filter);
+            // scan anyway, so one that reads a column this file lacks, or compares one it stores in another type, is
+            // dropped rather than pushed.
+            buildFilterExpression(pushedFilters, dataSchema, arrowFields).ifPresent(options::filter);
             Optional<SplitRows> rows = splitRows(file, dataSource.rowCount());
             if (rows.isPresent() && rows.get().count() == 0) {
                 // The native scan reads a range of 0 to 0 as the whole file.
@@ -195,14 +194,17 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
         return names;
     }
 
-    private static Optional<Expression> buildFilterExpression(Filter[] filters, StructType dataSchema) {
+    private static Optional<Expression> buildFilterExpression(
+            Filter[] filters, StructType dataSchema, List<Field> fileFields) {
+        if (filters == null || filters.length == 0) {
+            return Optional.empty();
+        }
+        StructType filterable = ReadTypes.filterable(dataSchema, fileFields, filters);
         Expression combined = null;
-        if (filters != null) {
-            for (Filter filter : filters) {
-                Optional<Expression> converted = SparkFilterToVortexExpression.convert(filter, dataSchema);
-                if (converted.isPresent()) {
-                    combined = combined == null ? converted.get() : Expression.and(combined, converted.get());
-                }
+        for (Filter filter : filters) {
+            Optional<Expression> converted = SparkFilterToVortexExpression.convert(filter, filterable);
+            if (converted.isPresent()) {
+                combined = combined == null ? converted.get() : Expression.and(combined, converted.get());
             }
         }
         return Optional.ofNullable(combined);
