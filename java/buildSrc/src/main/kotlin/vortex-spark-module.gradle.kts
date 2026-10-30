@@ -111,6 +111,8 @@ testing {
                 implementation(libs.findLibrary("junit-jupiter").get())
                 implementation("org.apache.spark:spark-core_$scalaBinaryVersion:$sparkVersion")
                 implementation("org.apache.spark:spark-sql_$scalaBinaryVersion:$sparkVersion")
+                // Vortex reaches storage through Hadoop, so s3a:// needs the S3A filesystem from hadoop-aws.
+                runtimeOnly("org.apache.spark:spark-hadoop-cloud_$scalaBinaryVersion:$sparkVersion")
                 implementation(libs.findLibrary("s3mock-testcontainers").get())
                 implementation(libs.findLibrary("testcontainers-juputer").get())
                 runtimeOnly(libs.findLibrary("slf4j-simple").get())
@@ -169,6 +171,7 @@ testing {
                     implementation(libs.findLibrary("junit-jupiter").get())
                     implementation("org.apache.spark:spark-core_2.13:$version")
                     implementation("org.apache.spark:spark-sql_2.13:$version")
+                    runtimeOnly("org.apache.spark:spark-hadoop-cloud_2.13:$version")
                     implementation(libs.findLibrary("s3mock-testcontainers").get())
                     implementation(libs.findLibrary("testcontainers-juputer").get())
                     runtimeOnly(libs.findLibrary("slf4j-simple").get())
