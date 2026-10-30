@@ -224,6 +224,21 @@ public final class Expression {
         return not(in(value, list));
     }
 
+    /** The parameter {@code name} of the lambda whose body this is, as in {@link #listTransform}. */
+    public static Expression variable(String name) {
+        return new Expression(NativeExpression.variable(name));
+    }
+
+    /**
+     * {@code body} evaluated for every element of each list {@code list} evaluates to, with the element bound to
+     * {@link #variable(String) variable} {@code param}. The lists keep their lengths and nulls.
+     *
+     * <p>{@code body} may read only {@code param}, so a transform nested in it takes a parameter of its own.
+     */
+    public static Expression listTransform(Expression list, String param, Expression body) {
+        return new Expression(NativeExpression.listTransform(list.nativePointer(), param, body.nativePointer()));
+    }
+
     public static Expression literal(boolean value) {
         return new Expression(NativeExpression.literalBool(value, false));
     }
