@@ -78,6 +78,24 @@ final class VortexScanBuilder(
     )
   }
 
+  /** The read columns in table order, with struct columns pruned to the nested
+    * fields Spark requires. See [[NestedSchemaPruning]] for which nested types
+    * are pruned.
+    */
+  override protected def readDataSchema(): StructType = {
+    val resolver = sparkSession.sessionState.conf.resolver
+    StructType(super.readDataSchema().fields.map { field =>
+      requiredSchema.fields
+        .find(required => resolver(required.name, field.name)) match {
+        case Some(required) =>
+          field.copy(dataType =
+            NestedSchemaPruning.prune(field.dataType, required.dataType)
+          )
+        case None => field
+      }
+    })
+  }
+
   /** Escape hatch matching `spark.sql.parquet.aggregatePushdown`, for when a
     * footer count must not be trusted.
     */

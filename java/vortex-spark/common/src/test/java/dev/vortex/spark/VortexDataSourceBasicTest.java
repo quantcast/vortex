@@ -10,6 +10,7 @@ import dev.vortex.relocated.org.apache.arrow.vector.types.pojo.ArrowType;
 import dev.vortex.relocated.org.apache.arrow.vector.types.pojo.Field;
 import dev.vortex.relocated.org.apache.arrow.vector.types.pojo.FieldType;
 import dev.vortex.spark.write.SparkToArrowSchema;
+import java.util.List;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;

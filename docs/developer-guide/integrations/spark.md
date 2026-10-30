@@ -37,8 +37,12 @@ files carry. The partition reader projects only the fields the file it opened ac
 fills the rest with constant null vectors, and it converts filters against those same fields, so a
 filter on a column the file lacks stays a Spark residual rather than reaching the native scan.
 
-Spark's required schema becomes the Vortex scan projection. Convertible V1 filters become Vortex
-expressions; filters the converter rejects remain Spark residuals.
+Spark's required schema becomes the Vortex scan projection. On the V2 path, struct columns are
+pruned to the nested fields the query uses, at any depth: the projection is a `select` when only
+leaf fields are pruned, and a `pack` masked by the source struct's validity when a child struct is
+pruned too. Fields inside arrays and maps are read whole. Spark's V1 schema pruning rule applies
+only to Parquet and ORC, so the V1 fallback reads whole top-level columns. Convertible V1
+filters become Vortex expressions; filters the converter rejects remain Spark residuals.
 
 The scan accepts `COUNT(*)` aggregation when there are no data filters and grouping uses only
 partition columns, and only from footers that state their row count exactly. Readers return one

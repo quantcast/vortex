@@ -183,7 +183,7 @@ path:
 - dynamic partition pruning, which Spark applies to V1 relations only.
 
 Filter pushdown, column pruning, partition pruning, and partitioned writes work on both paths.
-`COUNT(*)` footer pushdown and footer-backed scan statistics are V2 only.
+`COUNT(*)` footer pushdown, nested struct pruning, and footer-backed scan statistics are V2 only.
 
 ## I/O and Remote Storage
 
