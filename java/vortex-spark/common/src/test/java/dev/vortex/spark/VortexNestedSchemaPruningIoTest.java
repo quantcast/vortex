@@ -46,7 +46,7 @@ import org.junit.jupiter.api.io.TempDir;
 public final class VortexNestedSchemaPruningIoTest {
     private static final int ROWS = 16384;
     private static final String PRUNING = "spark.sql.optimizer.nestedSchemaPruning.enabled";
-    private static final AtomicLong BYTES_READ = new AtomicLong();
+    static final AtomicLong BYTES_READ = new AtomicLong();
 
     private SparkSession spark;
     private Dataset<Row> table;
