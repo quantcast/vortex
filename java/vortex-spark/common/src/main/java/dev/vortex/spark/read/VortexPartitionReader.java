@@ -89,7 +89,8 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
             readable = io.openReadable(new VortexFile(file.toPath().toString(), file.fileSize()));
             dataSource = DataSource.open(session, List.of(readable), io.readConcurrency());
 
-            StructType fileSchema = fileSchema(dataSource);
+            List<Field> arrowFields = dataSource.arrowSchema(allocator).getFields();
+            StructType fileSchema = fileSchema(arrowFields);
             Map<String, String> fileFields = fieldNames(fileSchema, caseSensitive);
             List<StructField> projected = new ArrayList<>(readDataSchema.length());
             this.vectorSlots = new int[readDataSchema.length()];
@@ -109,14 +110,15 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
                 }
             }
 
+            StructType projectedSchema = new StructType(projected.toArray(new StructField[0]));
+            ReadTypes.check(
+                    projectedSchema, arrowFields, caseSensitive, file.toPath().toString());
+
             var options = ScanOptions.builder();
             // Always project, an empty read schema included: a query that needs only partition columns or only a
             // row count must not pull every data column off storage.
             NestedSchemaPruning.Projection projection = NestedSchemaPruning.projection(
-                    new StructType(projected.toArray(new StructField[0])),
-                    fileSchema,
-                    caseSensitive,
-                    file.toPath().toString());
+                    projectedSchema, fileSchema, caseSensitive, file.toPath().toString());
             options.projection(projection.expression());
             this.columnShapes = new NestedSchemaPruning.Shape[fields.length];
             for (int i = 0; i < fields.length; i++) {
@@ -125,8 +127,9 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
                 }
             }
             // Filters are converted against this file's own columns. Spark evaluates every data filter above the
-            // scan anyway, so one that reads a column this file lacks is dropped rather than pushed.
-            buildFilterExpression(pushedFilters, restrictTo(dataSchema, fileSchema))
+            // scan anyway, so one that reads a column this file lacks, or stores in another type, is dropped rather
+            // than pushed.
+            buildFilterExpression(pushedFilters, ReadTypes.filterable(dataSchema, arrowFields))
                     .ifPresent(options::filter);
             Optional<SplitRows> rows = splitRows(file, dataSource.rowCount());
             if (rows.isPresent() && rows.get().count() == 0) {
@@ -154,8 +157,8 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
         return Optional.of(SplitRows.of(file.start(), file.length(), file.fileSize(), exact.value()));
     }
 
-    private StructType fileSchema(DataSource source) {
-        return new StructType(source.arrowSchema(allocator).getFields().stream()
+    private static StructType fileSchema(List<Field> fields) {
+        return new StructType(fields.stream()
                 .map(field -> new StructField(field.getName(), sparkType(field), field.isNullable(), Metadata.empty()))
                 .toArray(StructField[]::new));
     }
@@ -189,27 +192,6 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
             }
         }
         return names;
-    }
-
-    private static StructType restrictTo(StructType schema, StructType fileSchema) {
-        // Native filters use physical field names, at every level. Filters on other paths stay with Spark.
-        List<StructField> present = new ArrayList<>(schema.length());
-        for (StructField field : schema.fields()) {
-            Optional<StructField> fileField = Arrays.stream(fileSchema.fields())
-                    .filter(candidate -> candidate.name().equals(field.name()))
-                    .findFirst();
-            if (fileField.isEmpty()) {
-                continue;
-            }
-            if (field.dataType() instanceof StructType struct
-                    && fileField.get().dataType() instanceof StructType fileStruct) {
-                present.add(new StructField(
-                        field.name(), restrictTo(struct, fileStruct), field.nullable(), field.metadata()));
-            } else {
-                present.add(field);
-            }
-        }
-        return new StructType(present.toArray(new StructField[0]));
     }
 
     private static Optional<Expression> buildFilterExpression(Filter[] filters, StructType dataSchema) {
