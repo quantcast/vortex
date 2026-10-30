@@ -64,7 +64,7 @@ final class VortexScanBuilder(
 
   override def build(): VortexScan = {
     if (pushedAggregation.isEmpty) {
-      // Spark also prunes structs inside arrays and maps, which the reader returns whole.
+      // Spark also prunes structs inside maps, which the reader returns whole.
       finalSchema =
         NestedSchemaPruning.pruneFields(readDataSchema(), dataSchema)
     }

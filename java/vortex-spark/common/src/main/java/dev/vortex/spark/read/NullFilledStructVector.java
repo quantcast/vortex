@@ -6,6 +6,8 @@ package dev.vortex.spark.read;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.spark.sql.execution.vectorized.ConstantColumnVector;
+import org.apache.spark.sql.types.ArrayType;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.Decimal;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.vectorized.ColumnVector;
@@ -30,6 +32,13 @@ final class NullFilledStructVector extends ColumnVector {
         this.owned = owned;
     }
 
+    /** Lays {@code vector}, a struct or array the file returned, out as {@code type} by {@code shape}. */
+    static ColumnVector fill(ColumnVector vector, DataType type, NestedSchemaPruning.Shape shape, int rowCount) {
+        return type instanceof ArrayType array
+                ? NullFilledArrayVector.of(vector, array, shape.element())
+                : of(vector, (StructType) type, shape, rowCount);
+    }
+
     /** Lays {@code struct}, which the file returned, out as {@code type} by {@code shape}. */
     static ColumnVector of(ColumnVector struct, StructType type, NestedSchemaPruning.Shape shape, int rowCount) {
         List<ColumnVector> owned = new ArrayList<>();
@@ -42,8 +51,7 @@ final class NullFilledStructVector extends ColumnVector {
                 owned.add(nulls);
                 children[i] = nulls;
             } else if (shape.child(i) != null) {
-                ColumnVector child =
-                        of(struct.getChild(slot), (StructType) type.fields()[i].dataType(), shape.child(i), rowCount);
+                ColumnVector child = fill(struct.getChild(slot), type.fields()[i].dataType(), shape.child(i), rowCount);
                 owned.add(child);
                 children[i] = child;
             } else {
