@@ -8,8 +8,12 @@ import dev.vortex.relocated.org.apache.arrow.vector.types.pojo.ArrowType;
 import dev.vortex.relocated.org.apache.arrow.vector.types.pojo.Field;
 import dev.vortex.spark.ArrowUtils;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.function.Function;
 import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
@@ -36,58 +40,73 @@ final class ReadTypes {
     /**
      * Fails unless every field of {@code readSchema} that the file carries can be read as its type.
      *
-     * <p>Fields are matched by name under Spark's case sensitivity, at every level. Only the fields Spark reads are
-     * converted, so a column Spark cannot represent fails only a query that reads it. Structs inside arrays and maps
-     * are left unchecked.
+     * <p>Fields are matched the way the reader resolves them, under Spark's case sensitivity: struct fields by name,
+     * through arrays too, and struct fields inside a map by position, since the vectors return a map's keys and values
+     * as the file stores them. Only the fields Spark reads are converted, so a column Spark cannot represent fails only
+     * a query that reads it.
      *
      * @throws IllegalArgumentException naming {@code fileName}, the field and both types
      */
     static void check(StructType readSchema, List<Field> fileFields, boolean caseSensitive, String fileName) {
-        for (StructField field : readSchema.fields()) {
-            Field fileField = find(fileFields, field.name(), caseSensitive);
-            if (fileField != null) {
-                check(field.dataType(), fileField, field.name(), caseSensitive, fileName);
-            }
-        }
+        new Check(caseSensitive, fileName).byName(readSchema, fileFields, "");
     }
 
-    private static void check(DataType read, Field file, String path, boolean caseSensitive, String fileName) {
-        ArrowType type = file.getType();
-        if (type instanceof ArrowType.Null) {
-            // Every value is null, which reads the same as any type.
-            return;
-        }
-        if (read instanceof StructType struct) {
-            if (!(type instanceof ArrowType.Struct)) {
-                throw mismatch(read, file, path, fileName);
-            }
-            for (StructField field : struct.fields()) {
-                Field child = find(file.getChildren(), field.name(), caseSensitive);
+    private record Check(boolean caseSensitive, String fileName) {
+        void byName(StructType read, List<Field> file, String path) {
+            Function<String, Field> lookup = lookup(file, caseSensitive);
+            for (StructField field : read.fields()) {
+                Field child = lookup.apply(field.name());
                 if (child != null) {
-                    check(field.dataType(), child, path + "." + field.name(), caseSensitive, fileName);
+                    value(field.dataType(), child, path.isEmpty() ? field.name() : path + "." + field.name(), true);
                 }
             }
-        } else if (read instanceof ArrayType array) {
-            if (!(type instanceof ArrowType.List || type instanceof ArrowType.ListView)) {
-                throw mismatch(read, file, path, fileName);
-            }
-            element(array.elementType(), file.getChildren().get(0), path + ".element", caseSensitive, fileName);
-        } else if (read instanceof MapType map) {
-            if (!(type instanceof ArrowType.Map)) {
-                throw mismatch(read, file, path, fileName);
-            }
-            List<Field> entry = file.getChildren().get(0).getChildren();
-            element(map.keyType(), entry.get(0), path + ".key", caseSensitive, fileName);
-            element(map.valueType(), entry.get(1), path + ".value", caseSensitive, fileName);
-        } else if (!readable(file, read)) {
-            throw mismatch(read, file, path, fileName);
         }
-    }
 
-    private static void element(DataType read, Field file, String path, boolean caseSensitive, String fileName) {
-        // The fields of a struct inside an array or map are matched by position, not by name.
-        if (!(read instanceof StructType)) {
-            check(read, file, path, caseSensitive, fileName);
+        void byPosition(StructType read, Field file, String path) {
+            StructField[] fields = read.fields();
+            List<Field> children = file.getChildren();
+            if (fields.length > children.size()) {
+                throw mismatch(read, file, path, fileName);
+            }
+            for (int i = 0; i < fields.length; i++) {
+                String name = children.get(i).getName();
+                if (!(caseSensitive ? name.equals(fields[i].name()) : name.equalsIgnoreCase(fields[i].name()))) {
+                    throw mismatch(read, file, path, fileName);
+                }
+                value(fields[i].dataType(), children.get(i), path + "." + fields[i].name(), false);
+            }
+        }
+
+        void value(DataType read, Field file, String path, boolean byName) {
+            ArrowType type = file.getType();
+            if (type instanceof ArrowType.Null) {
+                // Every value is null, which reads the same as any type.
+                return;
+            }
+            if (read instanceof StructType struct) {
+                if (!(type instanceof ArrowType.Struct)) {
+                    throw mismatch(read, file, path, fileName);
+                }
+                if (byName) {
+                    byName(struct, file.getChildren(), path);
+                } else {
+                    byPosition(struct, file, path);
+                }
+            } else if (read instanceof ArrayType array) {
+                if (!(type instanceof ArrowType.List || type instanceof ArrowType.ListView)) {
+                    throw mismatch(read, file, path, fileName);
+                }
+                value(array.elementType(), file.getChildren().get(0), path + ".element", byName);
+            } else if (read instanceof MapType map) {
+                if (!(type instanceof ArrowType.Map)) {
+                    throw mismatch(read, file, path, fileName);
+                }
+                List<Field> entry = file.getChildren().get(0).getChildren();
+                value(map.keyType(), entry.get(0), path + ".key", false);
+                value(map.valueType(), entry.get(1), path + ".value", false);
+            } else if (!readable(file, read)) {
+                throw mismatch(read, file, path, fileName);
+            }
         }
     }
 
@@ -157,9 +176,10 @@ final class ReadTypes {
      * same name, at every level, with the type filter literals are built in.
      */
     static StructType filterable(StructType schema, List<Field> fileFields) {
+        Function<String, Field> lookup = lookup(fileFields, true);
         List<StructField> present = new ArrayList<>(schema.length());
         for (StructField field : schema.fields()) {
-            Field fileField = find(fileFields, field.name(), true);
+            Field fileField = lookup.apply(field.name());
             if (fileField == null) {
                 continue;
             }
@@ -192,12 +212,25 @@ final class ReadTypes {
                                 || timestamp.getTimezone().equals("UTC")));
     }
 
-    private static Field find(List<Field> fields, String name, boolean caseSensitive) {
-        for (Field field : fields) {
-            if (caseSensitive ? field.getName().equals(name) : field.getName().equalsIgnoreCase(name)) {
-                return field;
-            }
+    /** Finds fields by name, through a map for a struct wide enough that scanning it per lookup would add up. */
+    private static Function<String, Field> lookup(List<Field> fields, boolean caseSensitive) {
+        if (fields.size() <= 8) {
+            return name -> {
+                for (Field field : fields) {
+                    if (caseSensitive
+                            ? field.getName().equals(name)
+                            : field.getName().equalsIgnoreCase(name)) {
+                        return field;
+                    }
+                }
+                return null;
+            };
         }
-        return null;
+        Map<String, Field> byName =
+                caseSensitive ? new HashMap<>(fields.size() * 2) : new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        for (Field field : fields) {
+            byName.putIfAbsent(field.getName(), field);
+        }
+        return byName::get;
     }
 }
