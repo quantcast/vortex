@@ -58,6 +58,9 @@ import org.apache.spark.unsafe.types.UTF8String;
 
 /** Converts Spark's stable V1 file filters into Vortex expressions. */
 public final class SparkFilterToVortexExpression {
+    // Up to this many values a disjunction of equalities is cheap and prunes zones value by value.
+    private static final int MAX_IN_DISJUNCTION = 16;
+
     private SparkFilterToVortexExpression() {}
 
     /** Returns whether the complete filter can be evaluated by Vortex for {@code dataSchema}. */
@@ -156,24 +159,99 @@ public final class SparkFilterToVortexExpression {
         if (column.isEmpty()) {
             return Optional.empty();
         }
-        List<Expression> comparisons = new ArrayList<>();
+        DataType dataType = column.get().dataType();
+        List<Expression> elements = new ArrayList<>();
         for (Object value : in.values()) {
+            // Without its nulls the set admits extra rows only beneath NOT, and Spark filters those again.
             if (value == null) {
                 continue;
             }
-            Optional<Expression> literal = literal(value, column.get().dataType());
+            Optional<Expression> literal = literal(value, dataType);
             if (literal.isEmpty()) {
                 return Optional.empty();
             }
-            comparisons.add(Expression.binary(BinaryOp.EQ, column.get().expression(), literal.get()));
+            elements.add(literal.get());
         }
-        if (comparisons.isEmpty()) {
+        Expression field = column.get().expression();
+        if (elements.isEmpty()) {
             return Optional.of(Expression.literal(false));
         }
-        if (comparisons.size() == 1) {
-            return Optional.of(comparisons.get(0));
+        if (elements.size() <= MAX_IN_DISJUNCTION) {
+            List<Expression> comparisons = new ArrayList<>(elements.size());
+            elements.forEach(element -> comparisons.add(Expression.binary(BinaryOp.EQ, field, element)));
+            return Optional.of(
+                    comparisons.size() == 1
+                            ? comparisons.get(0)
+                            : Expression.or(comparisons.toArray(new Expression[0])));
         }
-        return Optional.of(Expression.or(comparisons.toArray(new Expression[0])));
+        // A disjunction scans the column once per value, the set once in all.
+        Optional<Expression> lookup = literal(null, dataType)
+                .map(elementType -> Expression.in(
+                        field, Expression.literalList(elementType, false, elements.toArray(new Expression[0]))));
+        // Vortex derives no zone bounds from a set, so spell them out for pruning.
+        return lookup.map(set -> inBounds(in.values(), dataType, field)
+                .map(bounds -> Expression.and(bounds, set))
+                .orElse(set));
+    }
+
+    private static Optional<Expression> inBounds(Object[] values, DataType dataType, Expression field) {
+        Object low = null;
+        Object high = null;
+        Comparable<Object> lowKey = null;
+        Comparable<Object> highKey = null;
+        for (Object value : values) {
+            if (value == null) {
+                continue;
+            }
+            Optional<Comparable<Object>> key = orderKey(value, dataType);
+            if (key.isEmpty()) {
+                return Optional.empty();
+            }
+            if (lowKey == null || key.get().compareTo(lowKey) < 0) {
+                low = value;
+                lowKey = key.get();
+            }
+            if (highKey == null || key.get().compareTo(highKey) > 0) {
+                high = value;
+                highKey = key.get();
+            }
+        }
+        Optional<Expression> lower = literal(low, dataType);
+        Optional<Expression> upper = literal(high, dataType);
+        if (lowKey == null || lower.isEmpty() || upper.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(Expression.and(
+                Expression.binary(BinaryOp.GTE, field, lower.get()),
+                Expression.binary(BinaryOp.LTE, field, upper.get())));
+    }
+
+    /** {@code value} as a key in the order Vortex compares {@code dataType} in, or empty for an unordered type. */
+    @SuppressWarnings("unchecked")
+    private static Optional<Comparable<Object>> orderKey(Object value, DataType dataType) {
+        Optional<? extends Comparable<?>> key;
+        if (dataType instanceof ByteType
+                || dataType instanceof ShortType
+                || dataType instanceof IntegerType
+                || dataType instanceof LongType) {
+            key = value instanceof Number number ? Optional.of(number.longValue()) : Optional.empty();
+        } else if (dataType instanceof DateType) {
+            key = dateDays(value);
+        } else if (dataType instanceof TimestampType || dataType instanceof TimestampNTZType) {
+            key = timestampMicros(value, dataType instanceof TimestampNTZType);
+        } else if (dataType instanceof DecimalType) {
+            key = value instanceof BigDecimal decimal
+                    ? Optional.of(decimal)
+                    : value instanceof Decimal sparkDecimal
+                            ? Optional.of(sparkDecimal.toJavaBigDecimal())
+                            : Optional.empty();
+        } else if (dataType instanceof StringType) {
+            // UTF8String orders by unsigned bytes, as Vortex does; String would order by UTF-16 units.
+            key = Optional.of(UTF8String.fromString(value.toString()));
+        } else {
+            key = Optional.empty();
+        }
+        return key.map(comparable -> (Comparable<Object>) comparable);
     }
 
     private static Optional<Expression> stringMatch(
