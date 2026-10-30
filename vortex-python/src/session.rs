@@ -10,10 +10,10 @@ use std::sync::atomic::AtomicPtr;
 #[cfg(unix)]
 use std::sync::atomic::Ordering;
 
+use pyo3::PyResult;
+use pyo3::exceptions::PyValueError;
 use vortex::VortexSessionDefault;
 use vortex::editions::EditionSessionExt;
-use vortex::error::VortexResult;
-use vortex::error::vortex_err;
 use vortex::io::runtime::BlockingRuntime;
 #[cfg(unix)]
 use vortex::io::runtime::Handle;
@@ -94,20 +94,14 @@ pub(crate) fn reset_session_handle(handle: Handle) {
 /// Without an edition, this is the shared session. With an edition, this is a new session that
 /// enables the edition, so that the selection does not change other writes. Select an older
 /// edition to write files that older Vortex readers can read.
-pub(crate) fn write_session(edition: Option<&str>) -> VortexResult<VortexSession> {
+pub(crate) fn write_session(edition: Option<&str>) -> PyResult<VortexSession> {
     let Some(edition) = edition else {
         return Ok(session().clone());
     };
 
     let session = VortexSession::default().with_handle(current_runtime().handle());
-    let declared = session
-        .editions()
-        .find_by_name(edition)
-        .ok_or_else(|| vortex_err!("Unknown Vortex edition: {edition}"))?;
-
     session
-        .enable_edition(declared.id)
-        .map_err(|error| vortex_err!("{error}"))?;
-
+        .enable_edition_by_name(edition)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
     Ok(session)
 }

@@ -1,12 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright the Vortex contributors
+
 //! Write-time accumulation of legacy `vortex.stats` zone tables.
 //!
-//! Readers before `vortex.zoned` (Vortex 0.83 and earlier) only know the `vortex.stats` layout.
+//! Readers before `vortex.zoned` (Vortex 0.75 and earlier) only know the `vortex.stats` layout.
 //! Its zone table holds one column for each [`Stat`], in [`Stat`] order. A `max` or `min` column
 //! has a `max_is_truncated` or `min_is_truncated` column after it. This module writes the same
 //! table that those readers wrote.
-
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -37,14 +37,12 @@ use vortex_error::vortex_ensure_eq;
 
 use crate::layouts::zoned::schema::MAX_IS_TRUNCATED;
 use crate::layouts::zoned::schema::MIN_IS_TRUNCATED;
+use crate::layouts::zoned::schema::default_bounded_stat_max_bytes;
 
 /// The stats that a legacy zone table records.
 ///
 /// Sum is not included, because it does not help pruning.
 const LEGACY_ZONE_STATS: &[Stat] = &[Stat::Max, Stat::Min, Stat::NullCount, Stat::NaNCount];
-
-/// The maximum length in bytes of a string or binary min or max value in a legacy zone table.
-const MAX_VARIABLE_LENGTH_STAT_BYTES: usize = 64;
 
 /// Accumulates the legacy stats of each zone.
 pub(crate) struct LegacyStatsAccumulator {
@@ -236,7 +234,7 @@ impl LegacyStatsArrayBuilder for PlainStatsBuilder {
     }
 }
 
-/// Writes a string or binary `max` or `min` value cut to [`MAX_VARIABLE_LENGTH_STAT_BYTES`].
+/// Writes a string or binary `max` or `min` value cut to [`default_bounded_stat_max_bytes`].
 ///
 /// A cut `max` is an upper bound and a cut `min` is a lower bound of the zone values. If no bound
 /// is possible, the value is null.
@@ -268,9 +266,9 @@ impl<T: ScalarTruncation> LegacyStatsArrayBuilder for TruncatedStatsBuilder<T> {
         let value = T::from_scalar(value)?;
 
         let bound = if self.stat == Stat::Max {
-            upper_bound(value, MAX_VARIABLE_LENGTH_STAT_BYTES, nullability)
+            upper_bound(value, default_bounded_stat_max_bytes().get(), nullability)
         } else {
-            lower_bound(value, MAX_VARIABLE_LENGTH_STAT_BYTES, nullability)
+            lower_bound(value, default_bounded_stat_max_bytes().get(), nullability)
         };
 
         match bound {

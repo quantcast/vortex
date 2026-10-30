@@ -110,11 +110,6 @@ impl LayoutStrategy for ZonedStrategy {
         mut eof: SequencePointer,
         session: &VortexSession,
     ) -> VortexResult<LayoutRef> {
-        let aggregate_fns = self
-            .options
-            .aggregate_fns
-            .clone()
-            .unwrap_or_else(|| default_zoned_aggregate_fns(stream.dtype(), session));
         // Fields of a nullable struct are written unmasked, so every aggregate over them sees
         // values the logical column does not contain: counts come out wrong and min/max come out
         // wider than the truth. Zone maps hold exact values only, so until the aggregates are
@@ -145,6 +140,12 @@ impl LayoutStrategy for ZonedStrategy {
                 .write_stream(ctx, segment_sink, stream, eof, session)
                 .await;
         }
+
+        let aggregate_fns = self
+            .options
+            .aggregate_fns
+            .clone()
+            .unwrap_or_else(|| default_zoned_aggregate_fns(stream.dtype(), session));
 
         let compute_session = session.clone();
 

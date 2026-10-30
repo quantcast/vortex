@@ -733,8 +733,6 @@ async fn serialization_context_accepts_supported_compressor_output() -> VortexRe
 /// zone maps use the legacy `vortex.stats` layout, and the file has only `core2025.10.0` layouts.
 #[tokio::test]
 async fn core_2025_10_0_writes_legacy_zone_maps() -> VortexResult<()> {
-    use crate::VortexSessionDefault;
-
     let session = VortexSession::default();
     session.enable_edition(CORE_2025_10_0)?;
 

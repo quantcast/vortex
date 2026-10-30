@@ -72,14 +72,7 @@ pub extern "system" fn Java_dev_vortex_jni_NativeSession_enableEdition(
         // SAFETY: pointer must have been created by `newSession` and not yet freed.
         let session = unsafe { session_ref(pointer) };
 
-        let edition = session
-            .editions()
-            .find_by_name(&name)
-            .ok_or_else(|| vortex_err!("Unknown Vortex edition: {name}"))?;
-
-        session
-            .enable_edition(edition.id)
-            .map_err(|error| vortex_err!("{error}"))?;
+        session.enable_edition_by_name(&name)?;
 
         Ok(())
     })

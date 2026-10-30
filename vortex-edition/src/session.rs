@@ -10,6 +10,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
+use vortex_error::vortex_err;
 use vortex_session::ArcSwapMap;
 use vortex_session::SessionExt;
 use vortex_session::SessionGuard;
@@ -363,6 +364,15 @@ pub trait EditionSessionExt: SessionExt {
         }
         self.enabled_editions().enable(edition);
         Ok(())
+    }
+
+    /// Enable a registered edition by its name, for example `core2025.10.0`.
+    fn enable_edition_by_name(&self, name: &str) -> VortexResult<()> {
+        let edition = self
+            .editions()
+            .find_by_name(name)
+            .ok_or_else(|| vortex_err!("Unknown Vortex edition: {name}"))?;
+        self.enable_edition(edition.id)
     }
 
     /// Resolve the ids of one [`ComponentKind`] across all enabled editions: what a writer may

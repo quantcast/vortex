@@ -17,6 +17,7 @@ use vortex::array::iter::ArrayIterator;
 use vortex::array::iter::ArrayIteratorAdapter;
 use vortex::array::iter::ArrayIteratorExt;
 use vortex::compressor::BtrBlocksCompressorBuilder;
+use vortex::editions::EditionSessionExt;
 use vortex::error::VortexError;
 use vortex::error::VortexResult;
 use vortex::file::WriteOptionsSessionExt;
@@ -364,7 +365,11 @@ impl PyVortexWriteOptions {
     /// >>> a = vx.array([0, 1, 2, 3, None, 4])
     /// >>> vx.io.VortexWriteOptions.default().with_edition("core2025.10.0").write(a, "a.vortex") # doctest: +SKIP
     pub fn with_edition(&self, edition: String) -> PyResult<Self> {
-        write_session(Some(&edition)).map_err(|error| PyValueError::new_err(error.to_string()))?;
+        if session().editions().find_by_name(&edition).is_none() {
+            return Err(PyValueError::new_err(format!(
+                "Unknown Vortex edition: {edition}"
+            )));
+        }
 
         Ok(Self {
             use_compact_encodings: self.use_compact_encodings,
