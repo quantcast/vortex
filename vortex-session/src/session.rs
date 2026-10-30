@@ -176,6 +176,15 @@ impl VortexSession {
         Self(SharedSessionVars::default())
     }
 
+    /// Returns a session holding this session's variables, whose later registrations are its own.
+    ///
+    /// The variables themselves are shared, so a change made inside one, such as an encoding
+    /// registered into a registry, is still seen through both. Register a new value of a variable
+    /// on the fork to make that variable independent.
+    pub fn fork(&self) -> Self {
+        Self(self.0.detach())
+    }
+
     /// Inserts `V::default()` if no variable of type `V` is present yet, copy-on-write.
     ///
     /// The default is constructed *before* the map is updated, so `V::default()` never runs under a
@@ -376,6 +385,19 @@ mod tests {
 
         // Registration mutates the shared backing store.
         assert_eq!(clone.get::<Counter>().count, 7);
+    }
+
+    #[test]
+    fn fork_registers_independently() {
+        let session = VortexSession::empty().with_some(Counter { count: 1 });
+        let fork = session.fork();
+
+        fork.register(Counter { count: 2 });
+        session.register(Other);
+
+        assert_eq!(session.get::<Counter>().count, 1);
+        assert_eq!(fork.get::<Counter>().count, 2);
+        assert!(fork.get_opt::<Other>().is_none());
     }
 
     #[test]
