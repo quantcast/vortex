@@ -65,6 +65,13 @@ impl<K, V, S> ArcSwapMap<K, V, S> {
         self.inner.load_full()
     }
 
+    /// Return a map holding the current snapshot, whose later writes are its own.
+    pub(crate) fn detach(&self) -> Self {
+        Self {
+            inner: Arc::new(ArcSwap::new(self.snapshot())),
+        }
+    }
+
     /// Read the current snapshot, passing it to `f`.
     ///
     /// Every lookup inside `f` observes the same snapshot, which matters when a
