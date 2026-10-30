@@ -259,6 +259,12 @@ val sparkJvmArgs =
 tasks.withType<Test>().configureEach {
     classpath += project(":vortex-jni").tasks.named("shadowJar").get().outputs.files
     jvmArgs(sparkJvmArgs)
+    // Benchmarks are skipped unless `-Dvortex.benchmark=true` reaches the test JVM.
+    System.getProperty("vortex.benchmark")?.let {
+        systemProperty("vortex.benchmark", it)
+        System.getProperty("vortex.benchmark.rows")?.let { rows -> systemProperty("vortex.benchmark.rows", rows) }
+        maxHeapSize = "3g"
+    }
 }
 
 tasks.register<JavaExec>("jmh") {
