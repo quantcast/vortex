@@ -23,6 +23,23 @@ final class NestedSchemaPruning {
     private NestedSchemaPruning() {}
 
     /**
+     * Returns each field of {@code requiredSchema} with its {@code tableSchema} type {@link #prune pruned} to the
+     * struct fields it requires. A field {@code tableSchema} does not carry keeps its required type.
+     */
+    public static StructType pruneFields(StructType requiredSchema, StructType tableSchema) {
+        StructField[] fields = requiredSchema.fields().clone();
+        for (int i = 0; i < fields.length; i++) {
+            StructField field = fields[i];
+            if (tableSchema.getFieldIndex(field.name()).isDefined()) {
+                DataType tableType = tableSchema.apply(field.name()).dataType();
+                fields[i] = new StructField(
+                        field.name(), prune(tableType, field.dataType()), field.nullable(), field.metadata());
+            }
+        }
+        return new StructType(fields);
+    }
+
+    /**
      * Returns {@code tableType} pruned to the struct fields present in {@code requiredType}, in table order, through
      * arrays too. Any other type that is not a struct on both sides keeps its table type.
      */

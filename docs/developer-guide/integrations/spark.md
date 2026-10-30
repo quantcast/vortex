@@ -41,8 +41,9 @@ Spark's required schema becomes the Vortex scan projection. On the V2 path, stru
 pruned to the nested fields the query uses, at any depth: the projection is a `select` when only
 leaf fields are pruned, and a `pack` masked by the source struct's validity when a child struct is
 pruned too. An array of structs is read through a `list_transform` whose body prunes the elements
-the same way, and fields inside maps are read whole. Spark's V1 schema pruning rule applies only to
-Parquet and ORC, so the V1 fallback reads whole top-level columns. Convertible V1
+the same way, and fields inside maps are read whole. Spark prunes nested fields of V1 relations only
+for Parquet and ORC, so `VortexSchemaPruning`, registered by `VortexSparkSessionExtensions`,
+applies the same rewrite to V1 Vortex relations. Convertible V1
 filters become Vortex expressions; filters the converter rejects remain Spark residuals.
 
 The scan accepts `COUNT(*)` aggregation when there are no data filters and grouping uses only
