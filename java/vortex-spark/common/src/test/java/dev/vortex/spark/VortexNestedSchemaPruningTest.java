@@ -4,6 +4,7 @@
 package dev.vortex.spark;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -49,6 +50,7 @@ public final class VortexNestedSchemaPruningTest {
                 .config("spark.sql.shuffle.partitions", "2")
                 .config("spark.sql.adaptive.enabled", "false")
                 .config("spark.sql.optimizer.nestedSchemaPruning.enabled", "true")
+                .config("spark.sql.maxMetadataStringLength", "1000")
                 .config("spark.ui.enabled", "false")
                 .getOrCreate();
 
@@ -216,6 +218,59 @@ public final class VortexNestedSchemaPruningTest {
                         Arrays.asList(2L, 202L, false),
                         Arrays.asList(3L, null, true)),
                 rowsOf(rows));
+    }
+
+    @Test
+    @DisplayName("Null structs and null fields of a pruned struct read alone stay null")
+    public void nullableStructFieldReadAlone() {
+        assertEquals(Arrays.asList(200L, null, 202L, null, null), valuesOf(table, functions.col("n.b")));
+        assertEquals(
+                List.of(false, true, false, true, false),
+                valuesOf(table, functions.col("n").isNull()));
+    }
+
+    @Test
+    @DisplayName("Nulls at each level of a struct inside a struct read alone survive pruning")
+    public void nullableStructInStructFieldReadAlone() {
+        assertEquals(
+                Arrays.asList(300L, null, null, 303L, 304L), valuesOf(table, functions.col("nullable_outer.inner.c")));
+        assertEquals(
+                List.of(false, true, false, false, false),
+                valuesOf(table, functions.col("nullable_outer").isNull()));
+        assertEquals(
+                List.of(false, true, true, false, false),
+                valuesOf(table, functions.col("nullable_outer.inner").isNull()));
+    }
+
+    @Test
+    @DisplayName("Struct columns are read pruned to the required fields, with columns and fields in table order")
+    public void readSchemaPrunesStructFields() {
+        assertReadSchema(
+                "struct<id:bigint,s:struct<a:bigint,c:bigint>>",
+                table.select(functions.col("s.c"), functions.col("id"), functions.col("s.a")));
+    }
+
+    @Test
+    @DisplayName("Structs inside structs are read pruned at every level")
+    public void readSchemaPrunesNestedStructs() {
+        assertReadSchema("struct<outer:struct<inner:struct<b:bigint>>>", table.select(functions.col("outer.inner.b")));
+    }
+
+    @Test
+    @DisplayName("Arrays and maps of structs are read with their full table type")
+    public void readSchemaKeepsArrayAndMapTypes() {
+        assertReadSchema(
+                "struct<arr:array<struct<a:bigint,b:bigint,c:bigint>>,m:map<string,struct<a:bigint,b:bigint,c:bigint>>>",
+                table.select(
+                        functions.element_at(functions.col("arr.c"), 1),
+                        functions.col("m").getItem("k").getField("c")));
+    }
+
+    private static void assertReadSchema(String expected, Dataset<Row> query) {
+        String plan = query.queryExecution().executedPlan().toString();
+        int start = plan.indexOf("ReadSchema: ");
+        assertTrue(start >= 0, plan);
+        assertEquals(expected, plan.substring(start + "ReadSchema: ".length()).split("\\s", 2)[0], plan);
     }
 
     private String write(Dataset<Row> rows, String name) {
