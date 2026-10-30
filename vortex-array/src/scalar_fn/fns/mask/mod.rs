@@ -154,6 +154,10 @@ impl ScalarFnVTable for Mask {
     fn is_strict(&self, _options: &Self::Options) -> bool {
         true
     }
+
+    fn is_infallible(&self, _options: &Self::Options) -> bool {
+        true
+    }
 }
 
 /// Try to handle masking when at least one of the input or mask is a constant array.
