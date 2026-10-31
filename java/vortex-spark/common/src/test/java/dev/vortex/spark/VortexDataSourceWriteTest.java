@@ -632,7 +632,19 @@ public final class VortexDataSourceWriteTest {
                         if(id % 15 = 0, null, map(
                             'present', named_struct('v', cast(id as double)),
                             'null-field', named_struct('v', cast(null as double)),
-                            'null-value', cast(null as struct<v: double>))) as m""");
+                            'null-value', cast(null as struct<v: double>))) as m""",
+                        // Null in runs of 300, so at batch size 300 some batches are all null, some all set,
+                        // and some switch part-way.
+                        """
+                        if(id % 600 < 300, null, named_struct(
+                            'dec', if(id % 4 = 0, null, cast(id / 3 as decimal(38, 6))),
+                            'tags', if(id % 5 = 0, null, array(concat('r', id), cast(null as string))),
+                            'items', array(
+                                named_struct('k', concat('i', id), 'v', if(id % 2 = 0, null, id)),
+                                cast(null as struct<k: string, v: bigint>)),
+                            'attrs', if(id % 7 = 0, null, map(
+                                'a', cast(id % 1000 as decimal(9, 2)), 'b', cast(null as decimal(9, 2)))),
+                            'inner', if(id % 3 = 0, null, named_struct('s', concat('n', id), 'l', array(id))))) as runs""");
 
         for (int batchSize : new int[] {1, 300, 65536}) {
             Path outputPath = tempDir.resolve("nulls_batch_" + batchSize);

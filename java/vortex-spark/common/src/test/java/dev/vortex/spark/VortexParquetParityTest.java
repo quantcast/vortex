@@ -42,7 +42,10 @@ public final class VortexParquetParityTest {
             + " CASE WHEN id % 8 = 0 THEN NULL"
             + "      ELSE array(named_struct('f', CASE WHEN id % 3 = 1 THEN NULL ELSE id END), NULL) END AS arrs,"
             + " CASE WHEN id % 9 = 0 THEN NULL"
-            + "      ELSE map('x', CASE WHEN id % 2 = 1 THEN NULL ELSE array(CAST(id AS STRING), NULL) END) END AS ma"
+            + "      ELSE map('x', CASE WHEN id % 2 = 1 THEN NULL ELSE array(CAST(id AS STRING), NULL) END) END AS ma,"
+            + " CASE WHEN id % 10 < 4 THEN NULL ELSE named_struct('d', CAST(id / 7 AS DECIMAL(20, 4)),"
+            + "   'l', CASE WHEN id % 3 = 0 THEN NULL ELSE array(named_struct('x', CAST(id AS STRING)), NULL) END,"
+            + "   'm', map('k', CASE WHEN id % 2 = 0 THEN NULL ELSE CAST(id AS DECIMAL(20, 4)) END)) END AS t"
             + " FROM range(40)";
 
     private static final String FILTERABLE = "SELECT id,"
@@ -140,7 +143,8 @@ public final class VortexParquetParityTest {
     @Test
     void nestedColumnsWithNullsAtEveryLevelRoundTripLikeParquet() {
         assertMatchesParquet("nested", (format, root) -> {
-            spark.sql(NESTED).write().format(format).save(root);
+            // Small batches, so null structs straddle batch boundaries.
+            spark.sql(NESTED).write().format(format).option("batch.size", "3").save(root);
             return read(format, root);
         });
     }

@@ -55,12 +55,7 @@ import org.apache.spark.unsafe.types.UTF8String;
  * per value.
  */
 abstract class ArrowFieldWriter {
-    final FieldVector vector;
     int count;
-
-    private ArrowFieldWriter(FieldVector vector) {
-        this.vector = vector;
-    }
 
     static ArrowFieldWriter create(FieldVector vector, DataType dataType) {
         if (dataType instanceof BooleanType) {
@@ -113,18 +108,18 @@ abstract class ArrowFieldWriter {
         }
     }
 
-    /** Appends the value at {@code ordinal} of {@code row}, or a null, to the vector. */
+    /**
+     * Appends the value at {@code ordinal} of {@code row}, or a null, to the vector.
+     *
+     * <p>A null slot is left as allocated, so a null struct costs nothing per leaf below it. That relies on the vectors
+     * being freshly allocated for each batch: Arrow zeroes their validity and offsets, and fills the offsets of skipped
+     * slots at the next value or at {@code setValueCount}.
+     */
     final void write(SpecializedGetters row, int ordinal) {
-        if (row.isNullAt(ordinal)) {
-            setNull();
-        } else {
+        if (!row.isNullAt(ordinal)) {
             setValue(row, ordinal);
         }
         count++;
-    }
-
-    void setNull() {
-        vector.setNull(count);
     }
 
     abstract void setValue(SpecializedGetters row, int ordinal);
@@ -138,7 +133,6 @@ abstract class ArrowFieldWriter {
         private final BitVector bits;
 
         BooleanWriter(BitVector vector) {
-            super(vector);
             this.bits = vector;
         }
 
@@ -152,7 +146,6 @@ abstract class ArrowFieldWriter {
         private final TinyIntVector bytes;
 
         ByteWriter(TinyIntVector vector) {
-            super(vector);
             this.bytes = vector;
         }
 
@@ -166,7 +159,6 @@ abstract class ArrowFieldWriter {
         private final SmallIntVector shorts;
 
         ShortWriter(SmallIntVector vector) {
-            super(vector);
             this.shorts = vector;
         }
 
@@ -180,7 +172,6 @@ abstract class ArrowFieldWriter {
         private final IntVector ints;
 
         IntegerWriter(IntVector vector) {
-            super(vector);
             this.ints = vector;
         }
 
@@ -194,7 +185,6 @@ abstract class ArrowFieldWriter {
         private final BigIntVector longs;
 
         LongWriter(BigIntVector vector) {
-            super(vector);
             this.longs = vector;
         }
 
@@ -208,7 +198,6 @@ abstract class ArrowFieldWriter {
         private final Float4Vector floats;
 
         FloatWriter(Float4Vector vector) {
-            super(vector);
             this.floats = vector;
         }
 
@@ -222,7 +211,6 @@ abstract class ArrowFieldWriter {
         private final Float8Vector doubles;
 
         DoubleWriter(Float8Vector vector) {
-            super(vector);
             this.doubles = vector;
         }
 
@@ -236,7 +224,6 @@ abstract class ArrowFieldWriter {
         private final VarCharVector strings;
 
         StringWriter(VarCharVector vector) {
-            super(vector);
             this.strings = vector;
         }
 
@@ -256,7 +243,6 @@ abstract class ArrowFieldWriter {
         private final VarBinaryVector binaries;
 
         BinaryWriter(VarBinaryVector vector) {
-            super(vector);
             this.binaries = vector;
         }
 
@@ -270,7 +256,6 @@ abstract class ArrowFieldWriter {
         private final DateDayVector days;
 
         DateWriter(DateDayVector vector) {
-            super(vector);
             this.days = vector;
         }
 
@@ -284,7 +269,6 @@ abstract class ArrowFieldWriter {
         private final TimeStampMicroTZVector micros;
 
         TimestampWriter(TimeStampMicroTZVector vector) {
-            super(vector);
             this.micros = vector;
         }
 
@@ -298,7 +282,6 @@ abstract class ArrowFieldWriter {
         private final TimeStampMicroVector micros;
 
         TimestampNTZWriter(TimeStampMicroVector vector) {
-            super(vector);
             this.micros = vector;
         }
 
@@ -314,7 +297,6 @@ abstract class ArrowFieldWriter {
         private final int scale;
 
         DecimalWriter(DecimalVector vector, int precision, int scale) {
-            super(vector);
             this.decimals = vector;
             this.precision = precision;
             this.scale = scale;
@@ -336,19 +318,8 @@ abstract class ArrowFieldWriter {
         private final ArrowFieldWriter[] children;
 
         StructWriter(StructVector vector, ArrowFieldWriter[] children) {
-            super(vector);
             this.struct = vector;
             this.children = children;
-        }
-
-        @Override
-        void setNull() {
-            // Children stay aligned with the parent: every child gets a null slot too.
-            for (ArrowFieldWriter child : children) {
-                child.setNull();
-                child.count++;
-            }
-            struct.setNull(count);
         }
 
         @Override
@@ -356,6 +327,8 @@ abstract class ArrowFieldWriter {
             InternalRow value = row.getStruct(ordinal, children.length);
             struct.setIndexDefined(count);
             for (int i = 0; i < children.length; i++) {
+                // Children skip the slots of null structs, so catch them up to this one.
+                children[i].count = count;
                 children[i].write(value, i);
             }
         }
@@ -374,7 +347,6 @@ abstract class ArrowFieldWriter {
         private final ArrowFieldWriter elements;
 
         ArrayWriter(ListVector vector, ArrowFieldWriter elements) {
-            super(vector);
             this.list = vector;
             this.elements = elements;
         }
@@ -404,7 +376,6 @@ abstract class ArrowFieldWriter {
         private final ArrowFieldWriter values;
 
         MapWriter(MapVector vector, StructVector entries, ArrowFieldWriter keys, ArrowFieldWriter values) {
-            super(vector);
             this.map = vector;
             this.entries = entries;
             this.keys = keys;

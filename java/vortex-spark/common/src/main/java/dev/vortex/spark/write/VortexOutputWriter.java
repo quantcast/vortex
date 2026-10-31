@@ -154,6 +154,7 @@ public final class VortexOutputWriter extends OutputWriter {
             if (batchRowCount == 0) {
                 // Fresh buffers for every batch: the native side keeps its own reference to each exported
                 // buffer and releases it from its own thread once it is done with it, so they cannot be reused.
+                // ArrowFieldWriter also needs them zeroed, since it leaves null slots untouched.
                 vectorSchemaRoot.allocateNew();
             }
             for (int i = 0; i < fieldWriters.length; i++) {
