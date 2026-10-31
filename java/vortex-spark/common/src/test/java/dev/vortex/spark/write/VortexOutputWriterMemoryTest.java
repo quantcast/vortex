@@ -61,7 +61,7 @@ final class VortexOutputWriterMemoryTest {
                                 .add("tags", DataTypes.createArrayType(DataTypes.StringType), true),
                         true);
         int batchSize = 8192;
-        int batches = 64;
+        int batches = 128;
         String path = tempDir.resolve("part-00001.vortex").toUri().toString();
         VortexOutputWriter writer = new VortexOutputWriter(
                 path,
