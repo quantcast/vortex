@@ -41,7 +41,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 final class VortexOutputWriterTest {
-    private static final int DEFAULT = 2048;
+    private static final int DEFAULT = 8192;
 
     @TempDir
     Path tempDir;

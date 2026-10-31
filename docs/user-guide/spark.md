@@ -135,7 +135,7 @@ derive the column and partition by it, for example `withColumn("year", year(col(
 
 | Option                    | Default | Description |
 |---------------------------|---------|-------------|
-| `batch.size`              | `2048`  | Rows buffered per write batch; range 1–65536. |
+| `batch.size`              | `8192`  | Rows buffered per write batch; range 1–65536. Each string or binary field of a batch must fit in 2 GiB, so lower it for values over about 256 KB. |
 | `vortex.write.batch.size` | —       | Rows buffered per write batch for Vortex alone, overriding `batch.size`. |
 | `vortex.listLayout`       | `false` | Store array columns in the unstable list layout; see below. |
 
