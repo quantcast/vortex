@@ -6,9 +6,6 @@ package dev.vortex.spark.write;
 import dev.vortex.api.Session;
 import dev.vortex.api.VortexWriter;
 import dev.vortex.io.NativeWritable;
-import dev.vortex.relocated.org.apache.arrow.c.ArrowArray;
-import dev.vortex.relocated.org.apache.arrow.c.ArrowSchema;
-import dev.vortex.relocated.org.apache.arrow.c.Data;
 import dev.vortex.relocated.org.apache.arrow.memory.BufferAllocator;
 import dev.vortex.relocated.org.apache.arrow.memory.RootAllocator;
 import dev.vortex.relocated.org.apache.arrow.vector.FieldVector;
@@ -28,8 +25,8 @@ import org.slf4j.LoggerFactory;
 /**
  * Writes Spark InternalRow data to a Vortex file.
  *
- * <p>Each row is appended straight into a batch of Arrow vectors as it arrives; a full batch is exported through the
- * Arrow C Data Interface and handed to the Vortex writer.
+ * <p>Each row is appended straight into a batch of Arrow vectors as it arrives; a full batch is handed to the Vortex
+ * writer, which retains each column's buffers separately so it can free them one by one.
  */
 public final class VortexOutputWriter extends OutputWriter {
     private static final Logger logger = LoggerFactory.getLogger(VortexOutputWriter.class);
@@ -60,7 +57,6 @@ public final class VortexOutputWriter extends OutputWriter {
     private VortexWriter vortexWriter;
     private BufferAllocator allocator;
     private VectorSchemaRoot vectorSchemaRoot;
-    private ArrowSchema exportedSchema;
     private ArrowFieldWriter[] fieldWriters;
     private int batchRowCount = 0;
     private Exception writeFailure;
@@ -97,10 +93,6 @@ public final class VortexOutputWriter extends OutputWriter {
             for (int i = 0; i < fields.length; i++) {
                 fieldWriters[i] = ArrowFieldWriter.create(vectorSchemaRoot.getVector(i), fields[i].dataType());
             }
-            // The native writer only borrows the schema, so one export serves every batch.
-            this.exportedSchema = ArrowSchema.allocateNew(allocator);
-            Data.exportSchema(allocator, arrowSchema, null, exportedSchema);
-
             this.session = VortexSparkSession.get(options);
             this.vortexWriter = VortexWriter.builder(session, writable, arrowSchema, allocator)
                     .listLayout(listLayout(options))
@@ -160,8 +152,8 @@ public final class VortexOutputWriter extends OutputWriter {
         }
         try {
             if (batchRowCount == 0) {
-                // Fresh buffers for every batch: the native side imports the exported buffers zero-copy and
-                // releases them from its own thread once a row block is complete, so they cannot be reused.
+                // Fresh buffers for every batch: the native side keeps its own reference to each exported
+                // buffer and releases it from its own thread once it is done with it, so they cannot be reused.
                 vectorSchemaRoot.allocateNew();
             }
             for (int i = 0; i < fieldWriters.length; i++) {
@@ -189,17 +181,7 @@ public final class VortexOutputWriter extends OutputWriter {
         }
         vectorSchemaRoot.setRowCount(batchRowCount);
 
-        try (ArrowArray arrowArray = ArrowArray.allocateNew(allocator)) {
-            try {
-                Data.exportVectorSchemaRoot(allocator, vectorSchemaRoot, null, arrowArray);
-                vortexWriter.writeBatch(arrowArray.memoryAddress(), exportedSchema.memoryAddress());
-            } finally {
-                // The native writer takes the batch over; one it never reached is still ours to release.
-                if (arrowArray.snapshot().release != 0) {
-                    arrowArray.release();
-                }
-            }
-        }
+        vortexWriter.writeBatch(vectorSchemaRoot, allocator);
 
         vectorSchemaRoot.clear();
         for (ArrowFieldWriter writer : fieldWriters) {
@@ -283,15 +265,6 @@ public final class VortexOutputWriter extends OutputWriter {
             } finally {
                 vectorSchemaRoot = null;
             }
-        }
-        if (exportedSchema != null) {
-            // close() frees only the struct; the children the export allocated are freed by the release
-            // callback, which the native side never calls because it only borrows the schema.
-            if (exportedSchema.snapshot().release != 0) {
-                exportedSchema.release();
-            }
-            exportedSchema.close();
-            exportedSchema = null;
         }
         if (allocator != null) {
             long leftover = allocator.getAllocatedMemory();
