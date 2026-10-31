@@ -43,7 +43,7 @@ public final class VortexOutputWriter extends OutputWriter {
      */
     public static final String LIST_LAYOUT_OPTION = "vortex.listLayout";
 
-    private static final int DEFAULT_BATCH_SIZE = 2048;
+    private static final int DEFAULT_BATCH_SIZE = 8192;
     private static final int MIN_BATCH_SIZE = 1;
     private static final int MAX_BATCH_SIZE = 65536; // 64K rows max per batch
     private static final int INITIAL_VECTOR_CAPACITY = 64;
