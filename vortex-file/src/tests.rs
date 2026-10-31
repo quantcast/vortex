@@ -19,6 +19,7 @@ use rstest::rstest;
 use tempfile::tempdir;
 use vortex_array::ArrayRef;
 use vortex_array::EmptyMetadata;
+use vortex_array::ExecutionCtx;
 use vortex_array::IntoArray;
 use vortex_array::VortexSessionExecute;
 use vortex_array::aggregate_fn::AggregateFnRef;
@@ -3573,5 +3574,108 @@ async fn supplied_lazy_dtype_is_charged_without_parsing_it() -> VortexResult<()>
         size >= 1 << 20,
         "a footer keeping a 1 MiB field name alive weighs {size} bytes"
     );
+    Ok(())
+}
+#[derive(Clone, Copy, Debug)]
+enum ListWriteStrategy {
+    Default,
+    SmallRowBlocks,
+    ListLayoutOnly,
+}
+
+/// Lists `[0, 1, 2]`, `[]`, `null` (holding `[3, 4, 5]`), `[6, 7]`, `[8, 9]`.
+fn sliceable_list(ctx: &mut ExecutionCtx) -> VortexResult<ArrayRef> {
+    Ok(ListArray::try_new(
+        PrimitiveArray::from_iter(0..10i32).into_array(),
+        buffer![0u32, 3, 3, 6, 8, 10].into_array(),
+        Validity::Array(BoolArray::from_iter([true, true, false, true, true]).into_array()),
+        ctx,
+    )?
+    .into_array())
+}
+
+fn sliceable_nested_list(ctx: &mut ExecutionCtx) -> VortexResult<ArrayRef> {
+    let inner = ListArray::try_new(
+        PrimitiveArray::from_iter(0..12i32).into_array(),
+        buffer![0u32, 2, 2, 5, 7, 9, 12, 12, 12, 12].into_array(),
+        Validity::NonNullable,
+        ctx,
+    )?
+    .into_array();
+    Ok(ListArray::try_new(
+        inner,
+        buffer![0u32, 2, 3, 3, 6, 9].into_array(),
+        Validity::Array(BoolArray::from_iter([true, false, true, true, true]).into_array()),
+        ctx,
+    )?
+    .into_array())
+}
+
+fn sliceable_list_of_struct(ctx: &mut ExecutionCtx) -> VortexResult<ArrayRef> {
+    let elements = StructArray::from_fields(&[
+        ("a", PrimitiveArray::from_iter(0..10i32).into_array()),
+        ("b", PrimitiveArray::from_iter(10..20i64).into_array()),
+    ])?
+    .into_array();
+    Ok(ListArray::try_new(
+        elements,
+        buffer![0u32, 3, 3, 6, 8, 10].into_array(),
+        Validity::NonNullable,
+        ctx,
+    )?
+    .into_array())
+}
+
+/// Writes a table whose list column arrives as slices of one list, which share its whole
+/// `elements`. With small row blocks the writer's own repartitioning slices the lists too.
+#[rstest]
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn sliced_list_column_roundtrip(
+    #[values(sliceable_list, sliceable_nested_list, sliceable_list_of_struct)]
+    make_list: fn(&mut ExecutionCtx) -> VortexResult<ArrayRef>,
+    #[values(
+        ListWriteStrategy::Default,
+        ListWriteStrategy::SmallRowBlocks,
+        ListWriteStrategy::ListLayoutOnly
+    )]
+    strategy: ListWriteStrategy,
+) -> VortexResult<()> {
+    let mut ctx = SESSION.create_execution_ctx();
+    let list = make_list(&mut ctx)?;
+    let chunks = [0..1, 1..3, 3..list.len()]
+        .into_iter()
+        .map(|range| Ok(StructArray::from_fields(&[("lists", list.slice(range)?)])?.into_array()))
+        .collect::<VortexResult<Vec<_>>>()?;
+    let expected = StructArray::from_fields(&[("lists", list)])?.into_array();
+    let chunked = ChunkedArray::try_new(chunks, expected.dtype().clone())?.into_array();
+
+    let options = SESSION.write_options();
+    let options = match strategy {
+        ListWriteStrategy::Default => options,
+        ListWriteStrategy::SmallRowBlocks => options.with_strategy(
+            crate::strategy::WriteStrategyBuilder::from_session(&SESSION)
+                .with_row_block_size(2)
+                .with_data_block_target_bytes(None)
+                .build(),
+        ),
+        ListWriteStrategy::ListLayoutOnly => {
+            let chunked: Arc<dyn LayoutStrategy> =
+                Arc::new(ChunkedLayoutStrategy::new(FlatLayoutStrategy::default()));
+            options.with_strategy(Arc::new(
+                TableStrategy::new(Arc::clone(&chunked), chunked).with_list_layout(),
+            ))
+        }
+    };
+    let mut buf = ByteBufferMut::empty();
+    options.write(&mut buf, chunked.to_array_stream()).await?;
+    let result = SESSION
+        .open_options()
+        .open_buffer(buf)?
+        .scan()?
+        .into_array_stream()?
+        .read_all()
+        .await?;
+    assert_arrays_eq!(result, expected, &mut ctx);
     Ok(())
 }
