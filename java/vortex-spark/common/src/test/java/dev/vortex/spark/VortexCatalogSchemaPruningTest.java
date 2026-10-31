@@ -110,8 +110,9 @@ public final class VortexCatalogSchemaPruningTest {
     @Test
     @DisplayName("A field of the structs in an array is read without their other fields in the list layout")
     public void arrayElementFieldReadsOnlyThatField() {
-        long whole = bytesRead("SELECT id, arr FROM located");
-        long field = bytesRead("SELECT id, arr.a FROM located");
+        // Without `id`: reading it can coalesce with the array's offsets, pulling in all of `s` between them.
+        long whole = bytesRead("SELECT arr FROM located");
+        long field = bytesRead("SELECT arr.a FROM located");
         System.out.printf(Locale.ROOT, "bytes read: located arr.a: %d; whole arr: %d%n", field, whole);
         assertTrue(field < whole / 10, "arr.a read " + field + " bytes; arr read " + whole);
         assertReadSchema("struct<id:bigint,arr:array<struct<a:bigint>>>", "SELECT id, arr.a FROM located");
