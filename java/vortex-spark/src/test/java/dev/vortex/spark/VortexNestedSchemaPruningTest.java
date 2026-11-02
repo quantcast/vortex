@@ -22,6 +22,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Tests that reading one field of a nested column returns that field.
@@ -37,9 +39,11 @@ public final class VortexNestedSchemaPruningTest {
 
     private SparkSession spark;
     private Dataset<Row> table;
+    private Path tempDir;
 
     @BeforeAll
     public void setUp(@TempDir Path tempDir) {
+        this.tempDir = tempDir;
         spark = SparkSession.builder()
                 .appName("VortexNestedSchemaPruningTest")
                 .master("local[2]")
@@ -181,6 +185,48 @@ public final class VortexNestedSchemaPruningTest {
                         row.getStruct(0).getLong(1),
                         row.getStruct(0).getLong(2)));
         assertEquals(103L, row.getLong(1));
+    }
+
+    @ParameterizedTest(name = "nullable file inferred: {0}")
+    @ValueSource(booleans = {true, false})
+    @DisplayName("A pruned nested struct keeps its nulls across files that differ only in nullability")
+    public void filesDifferingInNullability(boolean nullableInferred) {
+        Column inner = functions.struct(
+                functions.col("id").plus(100).alias("a"),
+                functions.col("id").plus(200).alias("b"));
+        Column o = functions.struct(functions.lit("x").alias("p"), inner.alias("inner"));
+        String noNulls =
+                write(spark.range(0, 2).select(functions.col("id"), o.alias("o")), "no-nulls-" + nullableInferred);
+        String withNull = write(
+                spark.range(2, 4)
+                        .select(
+                                functions.col("id"),
+                                nullWhen(functions.col("id").equalTo(3), o).alias("o")),
+                "with-null-" + nullableInferred);
+        // Schema inference reads the last path.
+        String[] paths = nullableInferred ? new String[] {noNulls, withNull} : new String[] {withNull, noNulls};
+        Dataset<Row> rows = spark.read()
+                .format("vortex")
+                .load(paths)
+                .select(
+                        functions.col("id"),
+                        functions.col("o.inner.b"),
+                        functions.col("o").isNull());
+
+        assertEquals("struct<id:bigint,o:struct<inner:struct<b:bigint>>>", readSchema(rows));
+        assertEquals(
+                Arrays.asList(
+                        Arrays.asList(0L, 200L, false),
+                        Arrays.asList(1L, 201L, false),
+                        Arrays.asList(2L, 202L, false),
+                        Arrays.asList(3L, null, true)),
+                rowsOf(rows));
+    }
+
+    private String write(Dataset<Row> rows, String name) {
+        String path = tempDir.resolve(name).toUri().toString();
+        rows.coalesce(1).write().format("vortex").mode(SaveMode.Overwrite).save(path);
+        return path;
     }
 
     private static Column nullWhen(Column condition, Column value) {

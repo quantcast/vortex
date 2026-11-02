@@ -19,6 +19,8 @@ import dev.vortex.api.Session;
 import dev.vortex.api.VortexWriteSummary;
 import dev.vortex.api.VortexWriter;
 import dev.vortex.arrow.ArrowAllocation;
+import dev.vortex.io.NativeWritable;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -50,6 +52,7 @@ import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 public final class JNIWriterTest {
@@ -169,6 +172,58 @@ public final class JNIWriterTest {
                         Field.notNullable("name", new ArrowType.Utf8View()),
                         Field.notNullable("age", new ArrowType.Int(32, true)))),
                 source.arrowSchema(allocator));
+    }
+
+    @ParameterizedTest(name = "stream={0}, nested={1}, rejected={2}")
+    @CsvSource({
+        "false, false, false",
+        "false, true, false",
+        "true, false, false",
+        "true, true, false",
+        "false, false, true",
+        "false, true, true",
+        "true, false, true",
+        "true, true, true"
+    })
+    public void testCreateWriterReleasesSchemaExport(boolean stream, boolean nested, boolean rejected)
+            throws IOException {
+        String writePath = tempDir.resolve("test_schema_release.vortex").toUri().toString();
+        Session session = Session.create();
+        Schema schema = nested ? mapSchema() : personSchema();
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        NativeWritable writable = new NativeWritable() {
+            @Override
+            public void write(byte[] buffer, int offset, int length) {
+                output.write(buffer, offset, length);
+            }
+
+            @Override
+            public void flush() {}
+
+            @Override
+            public void close() {}
+        };
+        try (BufferAllocator allocator =
+                ArrowAllocation.rootAllocator().newChildAllocator("schema-release", 0, Long.MAX_VALUE)) {
+            VortexWriter.Builder builder = stream
+                    ? VortexWriter.builder(session, writable, schema, allocator)
+                    : VortexWriter.builder(session, writePath, schema, allocator);
+            if (rejected) {
+                // Native validation rejects this after the schema has been exported, for both destinations.
+                builder.putMetadata("k".repeat(1024), new byte[] {1});
+                IOException failure = assertThrows(IOException.class, builder::build);
+                assertNotNull(failure.getCause());
+                assertTrue(failure.getCause().getMessage().contains("metadata key"));
+            } else {
+                try (VortexWriter writer = builder.build()) {
+                    assertEquals(0, allocator.getAllocatedMemory());
+                }
+                if (stream) {
+                    assertTrue(output.size() > 0, "stream writer should have finalized a file");
+                }
+            }
+            assertEquals(0, allocator.getAllocatedMemory());
+        }
     }
 
     @Test

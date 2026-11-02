@@ -8,6 +8,7 @@ import dev.vortex.VortexCleaner;
 import dev.vortex.io.NativeWritable;
 import dev.vortex.jni.NativeBuffer;
 import dev.vortex.jni.NativeWriter;
+import java.io.Closeable;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
@@ -152,8 +153,14 @@ public final class VortexWriter implements AutoCloseable {
          *     metadata
          */
         public VortexWriter build() throws IOException {
-            ArrowSchema ffi = ArrowSchema.allocateNew(allocator);
-            try {
+            // Native code borrows the schema. Release its children before closing the struct;
+            // separate resources ensure both cleanups run and preserve the original failure.
+            try (ArrowSchema ffi = ArrowSchema.allocateNew(allocator);
+                    Closeable releaseSchema = () -> {
+                        if (ffi.snapshot().release != 0) {
+                            ffi.release();
+                        }
+                    }) {
                 Data.exportSchema(allocator, arrowSchema, null, ffi);
                 final long pointer;
                 try {
@@ -170,9 +177,6 @@ public final class VortexWriter implements AutoCloseable {
                     throw new IOException("failed to create writer for " + destination() + " (ptr=" + pointer + ")");
                 }
                 return new VortexWriter(pointer, arrowSchema);
-            } finally {
-                ffi.release();
-                ffi.close();
             }
         }
 
