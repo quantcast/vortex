@@ -55,6 +55,10 @@ public final class VortexKryoWriteTest {
     public void tearDown() {
         if (spark != null) {
             spark.stop();
+            // Spark clears these from a listener after stop, so a test class that starts right away could reuse
+            // the stopped session.
+            SparkSession.clearActiveSession();
+            SparkSession.clearDefaultSession();
         }
     }
 
