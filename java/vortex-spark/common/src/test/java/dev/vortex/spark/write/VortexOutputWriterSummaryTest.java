@@ -57,13 +57,11 @@ final class VortexOutputWriterSummaryTest {
             assertEquals(0, summary.peakBufferedBytes());
         } else {
             assertTrue(summary.peakBatchArrowBytes() >= Long.BYTES);
-            assertTrue(summary.peakBufferedBytes() >= 0);
         }
         writer.close();
-        assertSame(summary, writer.summary());
-        assertEquals(1, sink.closes);
         assertThrows(IllegalStateException.class, () -> writer.write(new GenericInternalRow(new Object[] {0L})));
         assertSame(summary, writer.summary());
+        assertEquals(1, sink.closes);
     }
 
     @Test
@@ -96,9 +94,7 @@ final class VortexOutputWriterSummaryTest {
         } finally {
             writer.close();
         }
-        assertThrows(IllegalStateException.class, writer::summary);
-        writer.close();
-        assertThrows(IllegalStateException.class, writer::summary);
+        assertNoSummaryEvenAfterReclose(writer);
     }
 
     @ParameterizedTest
@@ -110,10 +106,8 @@ final class VortexOutputWriterSummaryTest {
         writer.write(new GenericInternalRow(new Object[] {1L}));
 
         assertThrows(UncheckedIOException.class, writer::close);
-        assertThrows(IllegalStateException.class, writer::summary);
-        writer.close();
+        assertNoSummaryEvenAfterReclose(writer);
         assertEquals(1, sink.closes);
-        assertThrows(IllegalStateException.class, writer::summary);
     }
 
     @Test
@@ -124,7 +118,7 @@ final class VortexOutputWriterSummaryTest {
             output.writeObject(summary);
         }
         try (ObjectInputStream input = new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
-            assertSummaryEquals(summary, (VortexOutputWriterSummary) input.readObject());
+            assertEquals(summary, input.readObject());
         }
     }
 
@@ -135,20 +129,17 @@ final class VortexOutputWriterSummaryTest {
         SparkConf conf = new SparkConf(false).set("spark.kryo.unsafe", Boolean.toString(unsafe));
         var serializer = new KryoSerializer(conf).newInstance();
         var tag = ClassTag$.MODULE$.<VortexOutputWriterSummary>apply(VortexOutputWriterSummary.class);
-        VortexOutputWriterSummary copy = serializer.deserialize(serializer.serialize(summary, tag), tag);
-        assertSummaryEquals(summary, copy);
+        assertEquals(summary, serializer.deserialize(serializer.serialize(summary, tag), tag));
+    }
+
+    private static void assertNoSummaryEvenAfterReclose(VortexOutputWriter writer) {
+        assertThrows(IllegalStateException.class, writer::summary);
+        writer.close();
+        assertThrows(IllegalStateException.class, writer::summary);
     }
 
     private static VortexOutputWriterSummary sampleSummary() {
         return new VortexOutputWriterSummary(1234, 42, 3, 4096, 8192);
-    }
-
-    private static void assertSummaryEquals(VortexOutputWriterSummary expected, VortexOutputWriterSummary actual) {
-        assertEquals(expected.fileSize(), actual.fileSize());
-        assertEquals(expected.rowCount(), actual.rowCount());
-        assertEquals(expected.batchCount(), actual.batchCount());
-        assertEquals(expected.peakBatchArrowBytes(), actual.peakBatchArrowBytes());
-        assertEquals(expected.peakBufferedBytes(), actual.peakBufferedBytes());
     }
 
     private static VortexOutputWriter writer(StructType schema, int batchSize, NativeWritable sink) {

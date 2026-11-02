@@ -16,6 +16,7 @@ import dev.vortex.spark.VortexOptions;
 import dev.vortex.spark.VortexSparkSession;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.List;
 import java.util.Locale;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.execution.datasources.OutputWriter;
@@ -190,14 +191,10 @@ public final class VortexOutputWriter extends OutputWriter {
             return;
         }
         vectorSchemaRoot.setRowCount(batchRowCount);
-        long batchArrowBytes = 0;
-        for (FieldVector vector : vectorSchemaRoot.getFieldVectors()) {
-            batchArrowBytes += arrowBytes(vector);
-        }
+        peakBatchArrowBytes = Math.max(peakBatchArrowBytes, arrowBytes(vectorSchemaRoot.getFieldVectors()));
 
         vortexWriter.writeBatch(vectorSchemaRoot, allocator);
         batchCount++;
-        peakBatchArrowBytes = Math.max(peakBatchArrowBytes, batchArrowBytes);
         peakBufferedBytes = Math.max(peakBufferedBytes, vortexWriter.bufferedBytes());
 
         vectorSchemaRoot.clear();
@@ -207,13 +204,13 @@ public final class VortexOutputWriter extends OutputWriter {
         batchRowCount = 0;
     }
 
-    private static long arrowBytes(FieldVector vector) {
+    private static long arrowBytes(List<FieldVector> vectors) {
         long bytes = 0;
-        for (ArrowBuf buffer : vector.getFieldBuffers()) {
-            bytes += buffer.capacity();
-        }
-        for (FieldVector child : vector.getChildrenFromFields()) {
-            bytes += arrowBytes(child);
+        for (FieldVector vector : vectors) {
+            for (ArrowBuf buffer : vector.getFieldBuffers()) {
+                bytes += buffer.capacity();
+            }
+            bytes += arrowBytes(vector.getChildrenFromFields());
         }
         return bytes;
     }

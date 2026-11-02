@@ -4,6 +4,7 @@
 package dev.vortex.spark.write;
 
 import java.io.Serializable;
+import java.util.Objects;
 
 /** Immutable statistics for a successfully closed {@link VortexOutputWriter}, serializable for collection from tasks. */
 public final class VortexOutputWriterSummary implements Serializable {
@@ -55,5 +56,36 @@ public final class VortexOutputWriterSummary implements Serializable {
      */
     public long peakBufferedBytes() {
         return peakBufferedBytes;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (!(o instanceof VortexOutputWriterSummary)) {
+            return false;
+        }
+        VortexOutputWriterSummary other = (VortexOutputWriterSummary) o;
+        return fileSize == other.fileSize
+                && rowCount == other.rowCount
+                && batchCount == other.batchCount
+                && peakBatchArrowBytes == other.peakBatchArrowBytes
+                && peakBufferedBytes == other.peakBufferedBytes;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(fileSize, rowCount, batchCount, peakBatchArrowBytes, peakBufferedBytes);
+    }
+
+    @Override
+    public String toString() {
+        return "VortexOutputWriterSummary{fileSize=" + fileSize
+                + ", rowCount=" + rowCount
+                + ", batchCount=" + batchCount
+                + ", peakBatchArrowBytes=" + peakBatchArrowBytes
+                + ", peakBufferedBytes=" + peakBufferedBytes
+                + "}";
     }
 }
