@@ -223,6 +223,10 @@ mod test {
     use std::sync::Arc;
 
     use futures::future::BoxFuture;
+    use rand::RngExt;
+    use rand::SeedableRng;
+    use rand::prelude::StdRng;
+    use rstest::rstest;
     use vortex_array::ArrayContext;
     use vortex_array::ArrayRef;
     use vortex_array::IntoArray;
@@ -428,6 +432,67 @@ mod test {
             Vec::<u64>::new()
         );
         assert_eq!(subdivide_large_spans(vec![7], 100), vec![7]);
+    }
+
+    #[rstest]
+    #[case::empty(vec![], vec![], 5, vec![])]
+    #[case::single(vec![7], vec![7], 5, vec![7])]
+    #[case::hard(vec![0, 1, 2, 10], vec![], 5, vec![0, 1, 2, 10])]
+    #[case::soft(vec![0, 1, 2, 10], vec![1, 2], 5, vec![0, 10])]
+    #[case::short_tail(vec![0, 5, 6], vec![5], 5, vec![0, 6])]
+    #[case::hard_collision(vec![0, 3, 5, 6], vec![3, 5], 5, vec![0, 6])]
+    #[case::hard_start(vec![0, 3, 5, 6], vec![5], 5, vec![0, 3, 6])]
+    #[case::threshold(vec![0, 5, 10], vec![5], 5, vec![0, 5, 10])]
+    #[case::nonzero_range(vec![100, 101, 102, 110], vec![101, 102], 5, vec![100, 110])]
+    fn merge_small_spans_cases(
+        #[case] boundaries: Vec<u64>,
+        #[case] soft: Vec<u64>,
+        #[case] minimum: u64,
+        #[case] expected: Vec<u64>,
+    ) {
+        assert_eq!(merge_small_spans(boundaries, &soft, minimum), expected);
+    }
+
+    #[test]
+    fn merging_preserves_hard_boundaries_and_exact_coverage() {
+        let mut rng = StdRng::seed_from_u64(67);
+        for _ in 0..1000 {
+            let start = rng.random_range(0..1000u64);
+            let mut boundaries = vec![start];
+            for _ in 0..rng.random_range(1..50) {
+                boundaries.push(boundaries.last().unwrap() + rng.random_range(1..1000));
+            }
+            let soft = boundaries
+                .iter()
+                .copied()
+                .filter(|_| rng.random_bool(0.5))
+                .collect::<Vec<_>>();
+            let max_rows = rng.random_range(1..3000);
+            let minimum = DEFAULT_MIN_SPLIT_ROWS.min(max_rows);
+            let merged = merge_small_spans(boundaries.clone(), &soft, minimum);
+            assert_eq!(merged.first(), boundaries.first());
+            assert_eq!(merged.last(), boundaries.last());
+            assert!(merged.windows(2).all(|w| w[0] < w[1]));
+            assert!(
+                merged
+                    .iter()
+                    .all(|row| boundaries.binary_search(row).is_ok())
+            );
+            assert!(boundaries.iter().all(|row| {
+                soft.binary_search(row).is_ok() || merged.binary_search(row).is_ok()
+            }));
+            assert!(merged.windows(2).all(|w| {
+                Some(&w[1]) == merged.last()
+                    || soft.binary_search(&w[1]).is_err()
+                    || w[1] - w[0] >= minimum
+            }));
+            let subdivided = subdivide_large_spans(merged, max_rows);
+            assert!(subdivided.windows(2).all(|w| w[1] - w[0] <= max_rows));
+            assert_eq!(
+                subdivided.windows(2).map(|w| w[1] - w[0]).sum::<u64>(),
+                boundaries.last().unwrap() - start,
+            );
+        }
     }
 
     #[test]

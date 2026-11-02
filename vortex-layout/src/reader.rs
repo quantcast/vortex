@@ -175,10 +175,18 @@ impl RowSplits {
     }
 
     /// Push `other`'s boundaries into this set as a batch, keeping its soft marks.
-    pub(crate) fn append(&mut self, other: RowSplits) {
-        let soft = other.soft.clone();
+    pub(crate) fn append(&mut self, mut other: RowSplits) {
+        let soft = std::mem::take(&mut other.soft);
         self.extend_ascending(other.into_sorted_deduped());
         self.soft.extend(soft);
+    }
+
+    /// Remove soft marks at the supplied sorted boundaries.
+    pub(crate) fn remove_soft(&mut self, rows: &[u64]) {
+        debug_assert!(rows.is_sorted());
+        if !rows.is_empty() {
+            self.soft.retain(|row| rows.binary_search(row).is_err());
+        }
     }
 
     /// Create a new RowSplits with preallocated "capacity"
