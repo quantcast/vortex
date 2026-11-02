@@ -172,19 +172,48 @@ impl VTable for List {
 }
 
 impl Layout<List> {
-    /// Construct a list layout from its children.
-    pub fn new(
+    /// Construct a list layout from its children, checking them the way deserialization does: the
+    /// elements match the list's element dtype, the offsets are non-nullable integers with one
+    /// more row than the list, and a nullable list has a non-nullable bool validity child with one
+    /// row per list.
+    pub fn try_new(
         dtype: DType,
         elements: LayoutRef,
         offsets: LayoutRef,
         validity: Option<LayoutRef>,
-    ) -> Self {
-        let row_count = offsets.row_count().saturating_sub(1);
-        let offsets_ptype = offsets.dtype().as_ptype();
+    ) -> VortexResult<Self> {
+        let elements_dtype = dtype
+            .as_list_element_opt()
+            .ok_or_else(|| vortex_err!("ListLayout requires a List dtype, got {dtype}"))?;
+        vortex_ensure_eq!(
+            elements.dtype(),
+            elements_dtype.as_ref(),
+            "ListLayout elements dtype does not match the list's element dtype"
+        );
+        let offsets_ptype = match offsets.dtype() {
+            DType::Primitive(ptype, Nullability::NonNullable) if ptype.is_int() => *ptype,
+            other => vortex_bail!("ListLayout offsets must be non-nullable integers, got {other}"),
+        };
+        let row_count = offsets
+            .row_count()
+            .checked_sub(1)
+            .ok_or_else(|| vortex_err!("ListLayout offsets must have at least one row"))?;
+        if let Some(validity) = &validity {
+            vortex_ensure_eq!(
+                validity.dtype(),
+                &DType::Bool(Nullability::NonNullable),
+                "ListLayout validity must be non-nullable bool"
+            );
+            vortex_ensure_eq!(
+                validity.row_count(),
+                row_count,
+                "List validity row count does not match parent"
+            );
+        }
         let mut children = vec![elements, offsets];
         children.extend(validity);
-        Self::validate_children(&dtype, children.len()).vortex_expect("invalid list children");
-        LayoutParts::new(
+        Self::validate_children(&dtype, children.len())?;
+        Ok(LayoutParts::new(
             List,
             dtype,
             row_count,
@@ -192,7 +221,7 @@ impl Layout<List> {
             OwnedLayoutChildren::layout_children(children),
             ListData { offsets_ptype },
         )
-        .into_typed()
+        .into_typed())
     }
 
     /// Returns the elements child.
@@ -272,6 +301,7 @@ mod tests {
     use vortex_session::registry::ReadContext;
 
     use super::List;
+    use super::ListLayout;
     use super::ListLayoutMetadata;
     use crate::LayoutBuildContext;
     use crate::LayoutDeserialization;
@@ -343,6 +373,72 @@ mod tests {
             row_count
         );
         Ok(())
+    }
+
+    /// `ListLayout::try_new` rejects children that deserialization would reject.
+    #[rstest]
+    #[case::elements_dtype(
+        PType::I64,
+        PType::U64,
+        Nullability::NonNullable,
+        4,
+        None,
+        "elements dtype"
+    )]
+    #[case::float_offsets(PType::I32, PType::F64, Nullability::NonNullable, 4, None, "integers")]
+    #[case::nullable_offsets(PType::I32, PType::U64, Nullability::Nullable, 4, None, "integers")]
+    #[case::no_offsets(
+        PType::I32,
+        PType::U64,
+        Nullability::NonNullable,
+        0,
+        None,
+        "at least one row"
+    )]
+    #[case::validity_rows(
+        PType::I32,
+        PType::U64,
+        Nullability::NonNullable,
+        4,
+        Some(2),
+        "validity row count"
+    )]
+    fn try_new_rejects_mismatched_children(
+        #[case] elements_ptype: PType,
+        #[case] offsets_ptype: PType,
+        #[case] offsets_nullability: Nullability,
+        #[case] offsets_rows: u64,
+        #[case] validity_rows: Option<u64>,
+        #[case] message: &str,
+    ) {
+        let read_ctx = ReadContext::new([]);
+        let list_nullability = Nullability::from(validity_rows.is_some());
+        let dtype = DType::List(
+            Arc::new(DType::Primitive(PType::I32, Nullability::NonNullable)),
+            list_nullability,
+        );
+        let flat = |rows, dtype, segment: u32| {
+            FlatLayout::new(rows, dtype, segment.into(), read_ctx.clone()).into_layout()
+        };
+        let elements = flat(
+            0,
+            DType::Primitive(elements_ptype, Nullability::NonNullable),
+            0,
+        );
+        let offsets = flat(
+            offsets_rows,
+            DType::Primitive(offsets_ptype, offsets_nullability),
+            1,
+        );
+        let validity =
+            validity_rows.map(|rows| flat(rows, DType::Bool(Nullability::NonNullable), 2));
+        let err = ListLayout::try_new(dtype, elements, offsets, validity)
+            .err()
+            .map(|err| err.to_string());
+        assert!(
+            err.as_ref().is_some_and(|err| err.contains(message)),
+            "{err:?}"
+        );
     }
 
     #[test]

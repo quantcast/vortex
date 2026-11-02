@@ -30,6 +30,7 @@ use vortex_array::scalar_fn::fns::operators::Operator;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
+use vortex_error::vortex_err;
 use vortex_io::session::RuntimeSessionExt;
 use vortex_session::VortexSession;
 
@@ -221,7 +222,10 @@ impl LayoutStrategy for ListLayoutStrategy {
         let validity_layout =
             is_nullable.then(|| layouts.next().vortex_expect("validity layout present"));
 
-        Ok(ListLayout::new(dtype, elements_layout, offsets_layout, validity_layout).into_layout())
+        Ok(
+            ListLayout::try_new(dtype, elements_layout, offsets_layout, validity_layout)?
+                .into_layout(),
+        )
     }
 }
 
@@ -256,7 +260,9 @@ async fn transpose_list_column(
         let n_elements = elements.len() as u64;
         let row_count = offsets.len().saturating_sub(1);
         let offsets = global_offsets(offsets, element_base, first, &mut exec_ctx)?;
-        element_base += n_elements;
+        element_base = element_base
+            .checked_add(n_elements)
+            .ok_or_else(|| vortex_err!("List column has more than u64::MAX elements"))?;
         first = false;
 
         if elements_tx

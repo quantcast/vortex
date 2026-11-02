@@ -246,12 +246,12 @@ fn dict_plan_orders_codes_before_values() -> VortexResult<()> {
 fn list_plan_appends_validity_when_nullable() -> VortexResult<()> {
     let element_dtype = primitive(PType::I32, Nullability::NonNullable);
     let offsets_dtype = primitive(PType::U32, Nullability::NonNullable);
-    let non_nullable = ListLayout::new(
+    let non_nullable = ListLayout::try_new(
         DType::List(Arc::new(element_dtype.clone()), Nullability::NonNullable),
         flat(3, element_dtype.clone(), 0),
         flat(3, offsets_dtype.clone(), 1),
         None,
-    )
+    )?
     .into_layout();
     let plan = make_plan(non_nullable)?;
 
@@ -260,12 +260,12 @@ fn list_plan_appends_validity_when_nullable() -> VortexResult<()> {
     assert_eq!(child_of(&plan, 0)?.dtype(), &element_dtype);
     assert_eq!(child_of(&plan, 1)?.dtype(), &offsets_dtype);
 
-    let nullable = ListLayout::new(
+    let nullable = ListLayout::try_new(
         DType::List(Arc::new(element_dtype.clone()), Nullability::Nullable),
         flat(3, element_dtype, 2),
         flat(3, offsets_dtype, 3),
         Some(flat(2, DType::Bool(Nullability::NonNullable), 4)),
-    )
+    )?
     .into_layout();
     let nullable_plan = make_plan(nullable)?;
     assert_eq!(nullable_plan.child_count(), 3);
@@ -530,12 +530,12 @@ fn dict_plan_display_names_logical_children() -> VortexResult<()> {
 fn list_plan_display_handles_optional_validity() -> VortexResult<()> {
     let element_dtype = primitive(PType::I32, Nullability::NonNullable);
     let offsets_dtype = primitive(PType::U32, Nullability::NonNullable);
-    let non_nullable_layout = ListLayout::new(
+    let non_nullable_layout = ListLayout::try_new(
         DType::List(Arc::new(element_dtype.clone()), Nullability::NonNullable),
         flat(4, element_dtype.clone(), 0),
         flat(3, offsets_dtype.clone(), 1),
         None,
-    )
+    )?
     .into_layout();
     let non_nullable = make_plan(non_nullable_layout)?;
 
@@ -547,12 +547,12 @@ fn list_plan_display_handles_optional_validity() -> VortexResult<()> {
         child: vortex.plan.segment_scan(u32, rows=3)
     ");
 
-    let nullable_layout = ListLayout::new(
+    let nullable_layout = ListLayout::try_new(
         DType::List(Arc::new(element_dtype.clone()), Nullability::Nullable),
         flat(4, element_dtype, 2),
         flat(3, offsets_dtype, 3),
         Some(flat(2, DType::Bool(Nullability::NonNullable), 4)),
-    )
+    )?
     .into_layout();
     let nullable = make_plan(nullable_layout)?;
 
