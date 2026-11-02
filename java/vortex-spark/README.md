@@ -65,6 +65,24 @@ Catalog tables read and write through the V1 file format;
 `spark.sql.sources.useV1SourceList=vortex` puts every path on it, which is what the `_metadata`
 column and dynamic partition pruning need.
 
+## Direct writer summaries
+
+Callers using `VortexOutputWriter` directly with their own `NativeWritable` can obtain an
+immutable, serializable summary after a successful close, without reopening the file:
+
+```java
+writer.close();
+VortexOutputWriterSummary summary = writer.summary();
+long bytes = summary.fileSize();
+long rows = summary.rowCount();
+```
+
+The summary also reports the number of batches submitted, the largest batch's Arrow buffer
+capacities (including nested buffers), and the maximum native `bufferedBytes()` sampled after
+each batch. These memory measurements exclude some retained allocations and can miss native
+peaks between samples; they are not a bound on process memory. No summary is available before
+close or after a failed write or close. Repeated closes retain the same summary.
+
 ## Benchmarks
 
 JMH benchmarks live in `common/src/jmh/java`. They measure the per-file open cost of the

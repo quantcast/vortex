@@ -4,8 +4,10 @@
 package dev.vortex.spark.write;
 
 import dev.vortex.api.Session;
+import dev.vortex.api.VortexWriteSummary;
 import dev.vortex.api.VortexWriter;
 import dev.vortex.io.NativeWritable;
+import dev.vortex.relocated.org.apache.arrow.memory.ArrowBuf;
 import dev.vortex.relocated.org.apache.arrow.memory.BufferAllocator;
 import dev.vortex.relocated.org.apache.arrow.memory.RootAllocator;
 import dev.vortex.relocated.org.apache.arrow.vector.FieldVector;
@@ -59,6 +61,10 @@ public final class VortexOutputWriter extends OutputWriter {
     private VectorSchemaRoot vectorSchemaRoot;
     private ArrowFieldWriter[] fieldWriters;
     private int batchRowCount = 0;
+    private long batchCount;
+    private long peakBatchArrowBytes;
+    private long peakBufferedBytes;
+    private VortexOutputWriterSummary summary;
     private Exception writeFailure;
     private boolean closed = false;
 
@@ -146,6 +152,9 @@ public final class VortexOutputWriter extends OutputWriter {
      */
     @Override
     public void write(InternalRow row) {
+        if (closed) {
+            throw new IllegalStateException("VortexOutputWriter for " + filePath + " is already closed");
+        }
         if (writeFailure != null) {
             throw new IllegalStateException(
                     "VortexOutputWriter for " + filePath + " failed on an earlier write", writeFailure);
@@ -181,14 +190,32 @@ public final class VortexOutputWriter extends OutputWriter {
             return;
         }
         vectorSchemaRoot.setRowCount(batchRowCount);
+        long batchArrowBytes = 0;
+        for (FieldVector vector : vectorSchemaRoot.getFieldVectors()) {
+            batchArrowBytes += arrowBytes(vector);
+        }
 
         vortexWriter.writeBatch(vectorSchemaRoot, allocator);
+        batchCount++;
+        peakBatchArrowBytes = Math.max(peakBatchArrowBytes, batchArrowBytes);
+        peakBufferedBytes = Math.max(peakBufferedBytes, vortexWriter.bufferedBytes());
 
         vectorSchemaRoot.clear();
         for (ArrowFieldWriter writer : fieldWriters) {
             writer.reset();
         }
         batchRowCount = 0;
+    }
+
+    private static long arrowBytes(FieldVector vector) {
+        long bytes = 0;
+        for (ArrowBuf buffer : vector.getFieldBuffers()) {
+            bytes += buffer.capacity();
+        }
+        for (FieldVector child : vector.getChildrenFromFields()) {
+            bytes += arrowBytes(child);
+        }
+        return bytes;
     }
 
     /**
@@ -205,6 +232,7 @@ public final class VortexOutputWriter extends OutputWriter {
             return;
         }
         IOException failure = null;
+        VortexWriteSummary fileSummary = null;
         if (writeFailure == null) {
             try {
                 writeBatch();
@@ -216,7 +244,7 @@ public final class VortexOutputWriter extends OutputWriter {
         }
         if (vortexWriter != null) {
             try {
-                vortexWriter.finish();
+                fileSummary = vortexWriter.finish();
             } catch (IOException e) {
                 failure = addFailure(failure, e);
             } finally {
@@ -245,6 +273,20 @@ public final class VortexOutputWriter extends OutputWriter {
         if (failure != null) {
             throw new UncheckedIOException("Failed to close Vortex output " + filePath, failure);
         }
+        summary = new VortexOutputWriterSummary(
+                fileSummary.fileSize(), fileSummary.rowCount(), batchCount, peakBatchArrowBytes, peakBufferedBytes);
+    }
+
+    /**
+     * Returns the completed file's size, row count and observed batch memory usage without reopening it.
+     *
+     * @throws IllegalStateException unless {@link #close()} completed successfully and no write failed
+     */
+    public VortexOutputWriterSummary summary() {
+        if (summary == null) {
+            throw new IllegalStateException("A write summary is only available after a successful close of " + filePath);
+        }
+        return summary;
     }
 
     @Override
