@@ -379,6 +379,43 @@ public final class VortexFilterPushdownTest {
                         .orderBy("id")));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    @DisplayName("Filters on partition columns skip the files of non-matching partitions")
+    void partitionFiltersSkipFiles(boolean v1) {
+        SparkSession session = spark.newSession();
+        SparkSession.setActiveSession(session);
+        session.conf().set("spark.sql.sources.useV1SourceList", v1 ? "vortex" : "");
+        // A large open cost keeps every file in its own input partition, so partitions count files.
+        session.conf().set("spark.sql.files.openCostInBytes", String.valueOf(1L << 30));
+        Path outputPath = tempDir.resolve("partition_skipping_" + v1);
+        session.range(0, 6)
+                .selectExpr("CAST(id AS INT) AS id", "substr('ABC', CAST(id % 3 AS INT) + 1, 1) AS group")
+                .coalesce(1)
+                .write()
+                .format("vortex")
+                .partitionBy("group")
+                .save(outputPath.toString());
+        Dataset<Row> readDf = session.read().format("vortex").load(outputPath.toString());
+        String plan = readDf.queryExecution().executedPlan().toString();
+        assertTrue(plan.contains(v1 ? "FileScan vortex" : "BatchScan"), plan);
+
+        assertEquals(3, readDf.rdd().getNumPartitions());
+
+        Dataset<Row> filtered = readDf.filter(readDf.col("group").isin("A", "C"));
+        assertEquals(List.of(0, 2, 3, 5), idsOf(filtered.orderBy("id")));
+        assertEquals(2, filtered.rdd().getNumPartitions(), "only the group=A and group=C files are planned");
+        Dataset<Row> none = readDf.filter(readDf.col("group").equalTo("Z"));
+        assertEquals(0, none.count());
+        assertEquals(0, none.rdd().getNumPartitions(), "no file is planned");
+
+        // A disjunction with a data column cannot rule out any partition.
+        Dataset<Row> mixed = readDf.filter(
+                readDf.col("group").equalTo("A").or(readDf.col("id").equalTo(1)));
+        assertEquals(List.of(0, 1, 3), idsOf(mixed.orderBy("id")));
+        assertEquals(3, mixed.rdd().getNumPartitions());
+    }
+
     @Test
     @DisplayName("Pushed filters appear in the executed scan node")
     public void testPushedFiltersInPlan() throws IOException {
