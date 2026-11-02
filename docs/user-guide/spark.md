@@ -138,11 +138,23 @@ derive the column and partition by it, for example `withColumn("year", year(col(
 | `batch.size`              | `8192`  | Rows buffered per write batch; range 1–65536. Each string or binary field of a batch must fit in 2 GiB, so lower it for values over about 256 KB. |
 | `vortex.write.batch.size` | —       | Rows buffered per write batch for Vortex alone, overriding `batch.size`. |
 | `vortex.write.batch.bytes` | —      | Positive byte threshold for the open batch's Arrow allocations; flush after a row reaches it or the row limit, whichever comes first. Unset disables byte-based flushing. |
+| `vortex.write.reset.capacity` | `auto` | Reset Arrow sizing hints: `auto` for variable-width/nested vectors, `true` for every vector, `false` to retain hints. |
 | `vortex.listLayout`       | `false` | Store array columns in the unstable list layout; see below. |
 
 The byte threshold includes nested buffers and Arrow's allocation rounding. It is checked after
 each complete row, so one row or a buffer growth can exceed it. It bounds batching rather than
 total process memory: native code may retain earlier batches and allocate compression buffers.
+
+With `vortex.write.reset.capacity=auto`, each batch resets variable-width and nested vectors
+so one unusually large value or list does not inflate subsequent buffer allocations. Top-level
+fixed-width vectors keep their hints because their value counts are bounded by the row limit.
+A byte-triggered flush resets all vectors in `auto` mode, preserving the byte budget's behavior.
+
+Use `true` to force every reset, or `false` to keep all sizing hints, including after byte-triggered
+flushes. Keeping hints can reduce allocation/copying on steady data, but can increase memory and
+cause repeated byte-triggered flushes after an outlier. See the
+[capacity benchmark](https://github.com/quantcast/vortex/tree/develop/java/vortex-spark/benchmarks)
+for the tradeoffs behind the default.
 
 By default an array column is stored as whole chunks, so reading one field of the structs in an
 array reads every field of them. With `vortex.listLayout` set to `true`, the writer stores each

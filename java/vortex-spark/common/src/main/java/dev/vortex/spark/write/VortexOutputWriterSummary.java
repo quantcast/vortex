@@ -6,7 +6,9 @@ package dev.vortex.spark.write;
 import java.io.Serializable;
 import java.util.Objects;
 
-/** Immutable statistics for a successfully closed {@link VortexOutputWriter}, serializable for collection from tasks. */
+/**
+ * Immutable statistics for a successfully closed {@link VortexOutputWriter}, serializable for collection from tasks.
+ */
 public final class VortexOutputWriterSummary implements Serializable {
     private static final long serialVersionUID = 1L;
 

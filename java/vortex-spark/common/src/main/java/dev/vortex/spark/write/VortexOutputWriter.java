@@ -10,6 +10,7 @@ import dev.vortex.io.NativeWritable;
 import dev.vortex.relocated.org.apache.arrow.memory.ArrowBuf;
 import dev.vortex.relocated.org.apache.arrow.memory.BufferAllocator;
 import dev.vortex.relocated.org.apache.arrow.memory.RootAllocator;
+import dev.vortex.relocated.org.apache.arrow.vector.BaseFixedWidthVector;
 import dev.vortex.relocated.org.apache.arrow.vector.FieldVector;
 import dev.vortex.relocated.org.apache.arrow.vector.VectorSchemaRoot;
 import dev.vortex.spark.VortexOptions;
@@ -49,6 +50,15 @@ public final class VortexOutputWriter extends OutputWriter {
      */
     public static final String LIST_LAYOUT_OPTION = "vortex.listLayout";
 
+    /** Controls whether Arrow sizing hints are reset: auto (schema-aware), true, or false. */
+    public static final String WRITE_RESET_CAPACITY_OPTION = "vortex.write.reset.capacity";
+
+    enum CapacityReset {
+        AUTO,
+        ALWAYS,
+        NEVER
+    }
+
     private static final int DEFAULT_BATCH_SIZE = 8192;
     private static final int MIN_BATCH_SIZE = 1;
     private static final int MAX_BATCH_SIZE = 65536; // 64K rows max per batch
@@ -58,6 +68,7 @@ public final class VortexOutputWriter extends OutputWriter {
     private final VortexOptions options;
     private final int batchSize;
     private final long batchBytes;
+    private final CapacityReset capacityReset;
     private final ArrowBatchMemory batchMemory;
     private NativeWritable writable;
 
@@ -88,6 +99,7 @@ public final class VortexOutputWriter extends OutputWriter {
 
         this.batchSize = configuredBatchSize(options);
         this.batchBytes = configuredBatchBytes(options);
+        this.capacityReset = configuredCapacityReset(options);
         this.batchMemory = batchBytes == 0 ? null : new ArrowBatchMemory();
 
         try {
@@ -96,7 +108,7 @@ public final class VortexOutputWriter extends OutputWriter {
 
             this.vectorSchemaRoot = VectorSchemaRoot.create(arrowSchema, allocator);
             // Small start so writers that see few rows hold little memory; Arrow grows on demand.
-            resetInitialCapacity();
+            resetInitialCapacity(true);
             StructField[] fields = schema.fields();
             this.fieldWriters = new ArrowFieldWriter[fields.length];
             for (int i = 0; i < fields.length; i++) {
@@ -159,6 +171,19 @@ public final class VortexOutputWriter extends OutputWriter {
         return bytes;
     }
 
+    /** Resolves the capacity policy before allocating Arrow buffers or opening native resources. */
+    static CapacityReset configuredCapacityReset(VortexOptions options) {
+        String value = options.get(WRITE_RESET_CAPACITY_OPTION).orElse("auto");
+        return switch (value.trim().toLowerCase(Locale.ROOT)) {
+            case "auto" -> CapacityReset.AUTO;
+            case "true" -> CapacityReset.ALWAYS;
+            case "false" -> CapacityReset.NEVER;
+            default ->
+                throw new IllegalArgumentException(
+                        WRITE_RESET_CAPACITY_OPTION + " must be auto, true, or false, got '" + value + "'");
+        };
+    }
+
     /**
      * Writes a single row to the Vortex file.
      *
@@ -188,11 +213,7 @@ public final class VortexOutputWriter extends OutputWriter {
             batchRowCount++;
             boolean reachedBytes = batchMemory != null && batchMemory.bytes(vectorSchemaRoot) >= batchBytes;
             if (batchRowCount >= batchSize || reachedBytes) {
-                writeBatch();
-                if (reachedBytes) {
-                    // An oversized row must not make every later small batch allocate its remembered capacity.
-                    resetInitialCapacity();
-                }
+                writeBatch(reachedBytes);
             }
         } catch (IOException e) {
             writeFailure = e;
@@ -205,15 +226,18 @@ public final class VortexOutputWriter extends OutputWriter {
         }
     }
 
-    private void resetInitialCapacity() {
+    private void resetInitialCapacity(boolean includeFixedWidth) {
         int initialCapacity = Math.min(batchSize, INITIAL_VECTOR_CAPACITY);
         for (FieldVector vector : vectorSchemaRoot.getFieldVectors()) {
-            vector.setInitialCapacity(initialCapacity);
+            // Root fixed-width counts are row-bounded; nested element counts and value sizes can be much larger.
+            if (includeFixedWidth || !(vector instanceof BaseFixedWidthVector)) {
+                vector.setInitialCapacity(initialCapacity);
+            }
         }
     }
 
     /** Hands the rows appended since the last batch to the Vortex writer. */
-    private void writeBatch() throws IOException {
+    private void writeBatch(boolean reachedBytes) throws IOException {
         if (batchRowCount == 0) {
             return;
         }
@@ -225,6 +249,10 @@ public final class VortexOutputWriter extends OutputWriter {
         peakBufferedBytes = Math.max(peakBufferedBytes, vortexWriter.bufferedBytes());
 
         vectorSchemaRoot.clear();
+        if (capacityReset != CapacityReset.NEVER) {
+            // A byte-triggered flush must also discard fixed-width hints to preserve its smaller batch budget.
+            resetInitialCapacity(capacityReset == CapacityReset.ALWAYS || reachedBytes);
+        }
         for (ArrowFieldWriter writer : fieldWriters) {
             writer.reset();
         }
@@ -262,7 +290,7 @@ public final class VortexOutputWriter extends OutputWriter {
         VortexWriteSummary fileSummary = null;
         if (writeFailure == null) {
             try {
-                writeBatch();
+                writeBatch(false);
             } catch (IOException e) {
                 failure = e;
             } catch (RuntimeException e) {
@@ -311,7 +339,8 @@ public final class VortexOutputWriter extends OutputWriter {
      */
     public VortexOutputWriterSummary summary() {
         if (summary == null) {
-            throw new IllegalStateException("A write summary is only available after a successful close of " + filePath);
+            throw new IllegalStateException(
+                    "A write summary is only available after a successful close of " + filePath);
         }
         return summary;
     }
