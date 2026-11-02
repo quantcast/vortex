@@ -15,6 +15,7 @@ import dev.vortex.spark.VortexSparkSession;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.Locale;
+import org.apache.spark.TaskContext;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.execution.datasources.OutputWriter;
 import org.apache.spark.sql.types.StructField;
@@ -194,18 +195,18 @@ public final class VortexOutputWriter extends OutputWriter {
     /**
      * Flushes the last batch and finalizes the file.
      *
-     * <p>After a failed {@link #write}, the rows appended since the last batch are dropped and this only releases
-     * resources: it does not throw, because Spark's abort closes a task's writers one after another and stops at the
-     * first that throws. The incomplete file is never committed, since Spark commits only after every write returned
-     * and {@link #write} refuses every row once one has failed.
+     * <p>After a failed {@link #write}, or in a task that has already failed, the last batch is dropped because the
+     * file is never committed. In both cases this releases everything and logs what fails instead of throwing, because
+     * Spark's abort closes a task's writers one after another and stops at the first that throws.
      */
     @Override
     public void close() {
         if (closed) {
             return;
         }
+        boolean aborting = writeFailure != null || taskFailed();
         IOException failure = null;
-        if (writeFailure == null) {
+        if (!aborting) {
             try {
                 writeBatch();
             } catch (IOException e) {
@@ -236,9 +237,9 @@ public final class VortexOutputWriter extends OutputWriter {
         }
         session = null;
         closed = true;
-        if (writeFailure != null) {
+        if (aborting) {
             if (failure != null) {
-                logger.warn("Failed to release the writer for {} after an earlier write failed", filePath, failure);
+                logger.warn("Failed to close the writer for {} in a failed task", filePath, failure);
             }
             return;
         }
@@ -250,6 +251,11 @@ public final class VortexOutputWriter extends OutputWriter {
     @Override
     public String path() {
         return filePath;
+    }
+
+    private static boolean taskFailed() {
+        TaskContext context = TaskContext.get();
+        return context != null && context.isFailed();
     }
 
     /** Package-private so tests can see what close leaves allocated. */
