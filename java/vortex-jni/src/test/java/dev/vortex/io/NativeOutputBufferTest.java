@@ -32,6 +32,8 @@ import org.apache.arrow.vector.types.pojo.Schema;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 final class NativeOutputBufferTest {
     @TempDir
@@ -184,6 +186,62 @@ final class NativeOutputBufferTest {
     }
 
     @Test
+    void directWritesMustNotShrinkTheLimit() {
+        ByteBufferWritable sink = new ByteBufferWritable() {
+            @Override
+            public void write(ByteBuffer buffer) {
+                buffer.limit(buffer.position());
+            }
+
+            @Override
+            public void flush() {}
+
+            @Override
+            public void close() {}
+        };
+        IOException error = assertThrows(IOException.class, () -> writeMetadata(sink, new byte[0]));
+        assertTrue(error.getCause().getMessage().contains("bytes unconsumed"), error.toString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 2})
+    void byteArrayCallsMustConsumeTheWholeRange(int offset) {
+        ByteBufferWritable sink = new ByteBufferWritable() {
+            @Override
+            public void write(ByteBuffer buffer) {
+                buffer.get();
+            }
+
+            @Override
+            public void flush() {}
+
+            @Override
+            public void close() {}
+        };
+        IOException error = assertThrows(IOException.class, () -> sink.write(new byte[8], offset, 4));
+        assertTrue(error.getMessage().contains("bytes unconsumed"), error.toString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 2})
+    void byteArrayCallsMustNotShrinkTheLimit(int offset) {
+        ByteBufferWritable sink = new ByteBufferWritable() {
+            @Override
+            public void write(ByteBuffer buffer) {
+                buffer.limit(buffer.position());
+            }
+
+            @Override
+            public void flush() {}
+
+            @Override
+            public void close() {}
+        };
+        IOException error = assertThrows(IOException.class, () -> sink.write(new byte[8], offset, 4));
+        assertTrue(error.getMessage().contains("bytes unconsumed"), error.toString());
+    }
+
+    @Test
     void directWriteExceptionsReachTheCaller() {
         ByteBufferWritable sink = new ByteBufferWritable() {
             @Override
@@ -203,11 +261,18 @@ final class NativeOutputBufferTest {
 
     @Test
     void legacyWriteExceptionsStopChunkingAndReachTheCaller() {
-        AtomicInteger calls = new AtomicInteger();
+        AtomicInteger fullChunks = new AtomicInteger();
+        AtomicInteger callsAfterFailure = new AtomicInteger();
+        AtomicBoolean failed = new AtomicBoolean();
         NativeWritable sink = new NativeWritable() {
             @Override
             public void write(byte[] buffer, int offset, int length) throws IOException {
-                if (calls.incrementAndGet() == 3) {
+                if (failed.get()) {
+                    callsAfterFailure.incrementAndGet();
+                }
+                // Fail inside the payload's chunk loop, after one full chunk succeeded.
+                if (length == buffer.length && fullChunks.incrementAndGet() == 2) {
+                    failed.set(true);
                     throw new IOException("injected array write failure");
                 }
             }
@@ -219,7 +284,8 @@ final class NativeOutputBufferTest {
             public void close() {}
         };
         IOException error = assertThrows(IOException.class, () -> writeMetadata(sink, payload()));
-        assertEquals(3, calls.get());
+        assertTrue(failed.get());
+        assertEquals(0, callsAfterFailure.get());
         assertTrue(error.getCause().getMessage().contains("injected array write failure"), error.toString());
     }
 }

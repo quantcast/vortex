@@ -78,17 +78,20 @@ impl JavaWrite {
                             jni::jni_sig!("(Ljava/nio/ByteBuffer;)V"),
                             &[JValue::Object(&buffer)],
                         )?;
-                        let remaining = env
+                        let position = env
                             .call_method(
                                 &buffer,
-                                jni::jni_str!("remaining"),
+                                jni::jni_str!("position"),
                                 jni::jni_sig!("()I"),
                                 &[],
                             )?
                             .i()?;
-                        if remaining != 0 {
+                        // The view's fixed capacity is chunk.len(), so reaching that position
+                        // also requires the original limit; shrinking the limit cannot pass.
+                        if usize::try_from(position).ok() != Some(chunk.len()) {
                             return Err(vortex_err!(
-                                "write returned with {remaining} bytes unconsumed"
+                                "write left bytes unconsumed (position {position}, expected {})",
+                                chunk.len()
                             )
                             .into());
                         }

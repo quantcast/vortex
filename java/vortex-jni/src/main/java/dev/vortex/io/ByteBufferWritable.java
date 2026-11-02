@@ -14,7 +14,8 @@ import java.nio.ByteBuffer;
  */
 public interface ByteBufferWritable extends NativeWritable {
     /**
-     * Append all remaining bytes and advance {@code buffer.position()} to its limit before returning.
+     * Append all remaining bytes and advance {@code buffer.position()} to its original limit before returning, without
+     * changing the limit.
      *
      * <p>Native calls supply a read-only, direct buffer borrowing Rust-owned memory. Neither the buffer nor any derived
      * view may be retained or accessed after this call returns, including when it throws. An asynchronous sink must
@@ -24,6 +25,16 @@ public interface ByteBufferWritable extends NativeWritable {
 
     @Override
     default void write(byte[] buffer, int offset, int length) throws IOException {
-        write(ByteBuffer.wrap(buffer, offset, length).asReadOnlyBuffer());
+        ByteBuffer view = ByteBuffer.wrap(buffer, offset, length).asReadOnlyBuffer();
+        write(view);
+        if (view.position() != offset + length || view.limit() != offset + length) {
+            throw new IOException("write left bytes unconsumed (position "
+                    + view.position()
+                    + ", limit "
+                    + view.limit()
+                    + ", expected "
+                    + (offset + length)
+                    + ")");
+        }
     }
 }
