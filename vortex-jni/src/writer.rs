@@ -50,9 +50,13 @@ use vortex::array::scalar::ScalarValue;
 use vortex::array::stream::ArrayStreamAdapter;
 use vortex::dtype::DType;
 use vortex::dtype::FieldPath;
+use vortex::editions::Edition;
+use vortex::editions::EditionDeclaration;
+use vortex::editions::EditionFamily;
+use vortex::editions::EditionId;
+use vortex::editions::EditionMember;
 use vortex::editions::EditionSessionExt;
 use vortex::editions::EnabledEditions;
-use vortex::editions::UNSTABLE;
 use vortex::error::VortexError;
 use vortex::error::VortexResult;
 use vortex::error::vortex_err;
@@ -367,11 +371,34 @@ fn write_summary_to_java<'local>(
     )?)
 }
 
+static LIST_LAYOUT_FAMILY: EditionFamily = EditionFamily {
+    name: "jni",
+    origin: "vortex-jni",
+    doc: "Components a JNI write can opt into without enabling the rest of the unstable edition.",
+};
+
+/// A draft edition holding only the unstable list layout.
+const LIST_LAYOUT_EDITION: EditionId = EditionId::new("jni", 2026, 11, 0);
+
+static LIST_LAYOUT_DECLARATION: EditionDeclaration = EditionDeclaration {
+    edition: Edition {
+        id: LIST_LAYOUT_EDITION,
+        immutable: false,
+        min_library_version: None,
+    },
+    added: &[EditionMember::layout(&"vortex.list")],
+};
+
+pub(crate) fn register_list_layout_edition(session: &VortexSession) -> VortexResult<()> {
+    session.editions().declare_family(&LIST_LAYOUT_FAMILY)?;
+    session.register_edition(&LIST_LAYOUT_DECLARATION)
+}
+
 /// The session a write runs in.
 ///
-/// The list layout is only written while the unstable edition is enabled, and enabled editions
-/// are shared by every clone of a session. A list-layout write therefore runs in a fork of the
-/// session, which keeps its registrations, with an enabled-editions set of its own.
+/// The list layout is only written while an edition containing it is enabled, and enabled
+/// editions are shared by every clone of a session. A list-layout write therefore runs in a fork
+/// of the session, which keeps its registrations, with an enabled-editions set of its own.
 fn write_session(session: &VortexSession, list_layout: bool) -> VortexResult<VortexSession> {
     if !list_layout {
         return Ok(session.clone());
@@ -381,7 +408,7 @@ fn write_session(session: &VortexSession, list_layout: bool) -> VortexResult<Vor
     for edition in session.enabled_editions().editions() {
         fork.enable_edition(edition)?;
     }
-    fork.enable_edition(UNSTABLE)?;
+    fork.enable_edition(LIST_LAYOUT_EDITION)?;
     Ok(fork)
 }
 
@@ -654,13 +681,31 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_close(
 mod tests {
     use std::any::Any;
 
+    use vortex::array::IntoArray;
+    use vortex::array::VortexSessionExecute;
+    use vortex::array::arrays::ListArray;
+    use vortex::array::arrays::StructArray;
+    use vortex::array::validity::Validity;
+    use vortex::buffer::Buffer;
+    use vortex::buffer::ByteBufferMut;
+    use vortex::editions::ComponentKind;
     use vortex::editions::EditionSessionExt;
     use vortex::editions::UNSTABLE;
     use vortex::error::VortexResult;
+    use vortex::file::OpenOptionsSessionExt;
+    use vortex::file::WriteOptionsSessionExt;
+    use vortex::io::runtime::BlockingRuntime;
+    use vortex::layout::LayoutRef;
+    use vortex::layout::VTable;
+    use vortex::layout::layouts::flat::Flat;
+    use vortex::layout::layouts::list::List;
     use vortex::session::SessionExt;
     use vortex::session::SessionVar;
+    use vortex::session::registry::Id;
 
+    use super::LIST_LAYOUT_EDITION;
     use super::write_session;
+    use crate::RUNTIME;
     use crate::session::new_session;
 
     #[derive(Clone, Debug)]
@@ -689,12 +734,94 @@ mod tests {
         let mut write_editions = write.enabled_editions().editions();
         write_editions.sort();
         let mut expected = editions.clone();
-        expected.push(UNSTABLE);
+        expected.push(LIST_LAYOUT_EDITION);
         expected.sort();
         assert_eq!(write_editions, expected);
         let mut after = session.enabled_editions().editions();
         after.sort();
         assert_eq!(after, editions);
+        Ok(())
+    }
+
+    const KINDS: [ComponentKind; 4] = [
+        ComponentKind::Array,
+        ComponentKind::Layout,
+        ComponentKind::DType,
+        ComponentKind::Aggregate,
+    ];
+
+    #[test]
+    fn list_layout_write_enables_only_the_list_layout() -> VortexResult<()> {
+        let session = *new_session();
+        session.editions().validate()?;
+        let write = write_session(&session, true)?;
+        for kind in KINDS {
+            let mut expected = session.enabled_component_ids(kind);
+            if kind == ComponentKind::Layout {
+                expected.push(List.id());
+                expected.sort_unstable();
+            }
+            assert_eq!(write.enabled_component_ids(kind), expected, "{kind}");
+        }
+        Ok(())
+    }
+
+    /// Layout ids in the tree, and every array id a flat leaf's segments may reference.
+    fn file_ids(
+        layout: &LayoutRef,
+        layouts: &mut Vec<Id>,
+        arrays: &mut Vec<Id>,
+    ) -> VortexResult<()> {
+        layouts.push(layout.encoding_id());
+        if let Some(flat) = layout.as_opt::<Flat>() {
+            arrays.extend_from_slice(flat.array_ctx().ids());
+        }
+        for child in layout.children()? {
+            file_ids(&child, layouts, arrays)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn list_layout_file_has_no_other_unstable_ids() -> VortexResult<()> {
+        let session = write_session(&new_session(), true)?;
+        let list = ListArray::try_new(
+            Buffer::from_iter(0i64..65_536).into_array(),
+            Buffer::from_iter((0u32..=8_192).map(|i| i * 8)).into_array(),
+            Validity::NonNullable,
+            &mut session.create_execution_ctx(),
+        )?;
+        let root = StructArray::from_fields(&[("arr", list.into_array())])?.into_array();
+        let mut bytes = ByteBufferMut::empty();
+        RUNTIME.block_on(
+            session
+                .write_options()
+                .write(&mut bytes, root.to_array_stream()),
+        )?;
+
+        let file = session.open_options().open_buffer(bytes)?;
+        let (mut layouts, mut arrays) = (Vec::new(), Vec::new());
+        file_ids(file.footer().layout(), &mut layouts, &mut arrays)?;
+        assert!(layouts.contains(&List.id()));
+        let editions = session.editions();
+        let unstable = |kind| -> Vec<Id> {
+            editions
+                .components_in(&UNSTABLE, kind)
+                .into_iter()
+                .map(|inclusion| inclusion.component_id)
+                .filter(|id| *id != List.id())
+                .collect()
+        };
+        let (unstable_layouts, unstable_arrays) = (
+            unstable(ComponentKind::Layout),
+            unstable(ComponentKind::Array),
+        );
+        let leaked: Vec<&Id> = layouts
+            .iter()
+            .filter(|id| unstable_layouts.contains(id))
+            .chain(arrays.iter().filter(|id| unstable_arrays.contains(id)))
+            .collect();
+        assert!(leaked.is_empty(), "unstable ids in the file: {leaked:?}");
         Ok(())
     }
 }
