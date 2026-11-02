@@ -2306,6 +2306,28 @@ async fn nested_empty_list_roundtrip(#[case] validity: Validity) -> VortexResult
     Ok(())
 }
 
+/// A zero-row list column, which the writer stores as an empty chunked layout, round-trips.
+#[rstest]
+#[case::non_nullable(Nullability::NonNullable)]
+#[case::nullable(Nullability::Nullable)]
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn zero_row_list_roundtrip(#[case] nullability: Nullability) -> VortexResult<()> {
+    let mut ctx = SESSION.create_execution_ctx();
+    let list = ListArray::try_new(
+        PrimitiveArray::new::<i32>(buffer![], Validity::NonNullable).into_array(),
+        buffer![0u32].into_array(),
+        Validity::from(nullability),
+        &mut ctx,
+    )?
+    .into_array();
+    let array = StructArray::from_fields(&[("list", list)])?.into_array();
+
+    let result = write_read_roundtrip(array.clone()).await?;
+    assert_arrays_eq!(result, array, &mut ctx);
+    Ok(())
+}
+
 type MapEntryFixture<'a> = (i32, Option<&'a str>);
 type MapRowFixture<'a> = Option<Vec<MapEntryFixture<'a>>>;
 
