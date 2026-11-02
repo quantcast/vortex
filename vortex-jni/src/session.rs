@@ -15,6 +15,7 @@ use vortex::io::session::RuntimeSessionExt;
 use vortex::session::VortexSession;
 
 use crate::RUNTIME;
+use crate::writer::register_list_layout_edition;
 
 /// Constructs a fresh [`VortexSession`] bound to the JNI-shared tokio runtime and returns
 /// an opaque pointer that Java must pass to [`Java_dev_vortex_jni_NativeSession_free`].
@@ -23,6 +24,7 @@ pub(crate) fn new_session() -> Box<VortexSession> {
     session
         .enable_edition(CORE_2026_08_3)
         .vortex_expect("JNI-supported draft core edition is registered");
+    register_list_layout_edition(&session).vortex_expect("list layout edition is valid");
     vortex_parquet_variant::initialize(&session);
     vortex_spatial::initialize(&session);
     Box::new(session)
