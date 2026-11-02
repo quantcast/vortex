@@ -349,6 +349,7 @@ mod tests {
     use vortex_array::arrays::BoolArray;
     use vortex_array::arrays::ChunkedArray;
     use vortex_array::arrays::ListArray;
+    use vortex_array::arrays::PrimitiveArray;
     use vortex_array::arrays::StructArray;
     use vortex_array::dtype::Nullability;
     use vortex_array::dtype::PType;
@@ -360,6 +361,7 @@ mod tests {
     use super::*;
     use crate::layouts::chunked::writer::ChunkedLayoutStrategy;
     use crate::layouts::flat::writer::FlatLayoutStrategy;
+    use crate::layouts::list::ListLayoutEncoding;
     use crate::layouts::table::TableStrategy;
     use crate::segments::TestSegments;
     use crate::sequence::SequentialArrayStreamExt;
@@ -484,6 +486,27 @@ mod tests {
             .await?;
         assert_eq!(layout.dtype(), &i32_list_dtype(nullable));
         assert_eq!(layout.row_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn zero_row_chunk_writes_one_offset() -> VortexResult<()> {
+        let mut ctx = SESSION.create_execution_ctx();
+        let list = ListArray::try_new(
+            PrimitiveArray::new::<i32>(buffer![], Validity::NonNullable).into_array(),
+            buffer![0u32].into_array(),
+            Validity::NonNullable,
+            &mut ctx,
+        )?
+        .into_array();
+
+        let layout = write(&flat_list_strategy(), list).await?;
+        let offsets = layout
+            .as_opt::<ListLayoutEncoding>()
+            .map(|list| list.offsets())
+            .transpose()?
+            .map(|offsets| offsets.row_count());
+        assert_eq!(offsets, Some(1));
         Ok(())
     }
 
