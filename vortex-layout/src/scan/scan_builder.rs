@@ -249,7 +249,7 @@ impl<A: 'static + Send> ScanBuilder<A> {
     ///
     /// Each split in progress holds the decoded chunks of every column it overlaps, so a scan
     /// that runs alongside others, such as one task of several on a machine, can set this to
-    /// bound its memory.
+    /// reduce memory held by concurrent decoding. This does not cap total memory or I/O read-ahead.
     pub fn with_some_max_splits_in_flight(mut self, max: Option<NonZeroUsize>) -> Self {
         self.concurrency.max = max;
         self

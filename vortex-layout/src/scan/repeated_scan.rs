@@ -394,7 +394,9 @@ pub(crate) struct SplitConcurrency {
 
 impl SplitConcurrency {
     fn splits_in_flight(self) -> usize {
-        let scaled = self.per_worker * get_available_parallelism().unwrap_or(1);
+        let scaled = self
+            .per_worker
+            .saturating_mul(get_available_parallelism().unwrap_or(1));
         self.max.map_or(scaled, |max| scaled.min(max.get()))
     }
 }
@@ -423,6 +425,7 @@ fn intersect_ranges(left: Option<&Range<u64>>, right: Option<Range<u64>>) -> Opt
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
     use std::sync::Arc;
     use std::task::Poll;
 
@@ -435,9 +438,19 @@ mod tests {
     use vortex_error::VortexResult;
     use vortex_error::vortex_err;
 
+    use super::SplitConcurrency;
     use super::limit_rows;
     use super::stop_on_error;
     use crate::scan::limit::RowLimit;
+
+    #[test]
+    fn split_cap_handles_oversized_per_worker_concurrency() {
+        let concurrency = SplitConcurrency {
+            per_worker: usize::MAX,
+            max: NonZeroUsize::new(1),
+        };
+        assert_eq!(concurrency.splits_in_flight(), 1);
+    }
 
     #[rstest]
     #[case::whole_array(4)]

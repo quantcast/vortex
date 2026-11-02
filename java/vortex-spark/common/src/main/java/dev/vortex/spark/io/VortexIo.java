@@ -33,8 +33,8 @@ public final class VortexIo implements Serializable {
     /**
      * Option bounding how many splits of a file the native scan reads at once, in all. Each split in flight holds the
      * decoded chunks of every column it overlaps, and every task in an executor runs its own scan, which by default
-     * keeps several splits in flight per core, so setting this bounds a task's native memory. Zero keeps the native
-     * default.
+     * keeps several splits in flight per core. Lowering this reduces memory held by concurrent split decoding and Arrow
+     * conversion; it does not cap total native memory or I/O read-ahead. Zero keeps the native default.
      */
     public static final String SPLIT_CONCURRENCY_OPTION = "vortex.splitConcurrency";
 

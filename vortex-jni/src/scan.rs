@@ -22,6 +22,7 @@ use arrow_array::ffi::FFI_ArrowSchema;
 use arrow_array::ffi_stream::FFI_ArrowArrayStream;
 use arrow_schema::ArrowError;
 use arrow_schema::Field;
+use futures::Stream;
 use futures::StreamExt;
 use jni::EnvUnowned;
 use jni::objects::JByteArray;
@@ -40,6 +41,7 @@ use vortex::expr::Expression;
 use vortex::expr::root;
 use vortex::expr::stats::Precision;
 use vortex::io::runtime::BlockingRuntime;
+use vortex::io::runtime::current::CurrentThreadRuntime;
 use vortex::layout::scan::arrow::RecordBatchIteratorAdapter;
 use vortex::scan::DataSourceScan;
 use vortex::scan::PartitionRef;
@@ -380,28 +382,27 @@ pub extern "system" fn Java_dev_vortex_jni_NativePartition_scanArrow(
         let schema = Arc::new(session.arrow().to_arrow_schema(&dtype)?);
         let target = Arc::new(Field::new_struct("", schema.fields().clone(), false));
 
-        let iter = RUNTIME
-            .block_on_stream_thread_safe(|handle| {
-                array_stream
-                    .map(move |chunk| {
-                        let session = session.clone();
-                        let target = Arc::clone(&target);
-                        handle.spawn(async move {
-                            let chunk = chunk?;
-                            let mut ctx = session.create_execution_ctx();
-                            let arrow = session.arrow().execute_arrow(
-                                chunk,
-                                Some(target.as_ref()),
-                                &mut ctx,
-                            )?;
-                            rebase_offsets(RecordBatch::from(arrow.as_struct().clone()))
-                        })
-                    })
-                    .buffered(lookahead)
+        let handle = RUNTIME.handle();
+        let batches = array_stream
+            .map(move |chunk| {
+                let session = session.clone();
+                let target = Arc::clone(&target);
+                handle.spawn(async move {
+                    let chunk = chunk?;
+                    let mut ctx = session.create_execution_ctx();
+                    let arrow =
+                        session
+                            .arrow()
+                            .execute_arrow(chunk, Some(target.as_ref()), &mut ctx)?;
+                    rebase_offsets(RecordBatch::from(arrow.as_struct().clone()))
+                })
             })
-            .map(|result: VortexResult<RecordBatch>| {
+            .buffered(lookahead);
+        let iter = scan_iterator(&RUNTIME, split_concurrency, batches).map(
+            |result: VortexResult<RecordBatch>| {
                 result.map_err(|e| ArrowError::ExternalError(Box::new(e)))
-            });
+            },
+        );
 
         let reader = RecordBatchIteratorAdapter::new(iter, schema);
         let arrow_stream = FFI_ArrowArrayStream::new(Box::new(reader));
@@ -410,4 +411,70 @@ pub extern "system" fn Java_dev_vortex_jni_NativePartition_scanArrow(
         }
         Ok(())
     });
+}
+
+fn scan_iterator<R: Send + 'static>(
+    runtime: &CurrentThreadRuntime,
+    split_concurrency: Option<NonZeroUsize>,
+    stream: impl Stream<Item = R> + Send + 'static,
+) -> Box<dyn Iterator<Item = R> + Send> {
+    if split_concurrency.is_some() {
+        // The thread-safe bridge queues another batch per core, independently of the stream's
+        // conversion lookahead. Drive capped scans directly so that queue cannot bypass the cap.
+        Box::new(runtime.block_on_stream(stream))
+    } else {
+        Box::new(runtime.block_on_stream_thread_safe(|_| stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    use futures::StreamExt;
+    use futures::stream;
+    use rstest::rstest;
+    use vortex::io::runtime::BlockingRuntime;
+    use vortex::io::runtime::current::CurrentThreadRuntime;
+
+    use super::scan_iterator;
+
+    #[rstest]
+    #[case(1)]
+    #[case(2)]
+    fn split_concurrency_bounds_completed_batches_ahead_of_the_consumer(#[case] max: usize) {
+        let runtime = CurrentThreadRuntime::new();
+        let pool = runtime.new_pool();
+        pool.set_workers(2);
+        let completed = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&completed);
+        let handle = runtime.handle();
+        let batches = stream::iter(0..16)
+            .map(move |value| {
+                let counter = Arc::clone(&counter);
+                handle.spawn(async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    value
+                })
+            })
+            .buffered(max);
+        let mut iter = scan_iterator(&runtime, NonZeroUsize::new(max), batches);
+        assert_eq!(iter.next(), Some(0));
+
+        // Let background work finish while the consumer keeps its first batch open.
+        runtime.block_on(async {
+            for _ in 0..64 {
+                runtime.handle().spawn(async {}).await;
+            }
+        });
+        assert!(
+            completed.load(Ordering::SeqCst) <= max + 1,
+            "completed batches escaped the conversion lookahead bound"
+        );
+
+        assert_eq!(iter.collect::<Vec<_>>(), (1..16).collect::<Vec<_>>());
+    }
 }
