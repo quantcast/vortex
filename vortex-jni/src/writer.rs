@@ -526,6 +526,8 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_createStream(
 
         let metadata = extract_metadata(env, &metadata)?;
         let vm = env.get_java_vm()?;
+        let direct_buffers =
+            env.is_instance_of(&writable, jni::jni_str!("dev/vortex/io/ByteBufferWritable"))?;
         let writable = Arc::new(env.new_global_ref(&writable)?);
         let (tx, rx) = mpsc::channel(WRITE_CHANNEL_CAPACITY);
         let stream = ArrayStreamAdapter::new(write_schema.clone(), rx);
@@ -534,7 +536,7 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_createStream(
         write_options.validate_metadata()?;
         let buffered_bytes = write_options.buffered_bytes_tracker();
 
-        let mut write = CountingVortexWrite::new(JavaWrite::new(vm, writable));
+        let mut write = CountingVortexWrite::new(JavaWrite::new(vm, writable, direct_buffers));
         let bytes_written = write.counter();
         let handle = session.handle().spawn(async move {
             let summary = write_options.write(&mut write, stream).await?;
