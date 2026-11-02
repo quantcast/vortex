@@ -24,6 +24,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.arrow.memory.BufferAllocator;
@@ -46,9 +47,7 @@ final class NativeOutputBufferTest {
 
     private static byte[] payload() {
         byte[] bytes = new byte[3 * 65_536 + 17];
-        for (int i = 0; i < bytes.length; i++) {
-            bytes[i] = (byte) i;
-        }
+        new Random(0).nextBytes(bytes);
         return bytes;
     }
 
@@ -185,12 +184,14 @@ final class NativeOutputBufferTest {
         assertTrue(error.getCause().getMessage().contains("bytes unconsumed"), error.toString());
     }
 
-    @Test
-    void directWritesMustNotShrinkTheLimit() {
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1})
+    void directWritesMustNotShrinkTheLimit(int prefixLength) {
         ByteBufferWritable sink = new ByteBufferWritable() {
             @Override
             public void write(ByteBuffer buffer) {
-                buffer.limit(buffer.position());
+                buffer.limit(prefixLength);
+                buffer.position(buffer.limit());
             }
 
             @Override
