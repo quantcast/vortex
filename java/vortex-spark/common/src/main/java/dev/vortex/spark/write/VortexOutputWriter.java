@@ -4,8 +4,10 @@
 package dev.vortex.spark.write;
 
 import dev.vortex.api.Session;
+import dev.vortex.api.VortexWriteSummary;
 import dev.vortex.api.VortexWriter;
 import dev.vortex.io.NativeWritable;
+import dev.vortex.relocated.org.apache.arrow.memory.ArrowBuf;
 import dev.vortex.relocated.org.apache.arrow.memory.BufferAllocator;
 import dev.vortex.relocated.org.apache.arrow.memory.RootAllocator;
 import dev.vortex.relocated.org.apache.arrow.vector.FieldVector;
@@ -14,6 +16,7 @@ import dev.vortex.spark.VortexOptions;
 import dev.vortex.spark.VortexSparkSession;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.List;
 import java.util.Locale;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.execution.datasources.OutputWriter;
@@ -59,6 +62,10 @@ public final class VortexOutputWriter extends OutputWriter {
     private VectorSchemaRoot vectorSchemaRoot;
     private ArrowFieldWriter[] fieldWriters;
     private int batchRowCount = 0;
+    private long batchCount;
+    private long peakBatchArrowBytes;
+    private long peakBufferedBytes;
+    private VortexOutputWriterSummary summary;
     private Exception writeFailure;
     private boolean closed = false;
 
@@ -146,6 +153,9 @@ public final class VortexOutputWriter extends OutputWriter {
      */
     @Override
     public void write(InternalRow row) {
+        if (closed) {
+            throw new IllegalStateException("VortexOutputWriter for " + filePath + " is already closed");
+        }
         if (writeFailure != null) {
             throw new IllegalStateException(
                     "VortexOutputWriter for " + filePath + " failed on an earlier write", writeFailure);
@@ -181,14 +191,28 @@ public final class VortexOutputWriter extends OutputWriter {
             return;
         }
         vectorSchemaRoot.setRowCount(batchRowCount);
+        peakBatchArrowBytes = Math.max(peakBatchArrowBytes, arrowBytes(vectorSchemaRoot.getFieldVectors()));
 
         vortexWriter.writeBatch(vectorSchemaRoot, allocator);
+        batchCount++;
+        peakBufferedBytes = Math.max(peakBufferedBytes, vortexWriter.bufferedBytes());
 
         vectorSchemaRoot.clear();
         for (ArrowFieldWriter writer : fieldWriters) {
             writer.reset();
         }
         batchRowCount = 0;
+    }
+
+    private static long arrowBytes(List<FieldVector> vectors) {
+        long bytes = 0;
+        for (FieldVector vector : vectors) {
+            for (ArrowBuf buffer : vector.getFieldBuffers()) {
+                bytes += buffer.capacity();
+            }
+            bytes += arrowBytes(vector.getChildrenFromFields());
+        }
+        return bytes;
     }
 
     /**
@@ -205,6 +229,7 @@ public final class VortexOutputWriter extends OutputWriter {
             return;
         }
         IOException failure = null;
+        VortexWriteSummary fileSummary = null;
         if (writeFailure == null) {
             try {
                 writeBatch();
@@ -216,7 +241,7 @@ public final class VortexOutputWriter extends OutputWriter {
         }
         if (vortexWriter != null) {
             try {
-                vortexWriter.finish();
+                fileSummary = vortexWriter.finish();
             } catch (IOException e) {
                 failure = addFailure(failure, e);
             } finally {
@@ -245,6 +270,20 @@ public final class VortexOutputWriter extends OutputWriter {
         if (failure != null) {
             throw new UncheckedIOException("Failed to close Vortex output " + filePath, failure);
         }
+        summary = new VortexOutputWriterSummary(
+                fileSummary.fileSize(), fileSummary.rowCount(), batchCount, peakBatchArrowBytes, peakBufferedBytes);
+    }
+
+    /**
+     * Returns the completed file's size, row count and observed batch memory usage without reopening it.
+     *
+     * @throws IllegalStateException unless {@link #close()} completed successfully and no write failed
+     */
+    public VortexOutputWriterSummary summary() {
+        if (summary == null) {
+            throw new IllegalStateException("A write summary is only available after a successful close of " + filePath);
+        }
+        return summary;
     }
 
     @Override
