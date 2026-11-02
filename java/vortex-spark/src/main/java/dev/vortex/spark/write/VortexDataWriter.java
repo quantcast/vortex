@@ -48,7 +48,7 @@ public final class VortexDataWriter implements DataWriter<InternalRow>, AutoClos
     private BufferAllocator allocator;
     private VectorSchemaRoot vectorSchemaRoot;
     private ArrowSchema exportedSchema;
-    private ArrowFieldWriter[] fieldWriters;
+    private ArrowFieldWriter<?>[] fieldWriters;
     private int batchRowCount = 0;
     private long recordCount = 0;
     private long bytesWritten = 0;
@@ -102,7 +102,7 @@ public final class VortexDataWriter implements DataWriter<InternalRow>, AutoClos
                 vector.setInitialCapacity(initialCapacity);
             }
             StructField[] fields = schema.fields();
-            this.fieldWriters = new ArrowFieldWriter[fields.length];
+            this.fieldWriters = new ArrowFieldWriter<?>[fields.length];
             for (int i = 0; i < fields.length; i++) {
                 fieldWriters[i] = ArrowFieldWriter.create(vectorSchemaRoot.getVector(i), fields[i].dataType());
             }
@@ -172,7 +172,7 @@ public final class VortexDataWriter implements DataWriter<InternalRow>, AutoClos
         }
 
         vectorSchemaRoot.clear();
-        for (ArrowFieldWriter writer : fieldWriters) {
+        for (ArrowFieldWriter<?> writer : fieldWriters) {
             writer.reset();
         }
         batchRowCount = 0;
