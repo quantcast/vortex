@@ -42,6 +42,7 @@ final class VortexOptionsTest {
         assertEquals(Optional.empty(), options.get("vortex.absent"));
         assertEquals("fallback", options.get("vortex.absent", "fallback"));
         assertEquals(7, options.getInt("vortex.absent", 7));
+        assertEquals(7, options.getLong("vortex.absent", 7));
         assertTrue(options.getBoolean("vortex.absent", true));
     }
 
@@ -51,6 +52,19 @@ final class VortexOptionsTest {
 
         assertTrue(options.getBoolean("on", false));
         assertFalse(options.getBoolean("off", true));
+    }
+
+    @Test
+    void longOptionsAcceptValuesBeyondIntegerRangeAndTrimWhitespace() {
+        assertEquals(
+                3_000_000_000L,
+                VortexOptions.of(Map.of("BYTES", " 3000000000 ")).getLong("bytes", 0));
+        for (String value : new String[] {"many", "9223372036854775808"}) {
+            VortexOptions options = VortexOptions.of(Map.of("bytes", value));
+            assertTrue(assertThrows(IllegalArgumentException.class, () -> options.getLong("bytes", 0))
+                    .getMessage()
+                    .contains("bytes"));
+        }
     }
 
     @Test

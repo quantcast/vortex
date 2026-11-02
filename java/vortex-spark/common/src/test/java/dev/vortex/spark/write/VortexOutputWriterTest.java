@@ -39,6 +39,8 @@ import org.apache.spark.unsafe.Platform;
 import org.apache.spark.unsafe.types.UTF8String;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 final class VortexOutputWriterTest {
     private static final int DEFAULT = 8192;
@@ -98,6 +100,94 @@ final class VortexOutputWriterTest {
         }
         assertEquals(65536, VortexOutputWriter.configuredBatchSize(options(Map.of("batch.size", "65536"))));
         assertEquals(1, VortexOutputWriter.configuredBatchSize(options(Map.of("vortex.write.batch.size", "1"))));
+    }
+
+    @Test
+    void batchBytesAreOptionalPositiveLongs() {
+        assertEquals(0, VortexOutputWriter.configuredBatchBytes(VortexOptions.empty()));
+        assertEquals(1, VortexOutputWriter.configuredBatchBytes(options(Map.of("vortex.write.batch.bytes", "1"))));
+        assertEquals(
+                3_000_000_000L,
+                VortexOutputWriter.configuredBatchBytes(options(Map.of("VORTEX.WRITE.BATCH.BYTES", " 3000000000 "))));
+        assertEquals(
+                Long.MAX_VALUE,
+                VortexOutputWriter.configuredBatchBytes(
+                        options(Map.of("vortex.write.batch.bytes", Long.toString(Long.MAX_VALUE)))));
+        for (String value : new String[] {"0", "-1", "lots", "9223372036854775808"}) {
+            assertTrue(assertThrows(
+                            IllegalArgumentException.class,
+                            () -> VortexOutputWriter.configuredBatchBytes(
+                                    options(Map.of("vortex.write.batch.bytes", value))))
+                    .getMessage()
+                    .contains("vortex.write.batch.bytes"));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void theRowLimitStillFlushesWithOrWithoutAByteLimit(boolean byteLimit) {
+        StructType schema = new StructType().add("id", DataTypes.LongType, false);
+        Map<String, String> values = byteLimit
+                ? Map.of("batch.size", "3", "vortex.write.batch.bytes", Long.toString(Long.MAX_VALUE))
+                : Map.of("batch.size", "3");
+        VortexOutputWriter writer = writer("row-limit-" + byteLimit + ".vortex", schema, values);
+        try {
+            for (long i = 0; i < 7; i++) {
+                writer.write(new GenericInternalRow(new Object[] {i}));
+                assertEquals((i + 1) % 3, writer.batchRowCount());
+            }
+        } finally {
+            writer.close();
+        }
+        assertEquals(List.of("0", "1", "2", "3", "4", "5", "6"), readRows(writer.path()));
+    }
+
+    @Test
+    void aByteLimitFlushesNestedAndOversizedRowsBeforeTheRowLimit() {
+        StructType schema = new StructType()
+                .add("id", DataTypes.LongType, false)
+                .add("nested", new StructType().add("s", DataTypes.StringType, false), false);
+        VortexOutputWriter writer = writer("byte-limit.vortex", schema, Map.of("vortex.write.batch.bytes", "1000000"));
+        String large = "x".repeat(2_000_000);
+        try {
+            writer.write(new GenericInternalRow(
+                    new Object[] {0L, new GenericInternalRow(new Object[] {UTF8String.fromString("small")})}));
+            assertEquals(1, writer.batchRowCount());
+            writer.write(new GenericInternalRow(
+                    new Object[] {1L, new GenericInternalRow(new Object[] {UTF8String.fromString(large)})}));
+            assertEquals(0, writer.batchRowCount());
+            writer.write(new GenericInternalRow(
+                    new Object[] {2L, new GenericInternalRow(new Object[] {UTF8String.fromString("tail")})}));
+            assertEquals(1, writer.batchRowCount());
+            writer.write(new GenericInternalRow(
+                    new Object[] {3L, new GenericInternalRow(new Object[] {UTF8String.fromString("last")})}));
+            assertEquals(2, writer.batchRowCount());
+        } finally {
+            writer.close();
+        }
+        assertEquals(
+                List.of(
+                        "0\t{\"s\":\"small\"}",
+                        "1\t{\"s\":\"" + large + "\"}",
+                        "2\t{\"s\":\"tail\"}",
+                        "3\t{\"s\":\"last\"}"),
+                readRows(writer.path()));
+    }
+
+    @Test
+    void aThresholdSmallerThanOneRowsAllocationStillMakesProgress() {
+        StructType schema = new StructType().add("id", DataTypes.LongType, false);
+        VortexOutputWriter writer =
+                writer("single-row-batches.vortex", schema, Map.of("vortex.write.batch.bytes", "1"));
+        try {
+            for (long i = 0; i < 4; i++) {
+                writer.write(new GenericInternalRow(new Object[] {i}));
+                assertEquals(0, writer.batchRowCount());
+            }
+        } finally {
+            writer.close();
+        }
+        assertEquals(List.of("0", "1", "2", "3"), readRows(writer.path()));
     }
 
     /**
@@ -321,7 +411,8 @@ final class VortexOutputWriterTest {
     private static List<String> readRows(String fileUri) {
         List<String> rows = new ArrayList<>();
         try (BufferAllocator allocator = new RootAllocator()) {
-            Scan scan = DataSource.open(VortexSparkSession.get(), fileUri).scan(ScanOptions.of());
+            Scan scan = DataSource.open(VortexSparkSession.get(), fileUri)
+                    .scan(ScanOptions.builder().ordered(true).build());
             while (scan.hasNext()) {
                 try (ArrowReader reader = scan.next().scanArrow(allocator)) {
                     while (reader.loadNextBatch()) {

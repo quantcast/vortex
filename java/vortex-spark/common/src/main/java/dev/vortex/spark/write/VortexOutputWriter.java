@@ -37,6 +37,9 @@ public final class VortexOutputWriter extends OutputWriter {
     /** Option sizing the write batch for Vortex alone, overriding {@value #BATCH_SIZE_OPTION}. */
     public static final String WRITE_BATCH_SIZE_OPTION = "vortex.write.batch.size";
 
+    /** Optional positive byte threshold for the open batch's Arrow allocations, checked after each row. */
+    public static final String WRITE_BATCH_BYTES_OPTION = "vortex.write.batch.bytes";
+
     /**
      * Option storing list columns in the unstable list layout, so a read of some fields of array elements skips the
      * others. Off by default; future versions may not read files written with it.
@@ -51,6 +54,8 @@ public final class VortexOutputWriter extends OutputWriter {
     private final String filePath;
     private final VortexOptions options;
     private final int batchSize;
+    private final long batchBytes;
+    private final ArrowBatchMemory batchMemory;
     private NativeWritable writable;
 
     private Session session;
@@ -75,19 +80,16 @@ public final class VortexOutputWriter extends OutputWriter {
         this.writable = writable;
 
         this.batchSize = configuredBatchSize(options);
+        this.batchBytes = configuredBatchBytes(options);
+        this.batchMemory = batchBytes == 0 ? null : new ArrowBatchMemory();
 
         try {
-            this.allocator = new RootAllocator();
+            this.allocator = batchMemory == null ? new RootAllocator() : new RootAllocator(batchMemory, Long.MAX_VALUE);
             var arrowSchema = SparkToArrowSchema.convert(schema);
 
             this.vectorSchemaRoot = VectorSchemaRoot.create(arrowSchema, allocator);
             // Small start so writers that see few rows hold little memory; Arrow grows on demand.
-            // It also keeps the largest capacity a batch needed, so one batch of huge values makes
-            // later batches allocate as much.
-            int initialCapacity = Math.min(batchSize, INITIAL_VECTOR_CAPACITY);
-            for (FieldVector vector : vectorSchemaRoot.getFieldVectors()) {
-                vector.setInitialCapacity(initialCapacity);
-            }
+            resetInitialCapacity();
             StructField[] fields = schema.fields();
             this.fieldWriters = new ArrowFieldWriter[fields.length];
             for (int i = 0; i < fields.length; i++) {
@@ -137,6 +139,19 @@ public final class VortexOutputWriter extends OutputWriter {
         return batchSize;
     }
 
+    /** Returns the positive batch byte threshold, or zero when unset. */
+    static long configuredBatchBytes(VortexOptions options) {
+        if (options.get(WRITE_BATCH_BYTES_OPTION).isEmpty()) {
+            return 0;
+        }
+        long bytes = options.getLong(WRITE_BATCH_BYTES_OPTION, 0);
+        if (bytes <= 0) {
+            throw new IllegalArgumentException(
+                    WRITE_BATCH_BYTES_OPTION + " must be a positive number of bytes, got " + bytes);
+        }
+        return bytes;
+    }
+
     /**
      * Writes a single row to the Vortex file.
      *
@@ -161,8 +176,13 @@ public final class VortexOutputWriter extends OutputWriter {
                 fieldWriters[i].write(row, i);
             }
             batchRowCount++;
-            if (batchRowCount >= batchSize) {
+            boolean reachedBytes = batchMemory != null && batchMemory.bytes(vectorSchemaRoot) >= batchBytes;
+            if (batchRowCount >= batchSize || reachedBytes) {
                 writeBatch();
+                if (reachedBytes) {
+                    // An oversized row must not make every later small batch allocate its remembered capacity.
+                    resetInitialCapacity();
+                }
             }
         } catch (IOException e) {
             writeFailure = e;
@@ -172,6 +192,13 @@ public final class VortexOutputWriter extends OutputWriter {
             // written after it may reach the file.
             writeFailure = e;
             throw e;
+        }
+    }
+
+    private void resetInitialCapacity() {
+        int initialCapacity = Math.min(batchSize, INITIAL_VECTOR_CAPACITY);
+        for (FieldVector vector : vectorSchemaRoot.getFieldVectors()) {
+            vector.setInitialCapacity(initialCapacity);
         }
     }
 
@@ -189,6 +216,9 @@ public final class VortexOutputWriter extends OutputWriter {
             writer.reset();
         }
         batchRowCount = 0;
+        if (batchMemory != null) {
+            batchMemory.reset();
+        }
     }
 
     /**
@@ -255,6 +285,11 @@ public final class VortexOutputWriter extends OutputWriter {
     /** Package-private so tests can see what close leaves allocated. */
     BufferAllocator allocator() {
         return allocator;
+    }
+
+    /** Package-private so tests can observe batch boundaries without depending on native scheduling. */
+    int batchRowCount() {
+        return batchRowCount;
     }
 
     private IOException closeArrowResources(IOException failure) {
