@@ -73,8 +73,8 @@ Dataset<Row> df = spark.read()
 Spark's file-source framework provides recursive file listing, split bin-packing, Hive-style
 partition discovery and pruning, and the standard `pathGlobFilter` and
 `recursiveFileLookup` options. As with other Spark file formats, hidden files whose names begin
-with `_` or `.` are ignored. Vortex files are not split internally, and only required columns
-are read.
+with `_` or `.` are ignored. Large Vortex files can be split across tasks into disjoint row
+ranges, and only required columns are read.
 
 Only files that end with `.vortex` belong to a Vortex dataset. Writes produce that extension.
 Reads skip every other file in the dataset's directories. If a path holds files but none of them

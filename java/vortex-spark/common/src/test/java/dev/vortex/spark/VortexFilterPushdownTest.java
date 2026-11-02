@@ -380,6 +380,51 @@ public final class VortexFilterPushdownTest {
     }
 
     @Test
+    @DisplayName("Filters on partition columns skip the files of non-matching partitions")
+    public void testPartitionPruning() throws IOException {
+        Dataset<Row> df = spark.createDataFrame(
+                Arrays.asList(
+                        RowFactory.create(1, "A"),
+                        RowFactory.create(2, "B"),
+                        RowFactory.create(3, "C"),
+                        RowFactory.create(4, "A")),
+                DataTypes.createStructType(Arrays.asList(
+                        DataTypes.createStructField("id", DataTypes.IntegerType, false),
+                        DataTypes.createStructField("group", DataTypes.StringType, true))));
+
+        Path outputPath = tempDir.resolve("partition_pruning");
+        df.coalesce(1)
+                .write()
+                .format("vortex")
+                .partitionBy("group")
+                .option("path", outputPath.toUri().toString())
+                .mode(SaveMode.Overwrite)
+                .save();
+
+        Dataset<Row> readDf = spark.read()
+                .format("vortex")
+                .option("path", outputPath.toUri().toString())
+                .option("vortex.stats.rowCount", "false")
+                .load();
+
+        // A disjunction with a data column cannot rule out any partition.
+        Dataset<Row> mixed = readDf.filter(
+                readDf.col("group").equalTo("A").or(readDf.col("id").equalTo(2)));
+        assertEquals(List.of(1, 2, 4), idsOf(mixed.orderBy("id")));
+
+        // Inference has read every schema. Make the excluded partition unreadable so the
+        // result proves file pruning regardless of how Spark packs files into tasks.
+        try (Stream<Path> files = Files.walk(outputPath.resolve("group=B"))) {
+            for (Path file : files.filter(p -> p.toString().endsWith(".vortex")).collect(Collectors.toList())) {
+                Files.write(file, new byte[0]);
+            }
+        }
+        Dataset<Row> filtered = readDf.filter(readDf.col("group").isin("A", "C"));
+        assertEquals(List.of(1, 3, 4), idsOf(filtered.orderBy("id")));
+        assertEquals(0, readDf.filter(readDf.col("group").equalTo("Z")).count());
+    }
+
+    @Test
     @DisplayName("Pushed filters appear in the executed scan node")
     public void testPushedFiltersInPlan() throws IOException {
         Dataset<Row> df = spark.createDataFrame(
