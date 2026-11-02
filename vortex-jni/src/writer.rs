@@ -703,9 +703,23 @@ mod tests {
     use vortex::session::SessionVar;
     use vortex::session::registry::Id;
 
+    use std::sync::Arc;
+
+    use futures::StreamExt;
+    use futures::future::BoxFuture;
+    use parking_lot::Mutex;
+    use vortex::array::buffer::BufferHandle;
+    use vortex::buffer::Alignment;
+    use vortex::buffer::ByteBuffer;
+    use vortex::file::VortexOpenOptions;
+    use vortex::io::VortexReadAt;
+    use vortex::scan::ScanRequest;
+    use vortex_arrow::ArrowSessionExt;
+
     use super::LIST_LAYOUT_EDITION;
     use super::write_session;
     use crate::RUNTIME;
+    use crate::data_source::file_open_options;
     use crate::session::new_session;
 
     #[derive(Clone, Debug)]
@@ -822,6 +836,118 @@ mod tests {
             .chain(arrays.iter().filter(|id| unstable_arrays.contains(id)))
             .collect();
         assert!(leaked.is_empty(), "unstable ids in the file: {leaked:?}");
+        Ok(())
+    }
+
+    /// Records the offset of every read, and doesn't merge reads, so each read is one segment.
+    #[derive(Clone)]
+    struct RecordingReads {
+        bytes: ByteBuffer,
+        offsets: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl VortexReadAt for RecordingReads {
+        fn concurrency(&self) -> usize {
+            8
+        }
+
+        fn size(&self) -> BoxFuture<'static, VortexResult<u64>> {
+            let len = self.bytes.len() as u64;
+            Box::pin(async move { Ok(len) })
+        }
+
+        fn read_at(
+            &self,
+            offset: u64,
+            length: usize,
+            alignment: Alignment,
+        ) -> BoxFuture<'static, VortexResult<BufferHandle>> {
+            self.offsets.lock().push(offset);
+            self.bytes.read_at(offset, length, alignment)
+        }
+    }
+
+    /// Reads of a segment a scan of `bytes` in `splits` row ranges makes beyond the first.
+    fn segments_read_twice(
+        bytes: ByteBuffer,
+        splits: u64,
+        options: fn(VortexOpenOptions) -> VortexOpenOptions,
+    ) -> VortexResult<usize> {
+        let session = new_session();
+        let offsets = Arc::new(Mutex::new(Vec::new()));
+        let source = RecordingReads {
+            bytes,
+            offsets: Arc::clone(&offsets),
+        };
+        RUNTIME.block_on(async {
+            let file = options(session.open_options())
+                .open(Arc::new(source))
+                .await?;
+            offsets.lock().clear();
+            let rows = file.row_count();
+            let data_source = file.data_source()?;
+            for split in 0..splits {
+                let request = ScanRequest {
+                    row_range: Some(rows * split / splits..rows * (split + 1) / splits),
+                    ..Default::default()
+                };
+                let mut partitions = data_source.scan(request).await?.partitions();
+                while let Some(partition) = partitions.next().await {
+                    let mut chunks = partition?.execute()?;
+                    while let Some(chunk) = chunks.next().await {
+                        let mut ctx = session.create_execution_ctx();
+                        session.arrow().execute_arrow(chunk?, None, &mut ctx)?;
+                    }
+                }
+            }
+            let mut offsets = offsets.lock().clone();
+            offsets.sort_unstable();
+            let total = offsets.len();
+            offsets.dedup();
+            Ok(total - offsets.len())
+        })
+    }
+
+    /// A list column's elements are chunked apart from its rows, so a scan's row ranges share
+    /// element segments, and each range asks for them after it has read its own offsets.
+    #[test]
+    fn list_layout_scan_reads_each_segment_once() -> VortexResult<()> {
+        let session = write_session(&new_session(), true)?;
+        let rows = 65_536u32;
+        let elements = StructArray::from_fields(&[
+            (
+                "a",
+                Buffer::from_iter(0i64..i64::from(rows) * 4).into_array(),
+            ),
+            (
+                "b",
+                Buffer::from_iter((0i64..i64::from(rows) * 4).map(|i| i % 7)).into_array(),
+            ),
+        ])?;
+        let list = ListArray::try_new(
+            elements.into_array(),
+            Buffer::from_iter((0..=rows).map(|i| i * 4)).into_array(),
+            Validity::NonNullable,
+            &mut session.create_execution_ctx(),
+        )?;
+        let root = StructArray::from_fields(&[
+            ("id", Buffer::from_iter(0i64..i64::from(rows)).into_array()),
+            ("arr", list.into_array()),
+        ])?
+        .into_array();
+        let mut bytes = ByteBufferMut::empty();
+        RUNTIME.block_on(
+            session
+                .write_options()
+                .write(&mut bytes, root.to_array_stream()),
+        )?;
+        let bytes = bytes.freeze();
+
+        assert!(
+            segments_read_twice(bytes.clone(), 4, |options| options)? > 0,
+            "the test no longer reproduces re-reads"
+        );
+        assert_eq!(segments_read_twice(bytes, 4, file_open_options)?, 0);
         Ok(())
     }
 }

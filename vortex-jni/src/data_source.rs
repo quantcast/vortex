@@ -24,11 +24,14 @@ use url::Url;
 use vortex::error::VortexResult;
 use vortex::error::vortex_err;
 use vortex::expr::stats::Precision;
+use vortex::file::VortexOpenOptions;
 use vortex::file::multi::MultiFileDataSource;
 use vortex::file::multi::parse_uri_or_path;
 use vortex::io::filesystem::FileSystemRef;
 use vortex::io::runtime::BlockingRuntime;
 use vortex::io::session::RuntimeSessionExt;
+use vortex::layout::segments::MokaSegmentCache;
+use vortex::layout::segments::SegmentEviction;
 use vortex::scan::DataSourceRef;
 use vortex_arrow::ArrowSessionExt;
 
@@ -38,6 +41,25 @@ use crate::file::extract_properties;
 use crate::io::JavaFileSystem;
 use crate::object_store::object_store_fs;
 use crate::session::session_ref;
+
+/// The most segment bytes each open file keeps while it is read.
+///
+/// A scan reads a file as several row ranges, and a segment that spans ranges is requested once per
+/// range. A list layout column's elements usually do: its elements are chunked independently of its
+/// rows, and its offsets must be read before its elements can be requested, so the requests miss the
+/// in-flight deduplication flat columns get. Without a cache each request reads storage again.
+const FILE_SEGMENT_CACHE_BYTES: u64 = 64 << 20;
+
+/// The options each file the data source opens gets: its own segment cache, which lives as long as
+/// the open file.
+pub(crate) fn file_open_options(options: VortexOpenOptions) -> VortexOpenOptions {
+    let cache = MokaSegmentCache::new(FILE_SEGMENT_CACHE_BYTES, SegmentEviction::Lru);
+    options.with_segment_cache(Arc::new(cache.for_file("file")))
+}
+
+fn with_file_segment_cache(builder: MultiFileDataSource) -> MultiFileDataSource {
+    builder.with_open_options(file_open_options)
+}
 
 /// Wraps an `Arc<dyn DataSource>` behind a single pointer.
 pub(crate) struct NativeDataSource {
@@ -93,7 +115,7 @@ pub extern "system" fn Java_dev_vortex_jni_NativeDataSource_open(
             .collect::<VortexResult<_>>()?;
 
         // Glob by the path the resolver reports — only it knows how deep each store is mounted.
-        let mut builder = MultiFileDataSource::new(session.clone());
+        let mut builder = with_file_segment_cache(MultiFileDataSource::new(session.clone()));
         for glob_url in &glob_urls {
             let (fs, glob) = object_store_fs(glob_url, &properties, session.handle())?;
             builder = builder.with_glob(glob, Some(fs));
@@ -165,7 +187,7 @@ pub extern "system" fn Java_dev_vortex_jni_NativeDataSource_openFiles(
         }
 
         let fs: FileSystemRef = Arc::new(fs);
-        let mut builder = MultiFileDataSource::new(session.clone());
+        let mut builder = with_file_segment_cache(MultiFileDataSource::new(session.clone()));
         for path in ordered_paths {
             builder = builder.with_glob(path, Some(Arc::clone(&fs)));
         }
