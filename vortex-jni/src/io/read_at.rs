@@ -91,9 +91,11 @@ impl JavaReadable {
 
 impl VortexReadAt for JavaReadable {
     fn coalesce_config(&self) -> Option<CoalesceConfig> {
-        // Upcalls have a fixed JNI overhead and the backing storage is usually
-        // remote, so favor fewer, larger reads.
-        Some(CoalesceConfig::object_storage())
+        // Upcalls have a fixed JNI overhead and the backing storage is usually remote, so merge
+        // nearby reads, but only across small gaps: a merged read that spans a segment the file's
+        // segment cache already holds reads it again. With a 1 MiB gap, list layout scans read
+        // 1.3x to 1.8x the bytes they need even with the cache; with 64 KiB, 1.0x to 1.2x.
+        Some(CoalesceConfig::new(64 << 10, 16 << 20))
     }
 
     fn concurrency(&self) -> usize {
