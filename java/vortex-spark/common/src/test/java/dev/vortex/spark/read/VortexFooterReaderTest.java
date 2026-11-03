@@ -23,7 +23,8 @@ final class VortexFooterReaderTest {
         StructType merged = VortexFooterReader.mergeStructs(reverse ? upper : lower, reverse ? lower : upper, false);
 
         assertEquals(new StructType().add(reverse ? "ID" : "id", DataTypes.LongType, true), merged);
-        assertFalse(VortexFooterReader.mergeStructs(lower, lower, false).apply("id").nullable());
+        assertFalse(
+                VortexFooterReader.mergeStructs(lower, lower, false).apply("id").nullable());
     }
 
     @ParameterizedTest
@@ -67,6 +68,7 @@ final class VortexFooterReaderTest {
                         reverse ? unique : ambiguous, reverse ? ambiguous : unique, false));
 
         assertTrue(failure.getMessage().contains("Ambiguous columns id and ID"));
-        assertEquals(2, VortexFooterReader.mergeStructs(ambiguous, ambiguous, true).size());
+        assertEquals(
+                2, VortexFooterReader.mergeStructs(ambiguous, ambiguous, true).size());
     }
 }

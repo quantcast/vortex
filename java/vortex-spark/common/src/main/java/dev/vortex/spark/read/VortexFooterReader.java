@@ -90,11 +90,13 @@ public final class VortexFooterReader {
         }
 
         if (!options.getBoolean(MERGE_SCHEMA_OPTION, true)) {
-            return withDataSource(vortexFiles.get(0), io, options, source -> sparkSchema(source, caseSensitive));
+            VortexFile file = vortexFiles.get(0);
+            return validateSchema(
+                    withDataSource(file, io, options, VortexFooterReader::sparkSchema), file, caseSensitive);
         }
 
-        List<StructType> schemas = mapFooters(vortexFiles, io, options, source -> sparkSchema(source, caseSensitive));
-        StructType merged = schemas.get(0);
+        List<StructType> schemas = mapFooters(vortexFiles, io, options, VortexFooterReader::sparkSchema);
+        StructType merged = validateSchema(schemas.get(0), vortexFiles.get(0), caseSensitive);
         for (int i = 1; i < schemas.size(); i++) {
             try {
                 merged = mergeStructs(merged, schemas.get(i), caseSensitive);
@@ -270,14 +272,21 @@ public final class VortexFooterReader {
         return byName;
     }
 
-    private static StructType sparkSchema(DataSource source, boolean caseSensitive) {
+    private static StructType validateSchema(StructType schema, VortexFile file, boolean caseSensitive) {
+        try {
+            indexByName(schema, caseSensitive);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Cannot infer the schema of " + file.path() + ": " + e.getMessage(), e);
+        }
+        return schema;
+    }
+
+    private static StructType sparkSchema(DataSource source) {
         StructField[] fields = source.arrowSchema(ArrowAllocation.rootAllocator()).getFields().stream()
                 .map(field -> new StructField(
                         field.getName(), ArrowUtils.fromArrowField(field), field.isNullable(), Metadata.empty()))
                 .toArray(StructField[]::new);
-        StructType schema = new StructType(fields);
-        indexByName(schema, caseSensitive);
-        return schema;
+        return new StructType(fields);
     }
 
     /** Applies {@code function} to every file's footer in a bounded pool, returning results in listing order. */

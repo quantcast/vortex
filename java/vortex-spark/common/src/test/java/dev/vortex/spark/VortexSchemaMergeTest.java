@@ -8,11 +8,15 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.vortex.spark.io.VortexIo;
+import dev.vortex.spark.read.VortexFooterReader;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
+import org.apache.hadoop.fs.FileStatus;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
@@ -92,6 +96,18 @@ public final class VortexSchemaMergeTest {
         writeCaseFile(dir.resolve(reverse ? "b.vortex" : "a.vortex"), "id", 1L);
         writeCaseFile(dir.resolve(reverse ? "a.vortex" : "b.vortex"), "ID", 2L);
 
+        VortexOptions options = VortexOptions.of(Map.of());
+        StructType ordered = VortexFooterReader.inferSchema(
+                List.of(fileStatus(dir.resolve("a.vortex")), fileStatus(dir.resolve("b.vortex"))),
+                VortexIo.create(options, spark.sparkContext().hadoopConfiguration()),
+                options,
+                caseSensitive);
+        StructType expected = new StructType().add(reverse ? "ID" : "id", DataTypes.LongType, caseSensitive);
+        if (caseSensitive) {
+            expected = expected.add(reverse ? "id" : "ID", DataTypes.LongType, true);
+        }
+        assertEquals(expected, ordered);
+
         Dataset<Row> data = read(dir);
         if (caseSensitive) {
             assertEquals(2, data.schema().size());
@@ -127,6 +143,8 @@ public final class VortexSchemaMergeTest {
                 .load(dir.toString()));
 
         assertTrue(failure.getMessage().contains("Ambiguous columns id and ID"), failure.getMessage());
+        assertTrue(failure.getMessage().contains(dir.toString()), failure.getMessage());
+        assertTrue(failure.getMessage().contains(".vortex"), failure.getMessage());
     }
 
     @Test
@@ -280,6 +298,11 @@ public final class VortexSchemaMergeTest {
                     .orElseThrow();
             Files.move(written, file);
         }
+    }
+
+    private FileStatus fileStatus(Path file) throws IOException {
+        org.apache.hadoop.fs.Path path = new org.apache.hadoop.fs.Path(file.toUri());
+        return path.getFileSystem(spark.sparkContext().hadoopConfiguration()).getFileStatus(path);
     }
 
     private void append(Path dir, StructType schema, Row... rows) {
