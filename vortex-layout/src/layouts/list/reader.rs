@@ -26,6 +26,7 @@ use vortex_array::dtype::Nullability;
 use vortex_array::dtype::PType;
 use vortex_array::expr::BoundExpression;
 use vortex_array::expr::root;
+use vortex_array::match_each_signed_integer_ptype;
 use vortex_array::scalar_fn::fns::operators::Operator;
 use vortex_array::validity::Validity;
 use vortex_buffer::BitBufferMut;
@@ -759,9 +760,9 @@ fn fetch_validity(
     .boxed())
 }
 
-/// Decode `offsets` to `u64` and check what the readers rely on: `count` values, each no greater
-/// than the next, the last no greater than the elements child's `elements_rows`. A file whose
-/// offsets break this fails the read instead of panicking or building lists past the elements.
+/// Decode `offsets` to `u64` and check what the readers rely on: `count` non-negative values, each
+/// no greater than the next, the last no greater than the elements child's `elements_rows`. A file
+/// whose offsets break this fails the read instead of panicking or building lists past the elements.
 fn check_offsets(
     offsets: ArrayRef,
     count: usize,
@@ -773,10 +774,21 @@ fn check_offsets(
         count,
         "List offsets read returned the wrong number of offsets"
     );
-    // The cast fails on negative values.
+    let mut ctx = session.create_execution_ctx();
+    let offsets = offsets.execute::<PrimitiveArray>(&mut ctx)?;
+    // Casting can trust persisted min/max statistics, so check the actual signed values first.
+    if offsets.ptype().is_signed_int() {
+        match_each_signed_integer_ptype!(offsets.ptype(), |P| {
+            let values = offsets.as_slice::<P>();
+            if let Some(i) = values.iter().position(|&value| value < 0) {
+                vortex_bail!("List offset at index {i} is negative: {}", values[i]);
+            }
+        });
+    }
     let offsets = offsets
+        .into_array()
         .cast(DType::Primitive(PType::U64, Nullability::NonNullable))?
-        .execute::<PrimitiveArray>(&mut session.create_execution_ctx())?;
+        .execute::<PrimitiveArray>(&mut ctx)?;
     let values = offsets.as_slice::<u64>();
     if let Some(i) = values.windows(2).position(|w| w[0] > w[1]) {
         vortex_bail!(
@@ -888,7 +900,10 @@ mod tests {
     use vortex_array::expr::mask;
     use vortex_array::expr::pack;
     use vortex_array::expr::select;
+    use vortex_array::expr::stats::Precision;
+    use vortex_array::expr::stats::Stat;
     use vortex_array::expr::var;
+    use vortex_array::match_each_signed_integer_ptype;
     use vortex_buffer::buffer;
     use vortex_io::session::RuntimeSession;
     use vortex_io::session::RuntimeSessionExt;
@@ -1211,6 +1226,24 @@ mod tests {
         Ok((segments, layout, session))
     }
 
+    #[rstest]
+    #[case::same_width_cast(buffer![-2i64, -1].into_array())]
+    #[case::widening_cast(buffer![-2i32, -1].into_array())]
+    fn negative_offsets_ignore_persisted_statistics(#[case] offsets: ArrayRef) {
+        match_each_signed_integer_ptype!(offsets.dtype().as_ptype(), |P| {
+            let min: P = 0;
+            let max: P = 1;
+            offsets.statistics().set(Stat::Min, Precision::exact(min));
+            offsets.statistics().set(Stat::Max, Precision::exact(max));
+        });
+
+        // The forged bounds let a statistics-based cast wrap negative offsets. A large logical
+        // elements count also makes the wrapped values pass the terminal-bound check.
+        let error = check_offsets(offsets, 2, u64::MAX, &SESSION)
+            .expect_err("negative offsets must fail even when persisted statistics say they fit");
+        assert!(error.to_string().contains("negative"), "{error}");
+    }
+
     /// Offsets that decrease, run past the elements or are negative fail every read path with an
     /// error, instead of panicking or building lists over elements that aren't there.
     #[rstest]
@@ -1219,7 +1252,7 @@ mod tests {
         #[values(
             (buffer![0u64, 3, 2, 5].into_array(), "decrease"),
             (buffer![0u64, 2, 4, 6].into_array(), "past the end"),
-            (buffer![0i64, 2, -4, 5].into_array(), ""),
+            (buffer![0i64, 2, -4, 5].into_array(), "negative"),
         )]
         case: (ArrayRef, &str),
         #[values("full", "bounded", "sparse", "lengths")] read: &str,
