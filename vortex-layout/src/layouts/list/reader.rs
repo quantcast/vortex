@@ -26,6 +26,7 @@ use vortex_array::dtype::Nullability;
 use vortex_array::dtype::PType;
 use vortex_array::expr::BoundExpression;
 use vortex_array::expr::root;
+use vortex_array::match_each_signed_integer_ptype;
 use vortex_array::scalar_fn::fns::operators::Operator;
 use vortex_array::validity::Validity;
 use vortex_buffer::BitBufferMut;
@@ -33,6 +34,10 @@ use vortex_buffer::Buffer;
 use vortex_buffer::BufferMut;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
+use vortex_error::vortex_bail;
+use vortex_error::vortex_ensure;
+use vortex_error::vortex_ensure_eq;
+use vortex_error::vortex_err;
 use vortex_mask::AllOr;
 use vortex_mask::Mask;
 use vortex_session::VortexSession;
@@ -353,16 +358,28 @@ impl ListReader {
     /// Fire the offsets read for `row_range` in list row space. The offsets child has an extra entry, so reading
     /// `row_range` maps to offsets in `[row_range.start..row_range.end + 1)`.
     ///
-    /// No mask or expression is applied.
+    /// No mask or expression is applied. The offsets come back as `u64` and checked with
+    /// [`check_offsets`], so every later range, subtraction and `ListArray::new_unchecked` can rely
+    /// on them.
     fn fetch_raw_offsets(&self, row_range: &Range<u64>) -> VortexResult<ArrayFuture> {
-        let offsets_range = row_range.start..(row_range.end + 1);
+        let end = row_range.end.checked_add(1).ok_or_else(|| {
+            vortex_err!("List row range {row_range:?} overflows its offsets range")
+        })?;
+        let offsets_range = row_range.start..end;
         let offsets_count = usize::try_from(offsets_range.end - offsets_range.start)?;
         let root = root().bind(self.offsets.dtype())?;
-        self.offsets.projection_evaluation(
+        let fut = self.offsets.projection_evaluation(
             &offsets_range,
             &root,
             MaskFuture::new_true(offsets_count),
-        )
+        )?;
+        let elements_rows = self.elements.row_count();
+        let session = self.session.clone();
+        Ok(async move {
+            let offsets = fut.await?;
+            check_offsets(offsets, offsets_count, elements_rows, &session)
+        }
+        .boxed())
     }
 
     /// Fire the read of `expr` over the elements of `row_range` that `mask` selects, in element
@@ -496,8 +513,9 @@ fn lists_over(
     fields: Option<&FieldNames>,
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
-    // SAFETY: the offsets are monotonically increasing and index into the elements read, which
-    // give one value per element, and the validity covers the same lists.
+    // SAFETY: `check_offsets` made the offsets non-decreasing and bounded by the elements child;
+    // the read paths rebase or rebuild them over the elements read, which give one value per
+    // element, and the validity covers the same lists.
     let Some(fields) = fields else {
         return Ok(unsafe { ListArray::new_unchecked(elements, offsets, validity) }.into_array());
     };
@@ -742,6 +760,53 @@ fn fetch_validity(
     .boxed())
 }
 
+/// Decode `offsets` to `u64` and check what the readers rely on: `count` non-negative values, each
+/// no greater than the next, the last no greater than the elements child's `elements_rows`. A file
+/// whose offsets break this fails the read instead of panicking or building lists past the elements.
+fn check_offsets(
+    offsets: ArrayRef,
+    count: usize,
+    elements_rows: u64,
+    session: &VortexSession,
+) -> VortexResult<ArrayRef> {
+    vortex_ensure_eq!(
+        offsets.len(),
+        count,
+        "List offsets read returned the wrong number of offsets"
+    );
+    let mut ctx = session.create_execution_ctx();
+    let offsets = offsets.execute::<PrimitiveArray>(&mut ctx)?;
+    // Casting can trust persisted min/max statistics, so check the actual signed values first.
+    if offsets.ptype().is_signed_int() {
+        match_each_signed_integer_ptype!(offsets.ptype(), |P| {
+            let values = offsets.as_slice::<P>();
+            if let Some(i) = values.iter().position(|&value| value < 0) {
+                vortex_bail!("List offset at index {i} is negative: {}", values[i]);
+            }
+        });
+    }
+    let offsets = offsets
+        .into_array()
+        .cast(DType::Primitive(PType::U64, Nullability::NonNullable))?
+        .execute::<PrimitiveArray>(&mut ctx)?;
+    let values = offsets.as_slice::<u64>();
+    if let Some(i) = values.windows(2).position(|w| w[0] > w[1]) {
+        vortex_bail!(
+            "List offsets decrease at offset {}: {} > {}",
+            i,
+            values[i],
+            values[i + 1]
+        );
+    }
+    if let Some(&last) = values.last() {
+        vortex_ensure!(
+            last <= elements_rows,
+            "List offset {last} is past the end of its {elements_rows} elements"
+        );
+    }
+    Ok(offsets.into_array())
+}
+
 /// Read `offsets[0]` and `offsets[-1]` and return the elements range they bound.
 fn elements_range_from_offsets(
     offsets: &ArrayRef,
@@ -835,7 +900,10 @@ mod tests {
     use vortex_array::expr::mask;
     use vortex_array::expr::pack;
     use vortex_array::expr::select;
+    use vortex_array::expr::stats::Precision;
+    use vortex_array::expr::stats::Stat;
     use vortex_array::expr::var;
+    use vortex_array::match_each_signed_integer_ptype;
     use vortex_buffer::buffer;
     use vortex_io::session::RuntimeSession;
     use vortex_io::session::RuntimeSessionExt;
@@ -1126,6 +1194,90 @@ mod tests {
         )
         .expect("array is valid")
         .into_array()
+    }
+
+    /// A non-nullable `list<i32>` of 3 lists over 5 elements with the given `offsets`, written
+    /// child by child so the offsets can break what the list writer guarantees.
+    async fn list_with_offsets(
+        offsets: ArrayRef,
+    ) -> VortexResult<(Arc<dyn SegmentSource>, LayoutRef, VortexSession)> {
+        let session = layout_test_session().with_tokio();
+        let segments = Arc::new(TestSegments::default());
+        let mut children = Vec::new();
+        for array in [buffer![1i32, 2, 3, 4, 5].into_array(), offsets] {
+            let (ptr, eof) = SequenceId::root().split();
+            let stream = array.to_array_stream().sequenced(ptr);
+            let segment_sink = Arc::<TestSegments>::clone(&segments);
+            children.push(
+                FlatLayoutStrategy::default()
+                    .write_stream(
+                        ArrayContext::empty().into(),
+                        segment_sink,
+                        stream,
+                        eof,
+                        &session,
+                    )
+                    .await?,
+            );
+        }
+        let [elements, offsets] = <[LayoutRef; 2]>::try_from(children).expect("two children");
+        let dtype = DType::List(Arc::new(elements.dtype().clone()), Nullability::NonNullable);
+        let layout = ListLayout::try_new(dtype, elements, offsets, None)?.into_layout();
+        Ok((segments, layout, session))
+    }
+
+    #[rstest]
+    #[case::same_width_cast(buffer![-2i64, -1].into_array())]
+    #[case::widening_cast(buffer![-2i32, -1].into_array())]
+    fn negative_offsets_ignore_persisted_statistics(#[case] offsets: ArrayRef) {
+        match_each_signed_integer_ptype!(offsets.dtype().as_ptype(), |P| {
+            let min: P = 0;
+            let max: P = 1;
+            offsets.statistics().set(Stat::Min, Precision::exact(min));
+            offsets.statistics().set(Stat::Max, Precision::exact(max));
+        });
+
+        // The forged bounds let a statistics-based cast wrap negative offsets. A large logical
+        // elements count also makes the wrapped values pass the terminal-bound check.
+        let error = check_offsets(offsets, 2, u64::MAX, &SESSION)
+            .expect_err("negative offsets must fail even when persisted statistics say they fit");
+        assert!(error.to_string().contains("negative"), "{error}");
+    }
+
+    /// Offsets that decrease, run past the elements or are negative fail every read path with an
+    /// error, instead of panicking or building lists over elements that aren't there.
+    #[rstest]
+    #[tokio::test]
+    async fn malformed_offsets_fail_the_read(
+        #[values(
+            (buffer![0u64, 3, 2, 5].into_array(), "decrease"),
+            (buffer![0u64, 2, 4, 6].into_array(), "past the end"),
+            (buffer![0i64, 2, -4, 5].into_array(), "negative"),
+        )]
+        case: (ArrayRef, &str),
+        #[values("full", "bounded", "sparse", "lengths")] read: &str,
+    ) -> VortexResult<()> {
+        let (offsets, message) = case;
+        let (segments, layout, session) = list_with_offsets(offsets).await?;
+        let reader =
+            layout.new_reader("".into(), segments, &session, &LayoutReaderContext::new())?;
+        let (range, expr, mask) = match read {
+            "full" => (0..3, root(), Mask::new_true(3)),
+            "bounded" => (1..3, root(), Mask::new_true(2)),
+            "sparse" => (0..3, root(), Mask::from_iter([true, false, true])),
+            _ => (0..3, list_length(root()), Mask::new_true(3)),
+        };
+        let expr = expr.bind(reader.dtype())?;
+        let result = match reader.projection_evaluation(&range, &expr, MaskFuture::ready(mask)) {
+            Ok(fut) => fut.await.map(drop),
+            Err(err) => Err(err),
+        };
+        let err = result.err().map(|err| err.to_string());
+        assert!(
+            err.as_ref().is_some_and(|err| err.contains(message)),
+            "{read}: {err:?}"
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -2059,7 +2211,9 @@ mod tests {
         let list = create_ten_element_list_array(nullable);
         let source = if as_list_view {
             let mut ctx = SESSION.create_execution_ctx();
-            list.clone().execute::<ListViewArray>(&mut ctx)?.into_array()
+            list.clone()
+                .execute::<ListViewArray>(&mut ctx)?
+                .into_array()
         } else {
             list.clone()
         };
