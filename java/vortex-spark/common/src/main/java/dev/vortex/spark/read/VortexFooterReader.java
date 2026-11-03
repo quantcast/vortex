@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.TreeMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -60,10 +61,13 @@ public final class VortexFooterReader {
      * file's rows. Set {@value #MERGE_SCHEMA_OPTION} to false to read one footer and let the first file's schema stand
      * for the dataset; a dataset of uniform files then costs one footer read instead of one per file.
      *
-     * @throws IllegalArgumentException if the listing holds files but none of them is a Vortex file, or if two files
-     *     give a field types that cannot be merged
+     * <p>Top-level names are resolved using Spark's case sensitivity setting, retaining the first spelling seen.
+     *
+     * @throws IllegalArgumentException if the listing holds files but none of them is a Vortex file, a file has
+     *     ambiguous column names, or two files assign incompatible types to a field
      */
-    public static StructType inferSchema(List<FileStatus> files, VortexIo io, VortexOptions options) {
+    public static StructType inferSchema(
+            List<FileStatus> files, VortexIo io, VortexOptions options, boolean caseSensitive) {
         List<VortexFile> vortexFiles = new ArrayList<>();
         boolean sawFile = false;
         for (FileStatus status : files) {
@@ -86,14 +90,14 @@ public final class VortexFooterReader {
         }
 
         if (!options.getBoolean(MERGE_SCHEMA_OPTION, true)) {
-            return withDataSource(vortexFiles.get(0), io, options, VortexFooterReader::sparkSchema);
+            return withDataSource(vortexFiles.get(0), io, options, source -> sparkSchema(source, caseSensitive));
         }
 
-        List<StructType> schemas = mapFooters(vortexFiles, io, options, VortexFooterReader::sparkSchema);
+        List<StructType> schemas = mapFooters(vortexFiles, io, options, source -> sparkSchema(source, caseSensitive));
         StructType merged = schemas.get(0);
         for (int i = 1; i < schemas.size(); i++) {
             try {
-                merged = mergeStructs(merged, schemas.get(i));
+                merged = mergeStructs(merged, schemas.get(i), caseSensitive);
             } catch (IllegalArgumentException e) {
                 throw new IllegalArgumentException(
                         String.format(
@@ -173,23 +177,24 @@ public final class VortexFooterReader {
      * projects a struct column whole, as the file stores it, so it has no way to widen one file's struct to a shape
      * another file agreed on.
      *
-     * @throws IllegalArgumentException if a field has types that cannot be merged
+     * @throws IllegalArgumentException if either schema has ambiguous column names or a field has types that cannot be
+     *     merged
      */
-    static StructType mergeStructs(StructType left, StructType right) {
-        Map<String, StructField> rightFields = indexByName(right);
-        Map<String, StructField> leftFields = indexByName(left);
+    static StructType mergeStructs(StructType left, StructType right, boolean caseSensitive) {
+        Map<String, StructField> rightFields = indexByName(right, caseSensitive);
+        Map<String, StructField> leftFields = indexByName(left, caseSensitive);
 
-        LinkedHashMap<String, StructField> merged = new LinkedHashMap<>();
+        List<StructField> merged = new ArrayList<>();
         for (StructField field : left.fields()) {
             StructField other = rightFields.get(field.name());
-            merged.put(field.name(), other == null ? asNullable(field) : mergeFields(field, other));
+            merged.add(other == null ? asNullable(field) : mergeFields(field, other));
         }
         for (StructField field : right.fields()) {
             if (!leftFields.containsKey(field.name())) {
-                merged.put(field.name(), asNullable(field));
+                merged.add(asNullable(field));
             }
         }
-        return new StructType(merged.values().toArray(new StructField[0]));
+        return new StructType(merged.toArray(new StructField[0]));
     }
 
     private static StructField mergeFields(StructField left, StructField right) {
@@ -249,20 +254,30 @@ public final class VortexFooterReader {
         return field.nullable() ? field : new StructField(field.name(), field.dataType(), true, field.metadata());
     }
 
-    private static Map<String, StructField> indexByName(StructType schema) {
-        Map<String, StructField> byName = new LinkedHashMap<>();
+    private static Map<String, StructField> indexByName(StructType schema, boolean caseSensitive) {
+        Map<String, StructField> byName =
+                caseSensitive ? new LinkedHashMap<>() : new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         for (StructField field : schema.fields()) {
-            byName.put(field.name(), field);
+            StructField previous = byName.putIfAbsent(field.name(), field);
+            if (previous != null) {
+                throw new IllegalArgumentException(String.format(
+                        Locale.ROOT,
+                        "Ambiguous columns %s and %s under Spark's case sensitivity setting",
+                        previous.name(),
+                        field.name()));
+            }
         }
         return byName;
     }
 
-    private static StructType sparkSchema(DataSource source) {
+    private static StructType sparkSchema(DataSource source, boolean caseSensitive) {
         StructField[] fields = source.arrowSchema(ArrowAllocation.rootAllocator()).getFields().stream()
                 .map(field -> new StructField(
                         field.getName(), ArrowUtils.fromArrowField(field), field.isNullable(), Metadata.empty()))
                 .toArray(StructField[]::new);
-        return new StructType(fields);
+        StructType schema = new StructType(fields);
+        indexByName(schema, caseSensitive);
+        return schema;
     }
 
     /** Applies {@code function} to every file's footer in a bounded pool, returning results in listing order. */

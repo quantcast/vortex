@@ -59,7 +59,8 @@ final class VortexTable(
       VortexFooterReader.inferSchema(
         files.asJava,
         VortexIo.create(vortexOptions, hadoopConf),
-        vortexOptions
+        vortexOptions,
+        sparkSession.sessionState.conf.caseSensitiveAnalysis
       )
     )
   }
