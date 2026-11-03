@@ -21,8 +21,9 @@ import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 /**
  * Spark's concurrent partition writer closes its open writers one after another when a task aborts and stops at the
@@ -36,8 +37,11 @@ final class VortexOutputWriterAbortTest {
     @TempDir
     Path tempDir;
 
-    @Test
-    void aFailedWriteLetsAbortCloseEveryPartitionWriter() throws IOException {
+    // With one-row batches an oversized row fails in write, otherwise in the close that flushes it. With one in every
+    // partition, the closes during abort fail too.
+    @ParameterizedTest
+    @CsvSource({"1, false", "2048, false", "2048, true"})
+    void aFailedWriteLetsAbortCloseEveryPartitionWriter(String batchSize, boolean everyPartition) throws IOException {
         SparkSession spark = SparkSession.builder()
                 .master("local[1,1]")
                 .appName("VortexOutputWriterAbortTest")
@@ -50,7 +54,7 @@ final class VortexOutputWriterAbortTest {
         List<String> stranded = new ArrayList<>();
         try {
             // The order Spark closes its writers in decides whether the failed one comes first, so fail each in turn.
-            for (int failed = 0; failed < PARTITIONS; failed++) {
+            for (int failed = 0; failed < (everyPartition ? 1 : PARTITIONS); failed++) {
                 WRITERS.clear();
                 ALLOCATORS.clear();
                 List<Row> rows = new ArrayList<>();
@@ -58,13 +62,18 @@ final class VortexOutputWriterAbortTest {
                     rows.add(RowFactory.create("small", p));
                 }
                 // Larger than the allocator limit set below, so appending it fails.
-                rows.add(RowFactory.create("x".repeat(2 << 20), failed));
-                Path output = tempDir.resolve("failed=" + failed);
+                for (int p = 0; p < PARTITIONS; p++) {
+                    if (everyPartition || p == failed) {
+                        rows.add(RowFactory.create("x".repeat(2 << 20), p));
+                    }
+                }
+                Path output = tempDir.resolve(batchSize + "-" + everyPartition + "-failed=" + failed);
 
                 Exception thrown = assertThrows(Exception.class, () -> spark.createDataFrame(rows, schema)
                         .coalesce(1)
                         .write()
                         .format("dev.vortex.spark.write.LimitedVortexFileFormat")
+                        .option("vortex.write.batch.size", batchSize)
                         .partitionBy("p")
                         .save(output.toString()));
 

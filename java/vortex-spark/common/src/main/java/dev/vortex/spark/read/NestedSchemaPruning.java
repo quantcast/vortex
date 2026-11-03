@@ -5,8 +5,11 @@ package dev.vortex.spark.read;
 
 import dev.vortex.api.Expression;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.TreeMap;
 import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.StructField;
@@ -142,6 +145,7 @@ final class NestedSchemaPruning {
             String path,
             int arrays) {
         StructField[] fields = read.fields();
+        FieldLookup lookup = new FieldLookup(file, resolution.caseSensitive());
         List<String> names = new ArrayList<>(fields.length);
         List<Expression> children = new ArrayList<>(fields.length);
         int[] slots = new int[fields.length];
@@ -151,7 +155,8 @@ final class NestedSchemaPruning {
         boolean filled = false;
         for (int i = 0; i < fields.length; i++) {
             String fieldPath = path.isEmpty() ? fields[i].name() : path + "." + fields[i].name();
-            int index = fieldIndex(file, fields[i].name(), resolution, fieldPath);
+            int index = lookup.indexOf(
+                    fields[i].name(), resolution.fileName(), path.isEmpty() ? "" : path + ".");
             if (index < 0) {
                 if (!fields[i].nullable()) {
                     throw new IllegalArgumentException(String.format(
@@ -228,25 +233,48 @@ final class NestedSchemaPruning {
         return new Node(null, null);
     }
 
-    private static int fieldIndex(StructType struct, String name, Resolution resolution, String path) {
-        int found = -1;
-        StructField[] fields = struct.fields();
-        for (int i = 0; i < fields.length; i++) {
-            if (resolution.caseSensitive()
-                    ? fields[i].name().equals(name)
-                    : fields[i].name().equalsIgnoreCase(name)) {
-                if (found >= 0) {
-                    throw new IllegalArgumentException(String.format(
-                            Locale.ROOT,
-                            "Ambiguous fields %s and %s for %s in %s under Spark's case sensitivity setting",
-                            fields[found].name(),
-                            fields[i].name(),
-                            path,
-                            resolution.fileName()));
+    /**
+     * Finds the fields of one file struct by name under Spark's case sensitivity, with one map lookup per field, so
+     * resolving a wide schema stays linear in its width.
+     */
+    private static final class FieldLookup {
+        private final StructField[] fields;
+        private final Map<String, Integer> indices;
+
+        /** The second field that matches a name, for names that more than one field matches. */
+        private final Map<String, Integer> duplicates;
+
+        FieldLookup(StructType struct, boolean caseSensitive) {
+            this.fields = struct.fields();
+            this.indices = caseSensitive ? new HashMap<>() : new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+            this.duplicates = caseSensitive ? new HashMap<>() : new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+
+            for (int i = 0; i < fields.length; i++) {
+                String name = fields[i].name();
+                if (indices.putIfAbsent(name, i) != null) {
+                    duplicates.putIfAbsent(name, i);
                 }
-                found = i;
             }
         }
-        return found;
+
+        /** Returns the position of the field {@code name} resolves to, or -1 if the struct does not carry it. */
+        int indexOf(String name, String fileName, String prefix) {
+            Integer index = indices.get(name);
+            if (index == null) {
+                return -1;
+            }
+
+            Integer duplicate = duplicates.get(name);
+            if (duplicate != null) {
+                throw new IllegalArgumentException(String.format(
+                        Locale.ROOT,
+                        "Ambiguous columns %s and %s in %s under Spark's case sensitivity setting",
+                        prefix + fields[index].name(),
+                        prefix + fields[duplicate].name(),
+                        fileName));
+            }
+
+            return index;
+        }
     }
 }
