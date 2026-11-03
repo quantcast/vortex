@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.vortex.spark.io.VortexIo;
 import java.nio.file.Path;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -43,7 +44,9 @@ public final class VortexSessionOptionsTest {
 
     @AfterEach
     public void resetConf() {
-        for (String option : new String[] {READ_CONCURRENCY, VortexSparkSession.PROVIDER_OPTION}) {
+        for (String option :
+                new String[] {READ_CONCURRENCY, VortexIo.SPLIT_CONCURRENCY_OPTION, VortexSparkSession.PROVIDER_OPTION
+                }) {
             spark.conf().unset(option);
             spark.conf().unset(DATA_SOURCE_PREFIX + option);
         }
@@ -82,6 +85,19 @@ public final class VortexSessionOptionsTest {
     void aSessionSettingAppliesToV1Reads() {
         spark.conf().set(USE_V1, "vortex");
         assertSessionSettingAppliesToReads(write("v1"), "FileScan vortex", READ_CONCURRENCY);
+    }
+
+    @Test
+    void aSplitConcurrencyReadsEveryRowThroughV1AndV2() {
+        String path = write("split_concurrency");
+        for (String useV1 : new String[] {"", "vortex"}) {
+            spark.conf().set(USE_V1, useV1);
+            Dataset<Row> read = spark.read()
+                    .format("vortex")
+                    .option(VortexIo.SPLIT_CONCURRENCY_OPTION, "1")
+                    .load(path);
+            assertEquals(45L, read.selectExpr("sum(id)").first().getLong(0), "useV1List=" + useV1);
+        }
     }
 
     @Test
