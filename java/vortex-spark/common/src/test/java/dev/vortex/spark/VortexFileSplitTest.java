@@ -5,6 +5,7 @@ package dev.vortex.spark;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -123,6 +124,7 @@ public final class VortexFileSplitTest {
             assertEquals(
                     expectedPartitions(List.of(fileSize), splitSize), read.rdd().getNumPartitions());
             for (boolean filtered : new boolean[] {false, true}) {
+                String context = "mode=" + mode + " splitSize=" + splitSize + " filtered=" + filtered;
                 Dataset<Row> selected = filtered ? read.filter("id >= 101 and id < 250003") : read;
                 List<List<Row>> partitions =
                         selected.select("id").javaRDD().glom().collect();
@@ -131,16 +133,15 @@ public final class VortexFileSplitTest {
                     long previous = -1;
                     for (Row row : partition) {
                         long id = row.getLong(0);
-                        assertTrue(
-                                id > previous,
-                                "mode=" + mode + " splitSize=" + splitSize + " filtered=" + filtered + ": row " + id
-                                        + " followed " + previous);
+                        if (id <= previous) {
+                            fail(context + ": row " + id + " followed " + previous);
+                        }
                         previous = id;
                         count++;
                     }
                 }
                 long expected = filtered ? 250_003 - 101 : ROWS;
-                assertEquals(expected, count);
+                assertEquals(expected, count, context);
             }
         }
     }
