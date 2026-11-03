@@ -6,39 +6,62 @@ use std::sync::Arc;
 
 use jni::JValue;
 use jni::JavaVM;
+use jni::objects::JByteArray;
 use jni::objects::JObject;
 use jni::refs::Global;
+use vortex::error::VortexExpect;
 use vortex::io::IoBuf;
 use vortex::io::VortexWrite;
 
 use crate::io::with_jvm;
 
-/// Largest chunk pushed through a single `write` upcall. Java arrays are indexed by
-/// `int`, and keeping chunks bounded also keeps per-call array allocations modest.
-const MAX_WRITE_CHUNK: usize = 1 << 30;
+/// Size of the reusable `byte[]` that stages native output for Java, so heap use per writer
+/// stays fixed however large a native output buffer is.
+const WRITE_SCRATCH_BYTES: usize = 64 * 1024;
 
 /// A [`VortexWrite`] backed by a Java object implementing `dev.vortex.io.NativeWritable`.
 ///
-/// Bytes are forwarded as blocking `write(byte[], int, int)` upcalls, `flush` maps to
-/// `flush()`, and `shutdown` maps to `flush()` as well: the Java caller created the
-/// underlying stream and remains responsible for closing it once the writer finishes.
+/// Bytes are copied through one reusable `byte[]` in `write(byte[], int, int)` upcalls,
+/// `flush` maps to `flush()`, and `shutdown` maps to `flush()` as well: the Java caller created
+/// the underlying stream and remains responsible for closing it once the writer finishes.
 /// Writes run inline on the runtime thread driving the write task, which is attached
 /// to the JVM on first use.
 pub(crate) struct JavaWrite {
     vm: JavaVM,
     writable: Arc<Global<JObject<'static>>>,
+    /// Allocated on the first non-empty write.
+    scratch: Option<Global<JByteArray<'static>>>,
 }
 
 impl JavaWrite {
     pub(crate) fn new(vm: JavaVM, writable: Arc<Global<JObject<'static>>>) -> Self {
-        Self { vm, writable }
+        Self {
+            vm,
+            writable,
+            scratch: None,
+        }
     }
 
-    fn write_slice(&self, bytes: &[u8]) -> io::Result<()> {
-        for chunk in bytes.chunks(MAX_WRITE_CHUNK) {
-            let jlen = i32::try_from(chunk.len()).map_err(io::Error::other)?;
-            with_jvm(&self.vm, |env| {
-                let array = env.byte_array_from_slice(chunk)?;
+    fn write_slice(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let scratch = &mut self.scratch;
+        with_jvm(&self.vm, |env| {
+            let array = match scratch {
+                Some(array) => array,
+                None => {
+                    let array = JByteArray::new(env, WRITE_SCRATCH_BYTES)?;
+                    scratch.insert(env.new_global_ref(&array)?)
+                }
+            };
+            for chunk in bytes.chunks(WRITE_SCRATCH_BYTES) {
+                let jlen = i32::try_from(chunk.len()).vortex_expect("64 KiB fits in i32");
+                // SAFETY: u8 and i8 have the same size and alignment; only the bit
+                // representation is copied into Java's signed byte array.
+                let signed =
+                    unsafe { std::slice::from_raw_parts(chunk.as_ptr().cast::<i8>(), chunk.len()) };
+                array.set_region(env, 0, signed)?;
                 env.call_method(
                     self.writable.as_ref(),
                     jni::jni_str!("write"),
@@ -49,11 +72,10 @@ impl JavaWrite {
                         JValue::Int(jlen),
                     ],
                 )?;
-                Ok(())
-            })
-            .map_err(io::Error::other)?;
-        }
-        Ok(())
+            }
+            Ok(())
+        })
+        .map_err(io::Error::other)
     }
 
     fn flush_upcall(&self) -> io::Result<()> {
@@ -130,7 +152,7 @@ mod tests {
 
         let thread_vm = vm.clone();
         std::thread::spawn(move || {
-            let write = JavaWrite::new(thread_vm.clone(), Arc::new(writable));
+            let mut write = JavaWrite::new(thread_vm.clone(), Arc::new(writable));
             write.write_slice(b"vortex")?;
             write.flush_upcall()?;
             // `with_jvm` attaches permanently: the thread stays attached until it

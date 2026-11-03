@@ -18,7 +18,10 @@ import java.io.IOException;
  * and the creator must close the underlying stream to finalize it.
  */
 public interface NativeWritable extends Closeable {
-    /** Append {@code length} bytes from {@code buffer} starting at {@code offset}. */
+    /**
+     * Append {@code length} bytes from {@code buffer} starting at {@code offset} before returning. The buffer is reused
+     * by native code: implementations must not retain it after this call.
+     */
     void write(byte[] buffer, int offset, int length) throws IOException;
 
     /** Flush buffered bytes to the underlying storage. */
