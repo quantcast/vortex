@@ -33,6 +33,7 @@ import org.apache.spark.sql.catalyst.expressions.UnsafeProjection;
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow;
 import org.apache.spark.sql.catalyst.util.ArrayBasedMapData;
 import org.apache.spark.sql.catalyst.util.GenericArrayData;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Decimal;
 import org.apache.spark.sql.types.StructType;
@@ -367,6 +368,90 @@ final class VortexOutputWriterTest {
         }
         assertEquals(0, allocator.getAllocatedMemory());
         assertEquals(Collections.nCopies(1025, expected), readRows(writer.path()));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "auto,string", "true,string", "false,string",
+        "auto,binary", "true,binary", "false,binary",
+        "auto,list", "true,list", "false,list",
+        "auto,map", "true,map", "false,map",
+        "auto,struct", "true,struct", "false,struct"
+    })
+    void autoRetainsUsefulCapacityAndShrinksAfterValuesGetSmaller(String policy, String shape) {
+        CapacityValue large = capacityValue(shape, 128);
+        CapacityValue small = capacityValue(shape, 1);
+        StructType schema = new StructType().add("value", large.type(), true);
+        GenericInternalRow largeRow = new GenericInternalRow(new Object[] {large.value()});
+        GenericInternalRow smallRow = new GenericInternalRow(new Object[] {small.value()});
+        VortexOutputWriter writer = writer(
+                "adaptive-capacity.vortex",
+                schema,
+                Map.of(
+                        VortexOutputWriter.WRITE_BATCH_SIZE_OPTION,
+                        "256",
+                        VortexOutputWriter.WRITE_RESET_CAPACITY_OPTION,
+                        policy));
+        BufferAllocator allocator = writer.allocator();
+        try {
+            for (int i = 0; i < 256; i++) {
+                writer.write(largeRow);
+            }
+            long retained = allocator.getAllocatedMemory();
+            writer.write(smallRow);
+            long allocated = allocator.getAllocatedMemory() - retained;
+            assertTrue(
+                    "true".equals(policy) ? allocated < 16384 : allocated >= 16384,
+                    "after a full batch, the next batch allocated " + allocated + " bytes");
+            for (int i = 1; i < 256; i++) {
+                writer.write(smallRow);
+            }
+            retained = allocator.getAllocatedMemory();
+            writer.write(smallRow);
+            allocated = allocator.getAllocatedMemory() - retained;
+            assertTrue(
+                    "false".equals(policy) ? allocated >= 16384 : allocated < 16384,
+                    "after a sparse batch, the next batch allocated " + allocated + " bytes");
+        } finally {
+            writer.close();
+        }
+        List<String> expected = new ArrayList<>(Collections.nCopies(256, large.expected()));
+        expected.addAll(Collections.nCopies(257, small.expected()));
+        assertEquals(expected, readRows(writer.path()));
+        assertEquals(0, allocator.getAllocatedMemory());
+    }
+
+    private record CapacityValue(DataType type, Object value, String expected) {}
+
+    private static CapacityValue capacityValue(String shape, int size) {
+        long[] values = new long[size];
+        Arrays.setAll(values, i -> i);
+        return switch (shape) {
+            case "string" ->
+                new CapacityValue(DataTypes.StringType, UTF8String.fromString("x".repeat(size)), "x".repeat(size));
+            case "binary" -> new CapacityValue(DataTypes.BinaryType, new byte[size], Arrays.toString(new byte[size]));
+            case "list" ->
+                new CapacityValue(
+                        DataTypes.createArrayType(DataTypes.LongType, false),
+                        new GenericArrayData(values),
+                        Arrays.toString(values).replace(" ", ""));
+            case "map" -> {
+                List<String> entries = new ArrayList<>();
+                for (long value : values) {
+                    entries.add("{\"key\":" + value + ",\"value\":" + value + "}");
+                }
+                yield new CapacityValue(
+                        DataTypes.createMapType(DataTypes.LongType, DataTypes.LongType, false),
+                        new ArrayBasedMapData(new GenericArrayData(values), new GenericArrayData(values)),
+                        "[" + String.join(",", entries) + "]");
+            }
+            case "struct" ->
+                new CapacityValue(
+                        new StructType().add("text", DataTypes.StringType, true),
+                        new GenericInternalRow(new Object[] {UTF8String.fromString("x".repeat(size))}),
+                        "{\"text\":\"" + "x".repeat(size) + "\"}");
+            default -> throw new IllegalArgumentException(shape);
+        };
     }
 
     @ParameterizedTest

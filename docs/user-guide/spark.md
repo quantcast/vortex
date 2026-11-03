@@ -138,22 +138,24 @@ derive the column and partition by it, for example `withColumn("year", year(col(
 | `batch.size`              | `8192`  | Rows buffered per write batch; range 1–65536. Each string or binary field of a batch must fit in 2 GiB, so lower it for values over about 256 KB. |
 | `vortex.write.batch.size` | —       | Rows buffered per write batch for Vortex alone, overriding `batch.size`. |
 | `vortex.write.batch.bytes` | —      | Positive byte threshold for the open batch's Arrow allocations; flush after a row reaches it or the row limit, whichever comes first. Unset disables byte-based flushing. |
-| `vortex.write.reset.capacity` | `auto` | After row-limit flushes: `auto` resets variable-width leaves and list/map subtrees, `true` resets every vector, `false` retains hints. Byte-triggered flushes always reset every vector. |
+| `vortex.write.reset.capacity` | `auto` | After row-limit flushes: `auto` resets oversized variable-width/list/map hints, `true` resets every vector, `false` retains hints. Byte-triggered flushes always reset every vector. |
 | `vortex.listLayout`       | `false` | Store array columns in the unstable list layout; see below. |
 
 The byte threshold includes nested buffers and Arrow's allocation rounding. It is checked after
 each complete row, so one row or a buffer growth can exceed it. It bounds batching rather than
 total process memory: native code may retain earlier batches and allocate compression buffers.
 
-With `vortex.write.reset.capacity=auto`, each batch resets variable-width leaves and entire
-list/map subtrees so one unusually large value or list does not inflate subsequent allocations.
-Fixed-width vectors at the root or inside structs keep their hints because their value counts
-are bounded by the row limit. A byte-triggered flush resets every vector in all modes.
+With `vortex.write.reset.capacity=auto`, a variable-width leaf or list/map subtree keeps its
+sizing hints while a batch uses at least a quarter of its buffer capacity. If usage drops below
+that, its hints reset to a small starting capacity. This retains useful sizing on steady data
+and shrinks after values get smaller. The first smaller batch can still inherit the previous
+large allocation. Fixed-width vectors at the root or inside structs keep their row-bounded
+hints. A byte-triggered flush resets every vector in all modes.
 
 Use `true` to force every reset, or `false` to keep sizing hints across row-limit flushes.
 Keeping hints can reduce allocation/copying on steady data, but can increase memory after an
-outlier. Resetting strings, lists and maps regrows their buffers from a small capacity each batch,
-which can increase JVM allocation on steady data. See the
+outlier. Forced resets regrow buffers from a small capacity each batch; `auto` pays that cost
+only after its utilization check triggers. See the
 [capacity benchmark](https://github.com/quantcast/vortex/tree/develop/java/vortex-spark/benchmarks)
 for the tradeoffs behind the default.
 

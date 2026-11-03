@@ -38,6 +38,12 @@ CASES = {
     "max-batch": ("flat", 1048576, 65536),
     "byte-limited-outlier": ("outlier", 65, 2048),
     "byte-limited-steady": ("single-long", 8192, 8192),
+    "short-text-long": ("short-text", 262144, 2048),
+    "long-text-long": ("long-text", 65536, 2048),
+    "nested-long": ("nested", 131072, 512),
+    "map-null-long": ("map-null", 131072, 2048),
+    "periodic-outlier": ("periodic-outlier", 16384, 64),
+    "byte-limited-periodic": ("periodic-outlier", 16384, 64),
 }
 MODES = ("false", "auto", "true")
 
@@ -140,14 +146,14 @@ def run_case(command: list[str], log_path: Path) -> dict:
     return result
 
 
-def summarize(results: list[dict]) -> list[dict]:
+def summarize(results: list[dict], selected_modes: list[str]) -> list[dict]:
     summary = []
     for case in dict.fromkeys(row["case"] for row in results):
         selected = [row for row in results if row["case"] == case]
         if len({row["outputBytes"] for row in selected}) != 1:
             raise RuntimeError(f"Output sizes differ for {case}")
         modes = {}
-        for mode in MODES:
+        for mode in selected_modes:
             samples = [row for row in selected if row["reset"] == mode]
             modes[mode] = {
                 "samples": len(samples),
@@ -175,6 +181,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--cases", default=",".join(CASES))
+    parser.add_argument("--modes", default=",".join(MODES))
     parser.add_argument("--native", type=Path)
     parser.add_argument("--writer-ref", help="Compile VortexOutputWriter.java from this Git ref for comparison")
     parser.add_argument("--output-dir", type=Path)
@@ -187,6 +194,9 @@ def main():
     cases = arguments.cases.split(",")
     if any(case not in CASES for case in cases) or len(cases) != len(set(cases)):
         parser.error("--cases must name distinct cases from: " + ",".join(CASES))
+    modes = arguments.modes.split(",")
+    if any(mode not in MODES for mode in modes) or len(modes) != len(set(modes)):
+        parser.error("--modes must name distinct modes from: " + ",".join(MODES))
     extension = "dylib" if platform.system() == "Darwin" else "so"
     native = (arguments.native or REPOSITORY / f"target/release/libvortex_jni.{extension}").resolve()
     if not native.is_file():
@@ -219,8 +229,8 @@ def main():
     for name in cases:
         shape, rows, batch = CASES[name]
         for iteration in range(arguments.runs):
-            offset = iteration % len(MODES)
-            for mode in MODES[offset:] + MODES[:offset]:
+            offset = iteration % len(modes)
+            for mode in modes[offset:] + modes[:offset]:
                 tag = f"{name}-{mode}-{iteration}"
                 command = [
                     str(java_home / "bin/java"),
@@ -240,7 +250,13 @@ def main():
                     str(rows),
                     str(batch),
                     mode,
-                    str({"byte-limited-outlier": 262144, "byte-limited-steady": 4096}.get(name, 0)),
+                    str(
+                        {
+                            "byte-limited-outlier": 262144,
+                            "byte-limited-steady": 4096,
+                            "byte-limited-periodic": 262144,
+                        }.get(name, 0)
+                    ),
                 ]
                 result = run_case(command, output / f"{tag}.log") | {"case": name, "iteration": iteration}
                 results.append(result)
@@ -249,7 +265,7 @@ def main():
                 print(
                     f"{tag}: {result['seconds']:.3f}s, Arrow {result['arrowPeakBytes'] / 1048576:.2f} MiB", flush=True
                 )
-    (output / "summary.json").write_text(json.dumps(summarize(results), indent=2) + "\n")
+    (output / "summary.json").write_text(json.dumps(summarize(results, modes), indent=2) + "\n")
     print(f"Results: {output}")
 
 

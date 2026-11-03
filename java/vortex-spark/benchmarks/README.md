@@ -1,156 +1,241 @@
 # Arrow writer capacity policy benchmark
 
-`vortex.write.reset.capacity=auto` targets an allocation problem that depends on the schema:
-Arrow remembers allocation sizes after exporting and clearing a batch. A large string or
-list can inflate subsequent batches while native code still retains earlier buffers. The
-number of elements in a fixed-width vector at the root or inside structs is limited by the
-row batch size, so its retained hint has a bounded cost. Lists and maps can multiply element
-counts, so their entire subtrees need resets.
+Arrow remembers allocation sizes after exporting and clearing a batch. Reusing those sizing
+hints avoids regrowth on steady data, but a large string or list can inflate every later
+batch while native code still retains earlier buffers.
 
-| Mode | After each exported batch |
-|------|---------------------------|
-| `false` | Keep learned sizing hints across row-limit flushes. Reset every vector after a byte-triggered flush. |
-| `auto` (default) | Recurse through structs, keeping their own and fixed-width children's hints. Reset variable-width leaves and entire list/map subtrees. Reset every vector after a byte-triggered flush. |
-| `true` | Reset every vector after every flush. |
+| Mode | After a row-limit flush |
+|------|-------------------------|
+| `false` | Keep all sizing hints. |
+| `auto` (default) | Keep useful hints. Reset a variable-width leaf or list/map subtree only when used bytes are less than one quarter of buffer capacity. Recurse through structs, preserving their own and fixed-width fields' row-bounded hints. |
+| `true` | Reset every vector to a small starting capacity. |
 
-All modes start with the existing small initial capacity. Resetting affects future allocations;
-it does not overwrite buffers already exported to native code.
+Every mode resets every hint after a byte-triggered flush. All modes start small; changing
+hints affects future allocations and leaves exported buffers intact.
 
-## Before and after the review fixes
+## Adaptive heuristic
 
-Compared the original PR writer (`ef9bc8bc7`) with the updated writer on macOS arm64,
-Corretto 17.0.16, Spark 4.0.4 schema/row classes and Arrow 19. Both use the same release JNI
-library as the original benchmarks and identical fixtures. Each revision has 17 cases, three
-modes and three fresh JVMs per mode: 306 measured writes in total, rotating mode order between
-repetitions. Output byte counts match across all modes, repetitions and revisions.
+Arrow rounds allocations upward and grows buffers geometrically. A four-times threshold
+leaves headroom for this ordinary slack, so steady variable-width batches retain their useful
+sizes. After a drop in usage, `auto` resets only the oversized leaf or entire list/map subtree.
+Struct fields are evaluated separately, so unrelated fixed-width data cannot hide a string's
+slack. The check reads completed buffer lengths once per batch and does not scan values.
 
-Complete medians, timing ranges and source/library hashes are in
-[results-2026-11-03.json](results-2026-11-03.json). The original measurements remain in
-[results-2026-11-02.json](results-2026-11-02.json).
+The first smaller batch can inherit the previous large allocation; shrinking takes effect
+for the following batch. This can retain one extra inflated batch compared with the previous
+always-reset variable-width policy. A byte-triggered flush still resets immediately in all modes.
+The threshold is a heuristic, not a total-process memory bound.
 
-| Case and metric | Original PR | Updated |
-|-----------------|------------:|--------:|
-| Struct with 64 long fields, `auto`: JVM allocation (MiB) | 62.02 | 41.48 |
-| Steady long, 4-KiB threshold, `false`: exported batches | 7,940 | 33 |
-| Steady long, 4-KiB threshold, `false`: retained Arrow (MiB) | 31.02 | 0.13 |
-| Outlier, 256-KiB threshold, `false`: exported batches | 65 | 2 |
-| Outlier, 256-KiB threshold, `false`: retained Arrow (MiB) | 73.19 | 1.13 |
+## Assessment of the default
 
-Recursing through structs lets `auto` retain row-bounded fixed-width hints, reducing JVM
-allocation on the wide struct by about 33%. `true` still regrows those vectors, allocating
-62.16 MiB in this case. Retaining hints also keeps larger per-batch allocations:
-`auto` sampled 10.00 MiB of retained Arrow versus 8.13 MiB for `true`.
+`false` remains a strong choice for known steady data. The previous `auto` paid regrowth
+cost on every variable-width batch even when its capacity was useful. Adaptive `auto` keeps
+those hints and is close to `false` in JVM allocation on the longer steady cases:
 
-The steady byte-limited case has one long column, 8,192 rows and an 8,192-row batch limit.
-The original `false` policy retained a budget-sized allocation after its first byte flush,
-then flushed every following row. Every policy now resets all hints after a byte-triggered
-flush, preserving QC `develop` behavior and giving 33 batches in all modes. The outlier case
-likewise gives two batches in all modes. `false` retains hints only across row-limit flushes.
+| Case | false JVM MiB | Previous auto | Adaptive auto |
+|------|--------------:|--------------:|--------------:|
+| short-text-long | 6.08 | 11.08 | 6.12 |
+| long-text-long | 3.85 | 5.44 | 3.77 |
+| nested-long | 17.14 | 20.92 | 17.33 |
+| map-null-long | 3.22 | 4.51 | 3.28 |
 
-**Timing limitation:** a separate Rust release build overlapped part of the updated run.
-Elapsed times are recorded for transparency but do not support a before/after speed claim.
-Native progress also affects sampled retained Arrow peaks. JVM allocation and batch counts
-are the primary evidence for these behavior changes.
+The remaining per-batch utilization check costs some metadata work. `false` can still be faster:
+for example, `nested-long` measured 121 ms versus 135 ms for adaptive `auto`.
+These are medians of three short local runs, so use the recorded ranges rather than treating
+small differences as reliable speedups. The byte-limited cases do not establish a default:
+all modes reset after byte-triggered flushes and show the same batch counts and retained peaks.
 
-## Why `auto` is the default
+The reason to retain `auto` as the default is protection when variable-width values change
+size unexpectedly and the byte threshold is unset. In `nested-outlier`, retained Arrow is
+320.13 MiB with `false`, 2.62 MiB with previous `auto`, and
+3.87 MiB with adaptive `auto`. With eight recurring outliers it is
+320.13, 11.34 and 21.30 MiB respectively.
+The extra retained batch is the explicit tradeoff for preserving useful hints. Adaptive `auto`
+also tolerates up to four times the observed used bytes before shrinking, rather than trying
+to minimize every allocation. `true` keeps the more aggressive reset behavior.
 
-Selected results from the updated writer, as medians of three JVMs. MiB means 1,048,576 bytes;
-cumulative allocation is **not** peak live memory.
+## Full matrix
 
-| Case | Metric (MiB) | `false` | `auto` | `true` |
-|------|--------------|--------:|-------:|-------:|
-| Nested outlier, 16,384 rows, batch 64 | Sampled retained Arrow | 320.13 | 2.62 | 2.62 |
-| Small outlier, 65 rows, batch 1 | Sampled retained Arrow | 73.13 | 1.13 | 1.13 |
-| 8 long columns, 4,194,304 rows | Cumulative JVM allocation | 81.30 | 81.69 | 121.82 |
-| 64 long columns, 262,144 rows | Cumulative JVM allocation | 39.35 | 39.38 | 60.07 |
-| Struct with 64 long fields, 262,144 rows | Cumulative JVM allocation | 41.03 | 41.48 | 62.16 |
-| Steady 32-byte strings, 65,536 rows | Cumulative JVM allocation | 1.71 | 2.86 | 2.87 |
-| Steady structs/lists, 16,384 rows | Cumulative JVM allocation | 2.21 | 2.72 | 2.79 |
-| Steady 4-KiB strings, 8,192 rows | Sampled retained Arrow | 128.25 | 128.25 | 128.25 |
+Compared the previous `auto` at `8aadab199` with the adaptive writer, using identical fixtures
+and the same release JNI library. The current writer runs `false`, adaptive `auto`, and `true`;
+the previous writer runs `auto`. Each has three fresh JVMs per mode and case, for
+23 workloads × 4 comparisons × 3 repetitions = **276 measured writes**. Current modes rotate
+order between repetitions. All output byte counts match across policies and revisions.
 
-`auto` preserves the outlier memory reduction while avoiding repeated growth of fixed-width
-vectors whose counts are bounded by the row limit, including fields inside structs. `true`
-remains available when the smaller retained allocation is preferable.
+Measured on macOS arm64, Corretto 17.0.16, Spark 4.0.4 schema/row classes and Arrow 19.
+Results and timing ranges: [results-2026-11-03-adaptive.json](results-2026-11-03-adaptive.json).
+Earlier review-fix results remain in [results-2026-11-03.json](results-2026-11-03.json), whose
+elapsed times were affected by a concurrent release build. This rerun was started after that
+build finished. These remain short local runs with a discarding sink, not storage throughput
+measurements.
 
-Resetting strings, lists and maps regrows buffers from a small capacity each batch. This adds
-JVM allocation on steady data: short text uses 2.86 MiB under `auto` versus
-1.71 MiB under `false`; steady nested data uses 2.72 versus 2.21 MiB.
-Steady variable-width data can also have unchanged peaks. `false` offers that tradeoff for
-row-limit flushes, while byte-triggered flushes always reset.
+### Cumulative JVM allocation (MiB)
 
-## Capacity reset and byte-limited batching
+Allocation is cumulative across the write; it is **not** peak live heap.
 
-The options are complementary. `vortex.write.batch.bytes` limits the current batch's Arrow
-allocations after each complete row; capacity reset prevents an outlier inflating future
-allocations. Neither bounds total process memory or a single oversized row.
+| Case | false | Previous auto | Adaptive auto | true |
+|------|------:|--------------:|--------------:|-----:|
+| tiny-flat | 3.31 | 3.33 | 3.31 | 3.32 |
+| narrow-flat | 2.73 | 2.73 | 2.74 | 4.01 |
+| narrow-largebatch | 1.51 | 1.52 | 1.51 | 1.93 |
+| wide-flat | 5.40 | 5.39 | 5.40 | 7.85 |
+| short-text | 1.72 | 2.87 | 1.74 | 2.86 |
+| long-text | 3.02 | 3.19 | 3.03 | 3.18 |
+| long-text-largebatch | 2.98 | 2.97 | 2.97 | 2.97 |
+| nested | 2.20 | 2.71 | 2.23 | 2.80 |
+| nested-outlier | 4.33 | 4.01 | 4.00 | 4.03 |
+| map-null | 0.47 | 0.63 | 0.48 | 0.63 |
+| small-outlier | 1.26 | 1.17 | 1.17 | 1.17 |
+| narrow-long | 81.45 | 81.64 | 81.59 | 121.97 |
+| wide-long | 39.39 | 39.40 | 39.40 | 59.69 |
+| wide-struct | 41.36 | 41.47 | 41.20 | 62.32 |
+| max-batch | 8.65 | 8.66 | 8.65 | 9.27 |
+| byte-limited-outlier | 0.28 | 0.28 | 0.28 | 0.28 |
+| byte-limited-steady | 0.32 | 0.32 | 0.32 | 0.32 |
+| short-text-long | 6.08 | 11.08 | 6.12 | 11.08 |
+| long-text-long | 3.85 | 5.44 | 3.77 | 5.45 |
+| nested-long | 17.14 | 20.92 | 17.33 | 21.54 |
+| map-null-long | 3.22 | 4.51 | 3.28 | 4.61 |
+| periodic-outlier | 5.21 | 4.94 | 4.94 | 4.96 |
+| byte-limited-periodic | 4.88 | 5.05 | 4.98 | 5.03 |
+
+### Sampled peak retained Arrow (MiB)
+
+Peaks depend on native progress and sampling, so small differences do not establish savings.
+
+| Case | false | Previous auto | Adaptive auto | true |
+|------|------:|--------------:|--------------:|-----:|
+| tiny-flat | 0.02 | 0.02 | 0.02 | 0.02 |
+| narrow-flat | 1.25 | 1.25 | 1.25 | 1.12 |
+| narrow-largebatch | 2.88 | 2.50 | 3.00 | 2.02 |
+| wide-flat | 10.00 | 10.00 | 10.00 | 8.41 |
+| short-text | 8.27 | 6.94 | 8.03 | 8.11 |
+| long-text | 128.25 | 128.25 | 128.25 | 128.25 |
+| long-text-largebatch | 128.25 | 128.25 | 128.25 | 128.25 |
+| nested | 14.25 | 14.25 | 14.25 | 14.25 |
+| nested-outlier | 320.13 | 2.62 | 3.87 | 2.62 |
+| map-null | 1.07 | 1.07 | 1.07 | 1.07 |
+| small-outlier | 73.13 | 1.13 | 2.26 | 1.13 |
+| narrow-long | 2.25 | 2.69 | 2.50 | 2.50 |
+| wide-long | 10.00 | 10.00 | 10.00 | 9.00 |
+| wide-struct | 10.00 | 10.00 | 10.00 | 8.06 |
+| max-batch | 23.00 | 24.00 | 24.00 | 16.12 |
+| byte-limited-outlier | 1.13 | 1.13 | 1.13 | 1.13 |
+| byte-limited-steady | 0.13 | 0.13 | 0.13 | 0.13 |
+| short-text-long | 7.69 | 7.00 | 7.66 | 7.28 |
+| long-text-long | 448.69 | 464.42 | 448.69 | 464.41 |
+| nested-long | 23.36 | 21.30 | 22.03 | 21.30 |
+| map-null-long | 2.18 | 2.06 | 2.18 | 2.06 |
+| periodic-outlier | 320.13 | 11.34 | 21.30 | 11.34 |
+| byte-limited-periodic | 11.22 | 11.22 | 11.22 | 11.22 |
+
+### Elapsed time (ms)
+
+Medians of three JVMs; min/max ranges are in the JSON. Cases below 100 ms are primarily useful
+for allocation comparisons. The `wide-struct` adaptive timing spans
+243–350 ms, illustrating the noise even in a longer case.
+
+| Case | false | Previous auto | Adaptive auto | true |
+|------|------:|--------------:|--------------:|-----:|
+| tiny-flat | 15.2 | 16.1 | 14.8 | 15.1 |
+| narrow-flat | 33.0 | 33.4 | 33.0 | 39.6 |
+| narrow-largebatch | 24.4 | 25.1 | 25.2 | 31.6 |
+| wide-flat | 42.4 | 42.7 | 40.8 | 52.0 |
+| short-text | 34.4 | 36.7 | 34.0 | 38.7 |
+| long-text | 114.3 | 116.9 | 119.8 | 115.4 |
+| long-text-largebatch | 119.1 | 121.7 | 120.5 | 123.5 |
+| nested | 31.2 | 31.2 | 30.6 | 32.7 |
+| nested-outlier | 64.2 | 45.5 | 45.4 | 47.9 |
+| map-null | 15.8 | 16.2 | 16.1 | 17.1 |
+| small-outlier | 27.3 | 25.6 | 25.6 | 25.5 |
+| narrow-long | 454.1 | 449.5 | 449.5 | 513.3 |
+| wide-long | 249.5 | 218.7 | 226.7 | 279.9 |
+| wide-struct | 232.9 | 248.0 | 319.3 | 387.2 |
+| max-batch | 91.2 | 90.9 | 94.7 | 102.7 |
+| byte-limited-outlier | 17.9 | 19.5 | 18.4 | 17.9 |
+| byte-limited-steady | 8.2 | 8.5 | 8.5 | 8.1 |
+| short-text-long | 73.3 | 95.9 | 76.7 | 101.6 |
+| long-text-long | 168.3 | 201.9 | 163.4 | 186.7 |
+| nested-long | 121.4 | 138.5 | 134.6 | 138.5 |
+| map-null-long | 44.0 | 48.9 | 46.2 | 50.3 |
+| periodic-outlier | 64.1 | 46.9 | 46.4 | 48.2 |
+| byte-limited-periodic | 47.6 | 50.9 | 47.3 | 46.8 |
+
+### Workload sizes
+
+A zero byte threshold means unset.
+
+| Case | Rows | Row limit | Byte threshold |
+|------|-----:|----------:|---------------:|
+| tiny-flat | 128 | 1 | 0 |
+| narrow-flat | 131,072 | 2,048 | 0 |
+| narrow-largebatch | 131,072 | 8,192 | 0 |
+| wide-flat | 32,768 | 2,048 | 0 |
+| short-text | 65,536 | 2,048 | 0 |
+| long-text | 8,192 | 2,048 | 0 |
+| long-text-largebatch | 8,192 | 8,192 | 0 |
+| nested | 16,384 | 512 | 0 |
+| nested-outlier | 16,384 | 64 | 0 |
+| map-null | 16,384 | 2,048 | 0 |
+| small-outlier | 65 | 1 | 0 |
+| narrow-long | 4,194,304 | 2,048 | 0 |
+| wide-long | 262,144 | 2,048 | 0 |
+| wide-struct | 262,144 | 2,048 | 0 |
+| max-batch | 1,048,576 | 65,536 | 0 |
+| byte-limited-outlier | 65 | 2,048 | 262,144 |
+| byte-limited-steady | 8,192 | 8,192 | 4,096 |
+| short-text-long | 262,144 | 2,048 | 0 |
+| long-text-long | 65,536 | 2,048 | 0 |
+| nested-long | 131,072 | 512 | 0 |
+| map-null-long | 131,072 | 2,048 | 0 |
+| periodic-outlier | 16,384 | 64 | 0 |
+| byte-limited-periodic | 16,384 | 64 | 262,144 |
 
 ## Reproduce
 
-From the repository root, on macOS or Linux:
+Build the release native library once, then run the comparisons sequentially with the same
+library. On Linux, use `.so` instead of `.dylib`.
 
 ```shell
 cargo build --release -p vortex-jni --locked
-python3 java/vortex-spark/benchmarks/run.py --runs 3
-```
-
-The runner reuses the existing benchmark source set for dependencies, resolves the configured
-Java toolchain through Gradle, and compiles the standalone fixture driver. A benchmark-only
-loader selects the supplied release library instead of the jar's bundled library. The runner
-copies that library into the result directory to pin it between samples. It does not rebuild
-or stage a debug native library.
-
-The byte sink counts and discards every native output write. It opens no destination file,
-so cleanup cannot remove any device or data file. The count is checked against the completed
-writer summary for every sample.
-
-Use `--offline` with cached dependencies, `--native /path/to/library` for another build, or
-`--output-dir /new/path` for another result destination. To run a smaller selection:
-
-```shell
-python3 java/vortex-spark/benchmarks/run.py --runs 5 \
-    --cases narrow-long,wide-long,nested-outlier,long-text,byte-limited-outlier
-```
-
-For a before/after comparison, use the same fixtures and native library and compile only the
-writer from the original PR revision. Run these commands sequentially:
-
-```shell
 python3 java/vortex-spark/benchmarks/run.py --runs 3 --offline \
-    --native /path/to/libvortex_jni.dylib \
-    --writer-ref ef9bc8bc707fccbd46a6a4704e7ba9023d6a955f --output-dir /tmp/capacity-before
+    --native /path/to/libvortex_jni.dylib --modes auto \
+    --writer-ref 8aadab199ee6229809d2130fcc6c746ad8bac547 --output-dir /tmp/auto-previous
 python3 java/vortex-spark/benchmarks/run.py --runs 3 --offline \
-    --native /path/to/libvortex_jni.dylib --output-dir /tmp/capacity-after
+    --native /path/to/libvortex_jni.dylib --output-dir /tmp/auto-adaptive
 ```
 
-Use the `.so` library on Linux. `--writer-ref` changes only `VortexOutputWriter.java`; it is
-intended for revisions compatible with the current Java API. The manifest records the actual
-writer, fixture and native library hashes.
+Use `--cases short-text-long,nested-long,periodic-outlier` for a smaller selection and
+`--modes false,auto` to compare only those modes. Omit `--offline` if dependencies are not cached.
+`--writer-ref` compiles only the writer from that Git ref; it requires a compatible Java API.
 
-Each new result directory contains logs, `results.jsonl`, medians/ranges in `summary.json`,
-and a manifest with JVM version, writer source hash and native library hash. All cases must
-produce the same serialized byte count across modes and repetitions. Value correctness is
-checked separately by `VortexOutputWriterTest`, including outlier readback, byte-triggered
-flushes, reused rows, nested/list/map/null values, decimals and failure cleanup.
+The runner resolves dependencies and the configured Java toolchain through Gradle. It compiles
+the fixture, selected writer and a benchmark-only native loader, then copies the supplied
+release library into the result directory to pin it between samples. It does not rebuild or
+stage a debug library. Each result directory contains logs, raw `results.jsonl`, median/range
+`summary.json`, and a manifest recording JVM version and writer/fixture/native library hashes.
+
+The sink counts and discards output; it opens no destination file. Every sample checks native
+row counts and output counts against the completed writer summary. The runner checks serialized
+byte counts across modes and repetitions. Value correctness and buffer release are checked
+separately by `VortexOutputWriterTest`, including steady-to-small transitions for strings,
+binary, lists, maps and struct fields, and byte-triggered flushes in every mode.
 
 ## Workloads and measurement limits
 
-Fixtures cycle through 256 deterministic rows generated with seed 481516. Cases cover 8/64
-long columns, a struct containing 64 long fields, nullable 32-byte/4-KiB strings, nullable
-nested structs/lists, nullable maps, empty lists, and an outlier containing 65,536 longs plus a 128-KiB string. Following outlier
-rows contain two longs and a 16-byte string. Row counts range from 65 to 4,194,304; batch sizes
-cover 1, 64, 512, 2,048, 8,192 and 65,536. A steady single-long-column case uses 8,192 rows,
-an 8,192-row batch limit and a 4-KiB byte threshold. List-layout writing is left at the QC
-default, off.
+Fixtures cycle through 256 deterministic rows generated with seed 481516. They cover 8/64 long
+columns, a struct with 64 long fields, nullable 32-byte/4-KiB strings, nullable structs/lists,
+maps, empty lists, and outliers containing 65,536 longs plus a 128-KiB string. Normal outlier-case
+rows contain two longs and a 16-byte string. The periodic cases inject that outlier every 2,048
+rows, eight times per measured write. List-layout writing is off.
 
-Each JVM performs a same-shape warm-up write of `min(rows, 8192)`, then explicit GC. Measured
-time includes writer creation, all writes and close. This isolates conversion, compression
-and JNI output from Parquet decoding, Spark scheduling and storage. The repeated-row pool
-favors dictionary compression compared with high-cardinality data. JVMs use G1 GC, a 2-GiB
-maximum heap and an 8-GiB direct-memory allowance.
+Each JVM warms up with the same shape for `min(rows, 8192)` rows, then runs explicit GC.
+Measured time includes writer creation, writing and close. The pool of repeated rows favors
+dictionary compression compared with high-cardinality data. JVMs use G1, a 2-GiB maximum heap
+and an 8-GiB direct-memory allowance.
 
-Arrow allocations are sampled every 16 rows and at the last row, so brief growth/copy
-transients inside `write()` can be missed. Native progress can vary the sampled peak between
-runs. RSS is sampled every 20 ms and includes JVM/native/pool retention from warm-up. JVM
-allocation includes background threads and the heap sampler. These counters should not be
-added to estimate live memory. Cases shorter than 100 ms are useful for allocation comparisons,
-not timing claims. Equal byte counts alone do not prove value equality.
+Arrow allocation is sampled every 16 rows and at the last row, so brief growth/copy transients
+can be missed. Native scheduling changes sampled retained peaks. RSS is sampled every 20 ms
+and includes JVM/native/pool retention from warm-up. JVM allocation includes background threads
+and the heap sampler. These counters should not be added to estimate live memory. Matching
+serialized byte counts alone do not prove value equality.

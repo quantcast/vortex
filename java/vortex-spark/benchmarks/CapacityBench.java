@@ -24,7 +24,7 @@ import org.apache.spark.unsafe.types.UTF8String;
 
 /** Synthetic writer workloads for the capacity policy benchmark. */
 public final class CapacityBench {
-    record Fixture(StructType schema, InternalRow[] rows, InternalRow outlier) {}
+    record Fixture(StructType schema, InternalRow[] rows, InternalRow outlier, int outlierEvery) {}
 
     static final ObjectMapper JSON = new ObjectMapper();
 
@@ -64,7 +64,7 @@ public final class CapacityBench {
                 for (int j = 0; j < columns; j++) v[j] = i % 17 == 0 ? null : text(length, rng);
                 rows[i] = new GenericInternalRow(v);
             }
-        } else if (shape.equals("outlier")) {
+        } else if (shape.equals("outlier") || shape.equals("periodic-outlier")) {
             schema = schema.add("values", DataTypes.createArrayType(DataTypes.LongType, false), true)
                     .add("label", DataTypes.StringType, true);
             for (int i = 0; i < rows.length; i++)
@@ -105,7 +105,7 @@ public final class CapacityBench {
                 });
             }
         } else throw new IllegalArgumentException(shape);
-        return new Fixture(schema, rows, outlier);
+        return new Fixture(schema, rows, outlier, shape.equals("periodic-outlier") ? 2048 : 0);
     }
 
     static Map<String, Object> run(Fixture fixture, int n, int batch, String reset, long batchBytes) throws Exception {
@@ -127,7 +127,8 @@ public final class CapacityBench {
         try {
             for (int i = 0; i < n; i++) {
                 writer.write(
-                        i == 0 && fixture.outlier() != null
+                        fixture.outlier() != null
+                                        && (i == 0 || (fixture.outlierEvery() > 0 && i % fixture.outlierEvery() == 0))
                                 ? fixture.outlier()
                                 : fixture.rows()[i % fixture.rows().length]);
                 if (i % 16 == 0 || i == n - 1)

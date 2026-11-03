@@ -64,6 +64,7 @@ public final class VortexOutputWriter extends OutputWriter {
     private static final int MIN_BATCH_SIZE = 1;
     private static final int MAX_BATCH_SIZE = 65536; // 64K rows max per batch
     private static final int INITIAL_VECTOR_CAPACITY = 64;
+    private static final long AUTO_CAPACITY_MULTIPLIER = 4;
 
     private final String filePath;
     private final VortexOptions options;
@@ -236,13 +237,25 @@ public final class VortexOutputWriter extends OutputWriter {
 
     private static void resetInitialCapacity(FieldVector vector, int initialCapacity, boolean includeFixedWidth) {
         if (!includeFixedWidth && vector instanceof StructVector) {
-            // Structs preserve row counts. Lists and maps can multiply them, so reset those subtrees in full.
+            // Structs preserve row counts. Evaluate list/map subtrees together because they multiply element counts.
             for (FieldVector child : vector.getChildrenFromFields()) {
                 resetInitialCapacity(child, initialCapacity, false);
             }
-        } else if (includeFixedWidth || !(vector instanceof BaseFixedWidthVector)) {
+        } else if (includeFixedWidth || (!(vector instanceof BaseFixedWidthVector) && capacityExcess(vector) > 0)) {
             vector.setInitialCapacity(initialCapacity);
         }
+    }
+
+    private static long capacityExcess(FieldVector vector) {
+        // Keep ordinary allocation rounding; shrink only when the subtree uses less than a quarter of its buffers.
+        long excess = 0;
+        for (ArrowBuf buffer : vector.getFieldBuffers()) {
+            excess += buffer.capacity() - AUTO_CAPACITY_MULTIPLIER * buffer.readableBytes();
+        }
+        for (FieldVector child : vector.getChildrenFromFields()) {
+            excess += capacityExcess(child);
+        }
+        return excess;
     }
 
     /** Hands the rows appended since the last batch to the Vortex writer. */
@@ -257,11 +270,11 @@ public final class VortexOutputWriter extends OutputWriter {
         batchCount++;
         peakBufferedBytes = Math.max(peakBufferedBytes, vortexWriter.bufferedBytes());
 
-        vectorSchemaRoot.clear();
         if (reachedBytes || capacityReset != CapacityReset.NEVER) {
             // A byte-triggered flush must also discard fixed-width hints to preserve its smaller batch budget.
             resetInitialCapacity(capacityReset == CapacityReset.ALWAYS || reachedBytes);
         }
+        vectorSchemaRoot.clear();
         for (ArrowFieldWriter writer : fieldWriters) {
             writer.reset();
         }
