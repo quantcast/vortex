@@ -155,9 +155,7 @@ hints. A byte-triggered flush resets every vector in all modes.
 Use `true` to force every reset, or `false` to keep sizing hints across row-limit flushes.
 Keeping hints can reduce allocation/copying on steady data, but can increase memory after an
 outlier. Forced resets regrow buffers from a small capacity each batch; `auto` pays that cost
-only after its utilization check triggers. See the
-[capacity benchmark](https://github.com/quantcast/vortex/tree/develop/java/vortex-spark/benchmarks)
-for the tradeoffs behind the default.
+only after its utilization check triggers.
 
 By default an array column is stored as whole chunks, so reading one field of the structs in an
 array reads every field of them. With `vortex.listLayout` set to `true`, the writer stores each
