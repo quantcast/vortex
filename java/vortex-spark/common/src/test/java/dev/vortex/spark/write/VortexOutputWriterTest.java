@@ -24,6 +24,7 @@ import java.math.BigDecimal;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import org.apache.hadoop.conf.Configuration;
@@ -32,6 +33,7 @@ import org.apache.spark.sql.catalyst.expressions.UnsafeProjection;
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow;
 import org.apache.spark.sql.catalyst.util.ArrayBasedMapData;
 import org.apache.spark.sql.catalyst.util.GenericArrayData;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Decimal;
 import org.apache.spark.sql.types.StructType;
@@ -40,6 +42,8 @@ import org.apache.spark.unsafe.types.UTF8String;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 final class VortexOutputWriterTest {
@@ -266,6 +270,239 @@ final class VortexOutputWriterTest {
                         .mapToLong(BufferAllocator::getAllocatedMemory)
                         .sum());
         assertEquals(5, readRows(writers.get(0).path()).size());
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"auto", "true", "false"})
+    void capacityPolicyBoundsMemoryAfterAnOutlier(String policy) {
+        StructType schema = new StructType().add("values", DataTypes.createArrayType(DataTypes.LongType, false), true);
+        Map<String, String> values = policy == null
+                ? Map.of(VortexOutputWriter.WRITE_BATCH_SIZE_OPTION, "1")
+                : Map.of(
+                        VortexOutputWriter.WRITE_BATCH_SIZE_OPTION,
+                        "1",
+                        VortexOutputWriter.WRITE_RESET_CAPACITY_OPTION,
+                        policy);
+        long[] large = new long[65536];
+        Arrays.setAll(large, i -> i);
+        List<String> expected = new ArrayList<>();
+        expected.add(Arrays.toString(large).replace(" ", ""));
+        VortexOutputWriter writer = writer("capacity.vortex", schema, values);
+        BufferAllocator allocator = writer.allocator();
+        long held;
+        try {
+            writer.write(new GenericInternalRow(new Object[] {new GenericArrayData(large)}));
+            for (long i = 0; i < 64; i++) {
+                writer.write(new GenericInternalRow(new Object[] {new GenericArrayData(new long[] {i})}));
+                expected.add("[" + i + "]");
+            }
+            // All 65 outer rows remain below the native 8192-row block boundary.
+            held = allocator.getAllocatedMemory();
+        } finally {
+            writer.close();
+        }
+        long budget = 8L * 1024 * 1024;
+        assertTrue("false".equals(policy) ? held >= budget : held < budget, "retained " + held + " bytes");
+        assertEquals(0, allocator.getAllocatedMemory());
+        assertEquals(expected, readRows(writer.path()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"auto", "true", "false"})
+    void everyCapacityPolicyResetsAfterAByteTriggeredFlush(String policy) {
+        StructType schema = new StructType().add("values", DataTypes.createArrayType(DataTypes.LongType, false), true);
+        long[] large = new long[16384];
+        VortexOutputWriter writer = writer(
+                "byte-capacity.vortex",
+                schema,
+                Map.of(
+                        VortexOutputWriter.WRITE_BATCH_SIZE_OPTION, "128",
+                        VortexOutputWriter.WRITE_BATCH_BYTES_OPTION, "65536",
+                        VortexOutputWriter.WRITE_RESET_CAPACITY_OPTION, policy));
+        try {
+            writer.write(new GenericInternalRow(new Object[] {new GenericArrayData(large)}));
+            assertEquals(0, writer.batchRowCount());
+            writer.write(new GenericInternalRow(new Object[] {new GenericArrayData(new long[] {1})}));
+            assertEquals(1, writer.batchRowCount());
+        } finally {
+            writer.close();
+        }
+        assertEquals(List.of(Arrays.toString(large).replace(" ", ""), "[1]"), readRows(writer.path()));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"auto,0", "auto,1", "auto,2", "true,0", "true,1", "true,2", "false,0", "false,1", "false,2"})
+    void capacityPolicyPreservesRowBoundedFixedWidthHints(String policy, int structDepth) {
+        StructType schema = new StructType().add("value", DataTypes.LongType, false);
+        GenericInternalRow row = new GenericInternalRow(new Object[] {7L});
+        String expected = "7";
+        for (int i = 0; i < structDepth; i++) {
+            schema = new StructType().add("value", schema, true);
+            row = new GenericInternalRow(new Object[] {row});
+            expected = "{\"value\":" + expected + "}";
+        }
+        VortexOutputWriter writer = writer(
+                "fixed-width-capacity.vortex",
+                schema,
+                Map.of(
+                        VortexOutputWriter.WRITE_BATCH_SIZE_OPTION,
+                        "1024",
+                        VortexOutputWriter.WRITE_RESET_CAPACITY_OPTION,
+                        policy));
+        BufferAllocator allocator = writer.allocator();
+        try {
+            for (int i = 0; i < 1024; i++) {
+                writer.write(row);
+            }
+            assertEquals(0, writer.batchRowCount());
+            // Below a native block, the exported batch stays retained while the next batch allocates.
+            long retained = allocator.getAllocatedMemory();
+            writer.write(row);
+            long allocated = allocator.getAllocatedMemory() - retained;
+            assertTrue(
+                    "true".equals(policy) ? allocated < 8192 : allocated >= 8192,
+                    "next batch allocated " + allocated + " bytes");
+        } finally {
+            writer.close();
+        }
+        assertEquals(0, allocator.getAllocatedMemory());
+        assertEquals(Collections.nCopies(1025, expected), readRows(writer.path()));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "auto,string", "true,string", "false,string",
+        "auto,binary", "true,binary", "false,binary",
+        "auto,list", "true,list", "false,list",
+        "auto,map", "true,map", "false,map",
+        "auto,struct", "true,struct", "false,struct"
+    })
+    void autoRetainsUsefulCapacityAndShrinksAfterValuesGetSmaller(String policy, String shape) {
+        CapacityValue large = capacityValue(shape, 128);
+        CapacityValue small = capacityValue(shape, 1);
+        StructType schema = new StructType().add("value", large.type(), true);
+        GenericInternalRow largeRow = new GenericInternalRow(new Object[] {large.value()});
+        GenericInternalRow smallRow = new GenericInternalRow(new Object[] {small.value()});
+        VortexOutputWriter writer = writer(
+                "adaptive-capacity.vortex",
+                schema,
+                Map.of(
+                        VortexOutputWriter.WRITE_BATCH_SIZE_OPTION,
+                        "256",
+                        VortexOutputWriter.WRITE_RESET_CAPACITY_OPTION,
+                        policy));
+        BufferAllocator allocator = writer.allocator();
+        try {
+            for (int i = 0; i < 256; i++) {
+                writer.write(largeRow);
+            }
+            long retained = allocator.getAllocatedMemory();
+            writer.write(smallRow);
+            long allocated = allocator.getAllocatedMemory() - retained;
+            assertTrue(
+                    "true".equals(policy) ? allocated < 16384 : allocated >= 16384,
+                    "after a full batch, the next batch allocated " + allocated + " bytes");
+            for (int i = 1; i < 256; i++) {
+                writer.write(smallRow);
+            }
+            retained = allocator.getAllocatedMemory();
+            writer.write(smallRow);
+            allocated = allocator.getAllocatedMemory() - retained;
+            assertTrue(
+                    "false".equals(policy) ? allocated >= 16384 : allocated < 16384,
+                    "after a sparse batch, the next batch allocated " + allocated + " bytes");
+        } finally {
+            writer.close();
+        }
+        List<String> expected = new ArrayList<>(Collections.nCopies(256, large.expected()));
+        expected.addAll(Collections.nCopies(257, small.expected()));
+        assertEquals(expected, readRows(writer.path()));
+        assertEquals(0, allocator.getAllocatedMemory());
+    }
+
+    private record CapacityValue(DataType type, Object value, String expected) {}
+
+    private static CapacityValue capacityValue(String shape, int size) {
+        long[] values = new long[size];
+        Arrays.setAll(values, i -> i);
+        return switch (shape) {
+            case "string" ->
+                new CapacityValue(DataTypes.StringType, UTF8String.fromString("x".repeat(size)), "x".repeat(size));
+            case "binary" -> new CapacityValue(DataTypes.BinaryType, new byte[size], Arrays.toString(new byte[size]));
+            case "list" ->
+                new CapacityValue(
+                        DataTypes.createArrayType(DataTypes.LongType, false),
+                        new GenericArrayData(values),
+                        Arrays.toString(values).replace(" ", ""));
+            case "map" -> {
+                List<String> entries = new ArrayList<>();
+                for (long value : values) {
+                    entries.add("{\"key\":" + value + ",\"value\":" + value + "}");
+                }
+                yield new CapacityValue(
+                        DataTypes.createMapType(DataTypes.LongType, DataTypes.LongType, false),
+                        new ArrayBasedMapData(new GenericArrayData(values), new GenericArrayData(values)),
+                        "[" + String.join(",", entries) + "]");
+            }
+            case "struct" ->
+                new CapacityValue(
+                        new StructType().add("text", DataTypes.StringType, true),
+                        new GenericInternalRow(new Object[] {UTF8String.fromString("x".repeat(size))}),
+                        "{\"text\":\"" + "x".repeat(size) + "\"}");
+            default -> throw new IllegalArgumentException(shape);
+        };
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"auto", "true", "false"})
+    void byteTriggeredFlushesResetFixedWidthHintsOnSteadyData(String policy) {
+        StructType schema = new StructType().add("id", DataTypes.LongType, false);
+        VortexOutputWriter writer = writer(
+                "steady-byte-capacity.vortex",
+                schema,
+                Map.of(
+                        VortexOutputWriter.WRITE_BATCH_SIZE_OPTION, "8192",
+                        VortexOutputWriter.WRITE_BATCH_BYTES_OPTION, "4096",
+                        VortexOutputWriter.WRITE_RESET_CAPACITY_OPTION, policy));
+        List<String> expected = new ArrayList<>();
+        try {
+            int firstBatchRows = 0;
+            do {
+                writer.write(new GenericInternalRow(new Object[] {(long) firstBatchRows}));
+                expected.add(Integer.toString(firstBatchRows));
+                firstBatchRows++;
+            } while (writer.batchRowCount() != 0 && firstBatchRows < 8192);
+            assertTrue(firstBatchRows > 1 && firstBatchRows < 8192);
+            for (int i = 0; i < firstBatchRows; i++) {
+                long value = (long) firstBatchRows + i;
+                writer.write(new GenericInternalRow(new Object[] {value}));
+                expected.add(Long.toString(value));
+                assertEquals((i + 1) % firstBatchRows, writer.batchRowCount());
+            }
+        } finally {
+            writer.close();
+        }
+        assertEquals(2, writer.summary().batchCount());
+        assertEquals(expected, readRows(writer.path()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "sometimes"})
+    void invalidCapacityPoliciesAreRejectedOnTheDriver(String policy) {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> VortexOutputWriterFactory.validate(
+                        options(Map.of(VortexOutputWriter.WRITE_RESET_CAPACITY_OPTION, policy))));
+        assertTrue(error.getMessage().contains(VortexOutputWriter.WRITE_RESET_CAPACITY_OPTION));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"AUTO,AUTO", "' true ',ALWAYS", "FALSE,NEVER"})
+    void capacityPolicyValuesAreTrimmedAndCaseInsensitive(String value, VortexOutputWriter.CapacityReset expected) {
+        assertEquals(
+                expected,
+                VortexOutputWriter.configuredCapacityReset(options(Map.of("Vortex.Write.Reset.Capacity", value))));
     }
 
     /**

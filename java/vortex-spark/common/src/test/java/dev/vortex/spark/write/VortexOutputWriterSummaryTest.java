@@ -90,7 +90,8 @@ final class VortexOutputWriterSummaryTest {
         VortexOutputWriter writer = writer(SCHEMA, 1, new CountingWritable());
         try {
             writer.write(new GenericInternalRow(new Object[] {1L}));
-            assertThrows(ClassCastException.class, () -> writer.write(new GenericInternalRow(new Object[] {"invalid"})));
+            assertThrows(
+                    ClassCastException.class, () -> writer.write(new GenericInternalRow(new Object[] {"invalid"})));
         } finally {
             writer.close();
         }
@@ -144,7 +145,10 @@ final class VortexOutputWriterSummaryTest {
 
     private static VortexOutputWriter writer(StructType schema, int batchSize, NativeWritable sink) {
         return new VortexOutputWriter(
-                "caller-owned.vortex", schema, VortexOptions.of(Map.of("batch.size", Integer.toString(batchSize))), sink);
+                "caller-owned.vortex",
+                schema,
+                VortexOptions.of(Map.of("batch.size", Integer.toString(batchSize))),
+                sink);
     }
 
     private static final class CountingWritable implements NativeWritable {
