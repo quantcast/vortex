@@ -1,0 +1,554 @@
+{
+  "date": "2026-11-03",
+  "baselineCommit": "29348ee3956597c1609a380a2226bb47c23d2c93",
+  "candidateChange": "Bound the default JNI scan completed-output handoff to one item",
+  "baselineNativeSha256": "cf3749143a9d16745f5fa6f01e705d8aeef928909099ff75a157d7aafa38a5d1",
+  "candidateNativeSha256": "ac90667e8c6c5243fa39c01a8ddc123322f3027b96d074cbe4f2ad1fdbf2d4c3",
+  "environment": {
+    "os": "macOS arm64",
+    "model": "Mac15,7",
+    "logicalCpus": 12,
+    "physicalCpus": 12,
+    "ramBytes": 38654705664,
+    "java": "17.0.16 Amazon",
+    "spark": "4.0.4",
+    "scala": "2.13.16",
+    "sparkTasks": 1,
+    "nativeWorkers": 4,
+    "heapLimitBytes": 2147483648,
+    "directMemoryLimitBytes": 8589934592,
+    "gc": "G1",
+    "splitFiles": false,
+    "splitConcurrency": "default",
+    "writerBatchRows": 8192,
+    "writerByteThreshold": null,
+    "writerCapacityPolicy": "auto",
+    "rewriteSourceOrdered": true,
+    "timedSink": "synchronous discard",
+    "freshJvmPerRun": true,
+    "processSamplingMilliseconds": 50,
+    "heapSamplingMilliseconds": 10
+  },
+  "cases": [
+    {
+      "workload": "Flat-layout read",
+      "baseline": "read-default",
+      "prototype": "read-bridge",
+      "footprintReductionPct": 28.151349273843707,
+      "elapsedChangePct": -2.416464822971409,
+      "results": {
+        "read-default": {
+          "n": 3,
+          "rows": 395835,
+          "metrics": {
+            "physicalFootprintPeakBytes": {
+              "median": 1562953888,
+              "min": 1522092096,
+              "max": 1705232616
+            },
+            "rssPeakBytes": {
+              "median": 1668857856,
+              "min": 1436827648,
+              "max": 1680457728
+            },
+            "seconds": {
+              "median": 10.590050042,
+              "min": 7.113739875,
+              "max": 12.45488525
+            },
+            "arrowPeakBytes": {
+              "median": 0,
+              "min": 0,
+              "max": 0
+            },
+            "heapPeakBytes": {
+              "median": 243451432,
+              "min": 228096528,
+              "max": 308712616
+            },
+            "jvmAllocatedBytes": {
+              "median": 2475023336,
+              "min": 2437456232,
+              "max": 2487512480
+            }
+          },
+          "outputBytes": [
+            0,
+            0,
+            0
+          ],
+          "batchCount": [
+            0,
+            0,
+            0
+          ]
+        },
+        "read-bridge": {
+          "n": 3,
+          "rows": 395835,
+          "metrics": {
+            "physicalFootprintPeakBytes": {
+              "median": 1122961280,
+              "min": 1110886176,
+              "max": 1123288888
+            },
+            "rssPeakBytes": {
+              "median": 1158332416,
+              "min": 1146224640,
+              "max": 1159036928
+            },
+            "seconds": {
+              "median": 10.334145208,
+              "min": 6.223700667,
+              "max": 12.388970791
+            },
+            "arrowPeakBytes": {
+              "median": 0,
+              "min": 0,
+              "max": 0
+            },
+            "heapPeakBytes": {
+              "median": 234350336,
+              "min": 231991024,
+              "max": 252512608
+            },
+            "jvmAllocatedBytes": {
+              "median": 2453989720,
+              "min": 2395469224,
+              "max": 2485985520
+            }
+          },
+          "outputBytes": [
+            0,
+            0,
+            0
+          ],
+          "batchCount": [
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "sourceBytes": 111066768,
+      "sourceSha256": "7492758d586fc38891e52cd6d1e28a5a3d2a8cd85c84e58542d0627b2897bccb",
+      "measurements": [
+        {
+          "seconds": 10.590050042,
+          "rows": 395835,
+          "arrowPeakBytes": 0,
+          "bufferedPeakBytes": 0,
+          "heapPeakBytes": 308712616,
+          "jvmAllocatedBytes": 2487512480,
+          "outputBytes": 0,
+          "batchCount": 0,
+          "rssPeakBytes": 1668857856,
+          "physicalFootprintPeakBytes": 1705232616,
+          "variant": "read-default",
+          "repetition": 0
+        },
+        {
+          "seconds": 10.334145208,
+          "rows": 395835,
+          "arrowPeakBytes": 0,
+          "bufferedPeakBytes": 0,
+          "heapPeakBytes": 231991024,
+          "jvmAllocatedBytes": 2453989720,
+          "outputBytes": 0,
+          "batchCount": 0,
+          "rssPeakBytes": 1159036928,
+          "physicalFootprintPeakBytes": 1123288888,
+          "variant": "read-bridge",
+          "repetition": 0
+        },
+        {
+          "seconds": 12.388970791,
+          "rows": 395835,
+          "arrowPeakBytes": 0,
+          "bufferedPeakBytes": 0,
+          "heapPeakBytes": 234350336,
+          "jvmAllocatedBytes": 2485985520,
+          "outputBytes": 0,
+          "batchCount": 0,
+          "rssPeakBytes": 1146224640,
+          "physicalFootprintPeakBytes": 1110886176,
+          "variant": "read-bridge",
+          "repetition": 1
+        },
+        {
+          "seconds": 12.45488525,
+          "rows": 395835,
+          "arrowPeakBytes": 0,
+          "bufferedPeakBytes": 0,
+          "heapPeakBytes": 243451432,
+          "jvmAllocatedBytes": 2475023336,
+          "outputBytes": 0,
+          "batchCount": 0,
+          "rssPeakBytes": 1436827648,
+          "physicalFootprintPeakBytes": 1522092096,
+          "variant": "read-default",
+          "repetition": 1
+        },
+        {
+          "seconds": 7.113739875,
+          "rows": 395835,
+          "arrowPeakBytes": 0,
+          "bufferedPeakBytes": 0,
+          "heapPeakBytes": 228096528,
+          "jvmAllocatedBytes": 2437456232,
+          "outputBytes": 0,
+          "batchCount": 0,
+          "rssPeakBytes": 1680457728,
+          "physicalFootprintPeakBytes": 1562953888,
+          "variant": "read-default",
+          "repetition": 2
+        },
+        {
+          "seconds": 6.223700667,
+          "rows": 395835,
+          "arrowPeakBytes": 0,
+          "bufferedPeakBytes": 0,
+          "heapPeakBytes": 252512608,
+          "jvmAllocatedBytes": 2395469224,
+          "outputBytes": 0,
+          "batchCount": 0,
+          "rssPeakBytes": 1158332416,
+          "physicalFootprintPeakBytes": 1122961280,
+          "variant": "read-bridge",
+          "repetition": 2
+        }
+      ]
+    },
+    {
+      "workload": "List-layout read",
+      "baseline": "read-default",
+      "prototype": "read-bridge",
+      "footprintReductionPct": 31.63646598308566,
+      "elapsedChangePct": -10.702439256301266,
+      "results": {
+        "read-default": {
+          "n": 2,
+          "rows": 774057,
+          "metrics": {
+            "physicalFootprintPeakBytes": {
+              "median": 3489656552.0,
+              "min": 3257863840,
+              "max": 3721449264
+            },
+            "rssPeakBytes": {
+              "median": 3261685760.0,
+              "min": 3233857536,
+              "max": 3289513984
+            },
+            "seconds": {
+              "median": 10.010105083,
+              "min": 7.697162791,
+              "max": 12.323047375
+            },
+            "arrowPeakBytes": {
+              "median": 0.0,
+              "min": 0,
+              "max": 0
+            },
+            "heapPeakBytes": {
+              "median": 584012428.0,
+              "min": 532109168,
+              "max": 635915688
+            },
+            "jvmAllocatedBytes": {
+              "median": 4367627292.0,
+              "min": 4358596040,
+              "max": 4376658544
+            }
+          },
+          "outputBytes": [
+            0,
+            0
+          ],
+          "batchCount": [
+            0,
+            0
+          ]
+        },
+        "read-bridge": {
+          "n": 2,
+          "rows": 774057,
+          "metrics": {
+            "physicalFootprintPeakBytes": {
+              "median": 2385652544.0,
+              "min": 2336754400,
+              "max": 2434550688
+            },
+            "rssPeakBytes": {
+              "median": 2529820672.0,
+              "min": 2460188672,
+              "max": 2599452672
+            },
+            "seconds": {
+              "median": 8.938779666999999,
+              "min": 7.589010125,
+              "max": 10.288549209
+            },
+            "arrowPeakBytes": {
+              "median": 0.0,
+              "min": 0,
+              "max": 0
+            },
+            "heapPeakBytes": {
+              "median": 538724412.0,
+              "min": 478807688,
+              "max": 598641136
+            },
+            "jvmAllocatedBytes": {
+              "median": 4279607988.0,
+              "min": 4242542664,
+              "max": 4316673312
+            }
+          },
+          "outputBytes": [
+            0,
+            0
+          ],
+          "batchCount": [
+            0,
+            0
+          ]
+        }
+      },
+      "sourceBytes": 180436608,
+      "sourceSha256": "500deb42995353e5afd6790ffe38cbddae019c685ce26308304fa9e3c703042d",
+      "measurements": [
+        {
+          "seconds": 12.323047375,
+          "rows": 774057,
+          "arrowPeakBytes": 0,
+          "bufferedPeakBytes": 0,
+          "heapPeakBytes": 532109168,
+          "jvmAllocatedBytes": 4376658544,
+          "outputBytes": 0,
+          "batchCount": 0,
+          "rssPeakBytes": 3289513984,
+          "physicalFootprintPeakBytes": 3257863840,
+          "variant": "read-default",
+          "repetition": 0
+        },
+        {
+          "seconds": 10.288549209,
+          "rows": 774057,
+          "arrowPeakBytes": 0,
+          "bufferedPeakBytes": 0,
+          "heapPeakBytes": 598641136,
+          "jvmAllocatedBytes": 4316673312,
+          "outputBytes": 0,
+          "batchCount": 0,
+          "rssPeakBytes": 2599452672,
+          "physicalFootprintPeakBytes": 2434550688,
+          "variant": "read-bridge",
+          "repetition": 0
+        },
+        {
+          "seconds": 7.589010125,
+          "rows": 774057,
+          "arrowPeakBytes": 0,
+          "bufferedPeakBytes": 0,
+          "heapPeakBytes": 478807688,
+          "jvmAllocatedBytes": 4242542664,
+          "outputBytes": 0,
+          "batchCount": 0,
+          "rssPeakBytes": 2460188672,
+          "physicalFootprintPeakBytes": 2336754400,
+          "variant": "read-bridge",
+          "repetition": 1
+        },
+        {
+          "seconds": 7.697162791,
+          "rows": 774057,
+          "arrowPeakBytes": 0,
+          "bufferedPeakBytes": 0,
+          "heapPeakBytes": 635915688,
+          "jvmAllocatedBytes": 4358596040,
+          "outputBytes": 0,
+          "batchCount": 0,
+          "rssPeakBytes": 3233857536,
+          "physicalFootprintPeakBytes": 3721449264,
+          "variant": "read-default",
+          "repetition": 1
+        }
+      ]
+    },
+    {
+      "workload": "Ordered Vortex rewrite",
+      "baseline": "ordered-rewrite-baseline",
+      "prototype": "ordered-rewrite-bridge",
+      "footprintReductionPct": 23.27501167354862,
+      "elapsedChangePct": -9.39287664849553,
+      "results": {
+        "ordered-rewrite-baseline": {
+          "n": 2,
+          "rows": 395835,
+          "metrics": {
+            "physicalFootprintPeakBytes": {
+              "median": 1997687316.0,
+              "min": 1983547960,
+              "max": 2011826672
+            },
+            "rssPeakBytes": {
+              "median": 2057125888.0,
+              "min": 2040889344,
+              "max": 2073362432
+            },
+            "seconds": {
+              "median": 9.485486229,
+              "min": 9.4841105,
+              "max": 9.486861958
+            },
+            "arrowPeakBytes": {
+              "median": 203608360.0,
+              "min": 203608360,
+              "max": 203608360
+            },
+            "heapPeakBytes": {
+              "median": 259578980.0,
+              "min": 246676568,
+              "max": 272481392
+            },
+            "jvmAllocatedBytes": {
+              "median": 5323342948.0,
+              "min": 5309736048,
+              "max": 5336949848
+            }
+          },
+          "outputBytes": [
+            111065312,
+            111065312
+          ],
+          "batchCount": [
+            49,
+            49
+          ]
+        },
+        "ordered-rewrite-bridge": {
+          "n": 2,
+          "rows": 395835,
+          "metrics": {
+            "physicalFootprintPeakBytes": {
+              "median": 1532725360.0,
+              "min": 1497024624,
+              "max": 1568426096
+            },
+            "rssPeakBytes": {
+              "median": 1515118592.0,
+              "min": 1448820736,
+              "max": 1581416448
+            },
+            "seconds": {
+              "median": 8.594526208,
+              "min": 7.809612208,
+              "max": 9.379440208
+            },
+            "arrowPeakBytes": {
+              "median": 203608360.0,
+              "min": 203608360,
+              "max": 203608360
+            },
+            "heapPeakBytes": {
+              "median": 233009476.0,
+              "min": 227727504,
+              "max": 238291448
+            },
+            "jvmAllocatedBytes": {
+              "median": 5300211916.0,
+              "min": 5292017456,
+              "max": 5308406376
+            }
+          },
+          "outputBytes": [
+            111065312,
+            111065312
+          ],
+          "batchCount": [
+            49,
+            49
+          ]
+        }
+      },
+      "sourceBytes": 111066768,
+      "sourceSha256": "7492758d586fc38891e52cd6d1e28a5a3d2a8cd85c84e58542d0627b2897bccb",
+      "measurements": [
+        {
+          "seconds": 9.4841105,
+          "rows": 395835,
+          "arrowPeakBytes": 203608360,
+          "bufferedPeakBytes": 31299441,
+          "heapPeakBytes": 246676568,
+          "jvmAllocatedBytes": 5336949848,
+          "outputBytes": 111065312,
+          "batchCount": 49,
+          "rssPeakBytes": 2073362432,
+          "physicalFootprintPeakBytes": 1983547960,
+          "variant": "ordered-rewrite-baseline",
+          "repetition": 0
+        },
+        {
+          "seconds": 7.809612208,
+          "rows": 395835,
+          "arrowPeakBytes": 203608360,
+          "bufferedPeakBytes": 31299441,
+          "heapPeakBytes": 227727504,
+          "jvmAllocatedBytes": 5308406376,
+          "outputBytes": 111065312,
+          "batchCount": 49,
+          "rssPeakBytes": 1581416448,
+          "physicalFootprintPeakBytes": 1497024624,
+          "variant": "ordered-rewrite-bridge",
+          "repetition": 0
+        },
+        {
+          "seconds": 9.379440208,
+          "rows": 395835,
+          "arrowPeakBytes": 203608360,
+          "bufferedPeakBytes": 31299441,
+          "heapPeakBytes": 238291448,
+          "jvmAllocatedBytes": 5292017456,
+          "outputBytes": 111065312,
+          "batchCount": 49,
+          "rssPeakBytes": 1448820736,
+          "physicalFootprintPeakBytes": 1568426096,
+          "variant": "ordered-rewrite-bridge",
+          "repetition": 1
+        },
+        {
+          "seconds": 9.486861958,
+          "rows": 395835,
+          "arrowPeakBytes": 203608360,
+          "bufferedPeakBytes": 31299441,
+          "heapPeakBytes": 272481392,
+          "jvmAllocatedBytes": 5309736048,
+          "outputBytes": 111065312,
+          "batchCount": 49,
+          "rssPeakBytes": 2040889344,
+          "physicalFootprintPeakBytes": 2011826672,
+          "variant": "ordered-rewrite-baseline",
+          "repetition": 1
+        }
+      ]
+    }
+  ],
+  "validation": {
+    "readerBaselineAndCandidateCountAndDigestMatch": true,
+    "readerDigest": "VERIFIED_READ [[774057,1183892710702380295772]]",
+    "candidateActualFileRewriteCountAndDigestMatch": true,
+    "rewriteDigest": "VERIFIED [[395835,706885748786624806702]]",
+    "rewriteOutputBytesEveryTimedRunAndActualFile": 111065312,
+    "rewriteBatchCountEveryTimedRunAndActualFile": 49,
+    "regressionTestsRun": false
+  },
+  "limits": [
+    "Private fixtures and logs are omitted; identifiers and numeric metrics only.",
+    "Small sample on a shared host; timing differences are not conclusive.",
+    "Physical footprint includes macOS compressed-memory accounting.",
+    "No multi-task executors, object stores, writer fanout or broad SQL matrix.",
+    "Count plus aggregate complete-row hashes is probabilistic, not bytewise equality.",
+    "Harness tidying and the new classpath helper were not rerun after measurement."
+  ]
+}

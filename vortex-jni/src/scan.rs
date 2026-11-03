@@ -22,8 +22,10 @@ use arrow_array::ffi::FFI_ArrowSchema;
 use arrow_array::ffi_stream::FFI_ArrowArrayStream;
 use arrow_schema::ArrowError;
 use arrow_schema::Field;
+use futures::SinkExt;
 use futures::Stream;
 use futures::StreamExt;
+use futures::channel::mpsc;
 use jni::EnvUnowned;
 use jni::objects::JByteArray;
 use jni::objects::JClass;
@@ -419,11 +421,32 @@ fn scan_iterator<R: Send + 'static>(
     stream: impl Stream<Item = R> + Send + 'static,
 ) -> Box<dyn Iterator<Item = R> + Send> {
     if split_concurrency.is_some() {
-        // The thread-safe bridge queues another batch per core, independently of the stream's
-        // conversion lookahead. Drive capped scans directly so that queue cannot bypass the cap.
+        // An output queue adds to conversion lookahead. Drive explicitly capped scans
+        // directly so the queue cannot bypass their bound.
         Box::new(runtime.block_on_stream(stream))
     } else {
-        Box::new(runtime.block_on_stream_thread_safe(|_| stream))
+        // Keep a background producer so native work overlaps Java consumption. Each sender
+        // owns one guaranteed mpsc slot, so zero extra slots retains one completed output.
+        let (mut sender, receiver) = mpsc::channel(0);
+        let mut driver = Some(runtime.handle().spawn(async move {
+            futures::pin_mut!(stream);
+            while let Some(item) = stream.next().await {
+                if sender.send(item).await.is_err() {
+                    break;
+                }
+            }
+        }));
+        let mut iterator = runtime.block_on_stream(receiver);
+        let runtime = runtime.clone();
+        Box::new(std::iter::from_fn(move || {
+            let item = iterator.next();
+            if item.is_none()
+                && let Some(driver) = driver.take()
+            {
+                runtime.block_on(driver);
+            }
+            item
+        }))
     }
 }
 
@@ -441,6 +464,39 @@ mod tests {
     use vortex::io::runtime::current::CurrentThreadRuntime;
 
     use super::scan_iterator;
+
+    #[test]
+    fn default_scan_keeps_only_one_completed_output_ahead() {
+        let runtime = CurrentThreadRuntime::new();
+        let completed = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&completed);
+        let batches = stream::iter(0..16).inspect(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        let mut iter = scan_iterator(&runtime, None, batches);
+        assert_eq!(iter.next(), Some(0));
+        runtime.block_on(async {
+            for _ in 0..64 {
+                runtime.handle().spawn(async {}).await;
+            }
+        });
+        assert_eq!(completed.load(Ordering::SeqCst), 2);
+        assert_eq!(iter.collect::<Vec<_>>(), (1..16).collect::<Vec<_>>());
+    }
+
+    #[test]
+    #[should_panic(expected = "test scan producer panic")]
+    #[allow(clippy::panic, reason = "test producer panic propagation")]
+    fn default_scan_propagates_producer_panics() {
+        let runtime = CurrentThreadRuntime::new();
+        let batches = stream::iter(0..2).map(|value| {
+            if value == 1 {
+                panic!("test scan producer panic");
+            }
+            value
+        });
+        let _ = scan_iterator(&runtime, None, batches).collect::<Vec<_>>();
+    }
 
     #[rstest]
     #[case(1)]

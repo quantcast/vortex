@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright the Vortex contributors
+
+gradle.projectsEvaluated {
+    def spark = rootProject.findProject(':vortex-spark-4.0_2.13')
+    spark.tasks.register('vortexMemoryClasspath') {
+        dependsOn spark.tasks.named('classes')
+        dependsOn spark.tasks.named('benchmarkClasses')
+        dependsOn rootProject.project(':vortex-jni').tasks.named('shadowJar')
+        doLast {
+            def directory = spark.layout.buildDirectory.dir('vortex-memory').get().asFile
+            directory.mkdirs()
+            new File(directory, 'classpath.txt').text = spark.sourceSets.main.output.asPath + File.pathSeparator +
+                    spark.sourceSets.benchmark.runtimeClasspath.asPath + File.pathSeparator +
+                    rootProject.project(':vortex-jni').tasks.named('shadowJar').get().outputs.files.asPath
+            new File(directory, 'java-home.txt').text = spark.tasks.named('compileJava').get()
+                    .javaCompiler.get().metadata.installationPath.asFile.absolutePath
+        }
+    }
+}
