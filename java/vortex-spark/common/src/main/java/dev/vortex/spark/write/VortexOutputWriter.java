@@ -13,6 +13,7 @@ import dev.vortex.relocated.org.apache.arrow.memory.RootAllocator;
 import dev.vortex.relocated.org.apache.arrow.vector.BaseFixedWidthVector;
 import dev.vortex.relocated.org.apache.arrow.vector.FieldVector;
 import dev.vortex.relocated.org.apache.arrow.vector.VectorSchemaRoot;
+import dev.vortex.relocated.org.apache.arrow.vector.complex.StructVector;
 import dev.vortex.spark.VortexOptions;
 import dev.vortex.spark.VortexSparkSession;
 import java.io.IOException;
@@ -50,7 +51,7 @@ public final class VortexOutputWriter extends OutputWriter {
      */
     public static final String LIST_LAYOUT_OPTION = "vortex.listLayout";
 
-    /** Controls whether Arrow sizing hints are reset: auto (schema-aware), true, or false. */
+    /** Controls Arrow sizing resets after row-limit flushes; byte-triggered flushes always reset all hints. */
     public static final String WRITE_RESET_CAPACITY_OPTION = "vortex.write.reset.capacity";
 
     enum CapacityReset {
@@ -229,10 +230,18 @@ public final class VortexOutputWriter extends OutputWriter {
     private void resetInitialCapacity(boolean includeFixedWidth) {
         int initialCapacity = Math.min(batchSize, INITIAL_VECTOR_CAPACITY);
         for (FieldVector vector : vectorSchemaRoot.getFieldVectors()) {
-            // Root fixed-width counts are row-bounded; nested element counts and value sizes can be much larger.
-            if (includeFixedWidth || !(vector instanceof BaseFixedWidthVector)) {
-                vector.setInitialCapacity(initialCapacity);
+            resetInitialCapacity(vector, initialCapacity, includeFixedWidth);
+        }
+    }
+
+    private static void resetInitialCapacity(FieldVector vector, int initialCapacity, boolean includeFixedWidth) {
+        if (!includeFixedWidth && vector instanceof StructVector) {
+            // Structs preserve row counts. Lists and maps can multiply them, so reset those subtrees in full.
+            for (FieldVector child : vector.getChildrenFromFields()) {
+                resetInitialCapacity(child, initialCapacity, false);
             }
+        } else if (includeFixedWidth || !(vector instanceof BaseFixedWidthVector)) {
+            vector.setInitialCapacity(initialCapacity);
         }
     }
 
@@ -249,7 +258,7 @@ public final class VortexOutputWriter extends OutputWriter {
         peakBufferedBytes = Math.max(peakBufferedBytes, vortexWriter.bufferedBytes());
 
         vectorSchemaRoot.clear();
-        if (capacityReset != CapacityReset.NEVER) {
+        if (reachedBytes || capacityReset != CapacityReset.NEVER) {
             // A byte-triggered flush must also discard fixed-width hints to preserve its smaller batch budget.
             resetInitialCapacity(capacityReset == CapacityReset.ALWAYS || reachedBytes);
         }

@@ -24,6 +24,7 @@ import java.math.BigDecimal;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import org.apache.hadoop.conf.Configuration;
@@ -308,7 +309,7 @@ final class VortexOutputWriterTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"auto", "true", "false"})
-    void capacityPolicyAlsoAppliesAfterAByteTriggeredFlush(String policy) {
+    void everyCapacityPolicyResetsAfterAByteTriggeredFlush(String policy) {
         StructType schema = new StructType().add("values", DataTypes.createArrayType(DataTypes.LongType, false), true);
         long[] large = new long[16384];
         VortexOutputWriter writer = writer(
@@ -322,12 +323,83 @@ final class VortexOutputWriterTest {
             writer.write(new GenericInternalRow(new Object[] {new GenericArrayData(large)}));
             assertEquals(0, writer.batchRowCount());
             writer.write(new GenericInternalRow(new Object[] {new GenericArrayData(new long[] {1})}));
-            // Keeping the oversized allocation makes the next one-row batch hit the byte limit too.
-            assertEquals("false".equals(policy) ? 0 : 1, writer.batchRowCount());
+            assertEquals(1, writer.batchRowCount());
         } finally {
             writer.close();
         }
         assertEquals(List.of(Arrays.toString(large).replace(" ", ""), "[1]"), readRows(writer.path()));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"auto,0", "auto,1", "auto,2", "true,0", "true,1", "true,2", "false,0", "false,1", "false,2"})
+    void capacityPolicyPreservesRowBoundedFixedWidthHints(String policy, int structDepth) {
+        StructType schema = new StructType().add("value", DataTypes.LongType, false);
+        GenericInternalRow row = new GenericInternalRow(new Object[] {7L});
+        String expected = "7";
+        for (int i = 0; i < structDepth; i++) {
+            schema = new StructType().add("value", schema, true);
+            row = new GenericInternalRow(new Object[] {row});
+            expected = "{\"value\":" + expected + "}";
+        }
+        VortexOutputWriter writer = writer(
+                "fixed-width-capacity.vortex",
+                schema,
+                Map.of(
+                        VortexOutputWriter.WRITE_BATCH_SIZE_OPTION,
+                        "1024",
+                        VortexOutputWriter.WRITE_RESET_CAPACITY_OPTION,
+                        policy));
+        BufferAllocator allocator = writer.allocator();
+        try {
+            for (int i = 0; i < 1024; i++) {
+                writer.write(row);
+            }
+            assertEquals(0, writer.batchRowCount());
+            // Below a native block, the exported batch stays retained while the next batch allocates.
+            long retained = allocator.getAllocatedMemory();
+            writer.write(row);
+            long allocated = allocator.getAllocatedMemory() - retained;
+            assertTrue(
+                    "true".equals(policy) ? allocated < 8192 : allocated >= 8192,
+                    "next batch allocated " + allocated + " bytes");
+        } finally {
+            writer.close();
+        }
+        assertEquals(0, allocator.getAllocatedMemory());
+        assertEquals(Collections.nCopies(1025, expected), readRows(writer.path()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"auto", "true", "false"})
+    void byteTriggeredFlushesResetFixedWidthHintsOnSteadyData(String policy) {
+        StructType schema = new StructType().add("id", DataTypes.LongType, false);
+        VortexOutputWriter writer = writer(
+                "steady-byte-capacity.vortex",
+                schema,
+                Map.of(
+                        VortexOutputWriter.WRITE_BATCH_SIZE_OPTION, "8192",
+                        VortexOutputWriter.WRITE_BATCH_BYTES_OPTION, "4096",
+                        VortexOutputWriter.WRITE_RESET_CAPACITY_OPTION, policy));
+        List<String> expected = new ArrayList<>();
+        try {
+            int firstBatchRows = 0;
+            do {
+                writer.write(new GenericInternalRow(new Object[] {(long) firstBatchRows}));
+                expected.add(Integer.toString(firstBatchRows));
+                firstBatchRows++;
+            } while (writer.batchRowCount() != 0 && firstBatchRows < 8192);
+            assertTrue(firstBatchRows > 1 && firstBatchRows < 8192);
+            for (int i = 0; i < firstBatchRows; i++) {
+                long value = (long) firstBatchRows + i;
+                writer.write(new GenericInternalRow(new Object[] {value}));
+                expected.add(Long.toString(value));
+                assertEquals((i + 1) % firstBatchRows, writer.batchRowCount());
+            }
+        } finally {
+            writer.close();
+        }
+        assertEquals(2, writer.summary().batchCount());
+        assertEquals(expected, readRows(writer.path()));
     }
 
     @ParameterizedTest

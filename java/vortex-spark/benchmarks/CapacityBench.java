@@ -39,13 +39,22 @@ public final class CapacityBench {
         StructType schema = new StructType();
         InternalRow[] rows = new InternalRow[256];
         InternalRow outlier = null;
-        if (shape.equals("flat") || shape.equals("wide")) {
-            int columns = shape.equals("wide") ? 64 : 8;
+        if (shape.equals("flat")
+                || shape.equals("wide")
+                || shape.equals("wide-struct")
+                || shape.equals("single-long")) {
+            int columns = shape.equals("flat") ? 8 : shape.equals("single-long") ? 1 : 64;
             for (int j = 0; j < columns; j++) schema = schema.add("c" + j, DataTypes.LongType, false);
             for (int i = 0; i < rows.length; i++) {
                 Object[] v = new Object[columns];
                 for (int j = 0; j < columns; j++) v[j] = rng.nextLong();
                 rows[i] = new GenericInternalRow(v);
+            }
+            if (shape.equals("wide-struct")) {
+                schema = new StructType().add("parent", schema, true);
+                for (int i = 0; i < rows.length; i++) {
+                    rows[i] = new GenericInternalRow(new Object[] {rows[i]});
+                }
             }
         } else if (shape.equals("short-text") || shape.equals("long-text")) {
             int columns = shape.equals("short-text") ? 8 : 4, length = shape.equals("short-text") ? 32 : 4096;

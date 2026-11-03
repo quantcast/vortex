@@ -34,8 +34,10 @@ CASES = {
     "small-outlier": ("outlier", 65, 1),
     "narrow-long": ("flat", 4194304, 2048),
     "wide-long": ("wide", 262144, 2048),
+    "wide-struct": ("wide-struct", 262144, 2048),
     "max-batch": ("flat", 1048576, 65536),
     "byte-limited-outlier": ("outlier", 65, 2048),
+    "byte-limited-steady": ("single-long", 8192, 8192),
 }
 MODES = ("false", "auto", "true")
 
@@ -56,7 +58,7 @@ public final class NativeLoader {
 """
 
 
-def prepare(offline: bool) -> tuple[Path, str]:
+def prepare(offline: bool, writer_source: Path) -> tuple[Path, str]:
     command = [
         str(JAVA / "gradlew"),
         "--init-script",
@@ -86,6 +88,7 @@ def prepare(offline: bool) -> tuple[Path, str]:
             str(classes),
             str(BENCHMARK / "CapacityBench.java"),
             str(loader),
+            str(writer_source),
         ],
         check=True,
     )
@@ -173,6 +176,7 @@ def main():
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--cases", default=",".join(CASES))
     parser.add_argument("--native", type=Path)
+    parser.add_argument("--writer-ref", help="Compile VortexOutputWriter.java from this Git ref for comparison")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--offline", action="store_true")
     arguments = parser.parse_args()
@@ -191,14 +195,20 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     pinned_native = output / native.name
     shutil.copyfile(native, pinned_native)
-    java_home, classpath = prepare(arguments.offline)
+    writer_path = "java/vortex-spark/common/src/main/java/dev/vortex/spark/write/VortexOutputWriter.java"
+    writer_source = REPOSITORY / writer_path
+    if arguments.writer_ref:
+        writer_source = output / "VortexOutputWriter.java"
+        writer_source.write_bytes(
+            subprocess.check_output(["git", "show", f"{arguments.writer_ref}:{writer_path}"], cwd=REPOSITORY)
+        )
+    java_home, classpath = prepare(arguments.offline, writer_source)
     manifest = {
         "command": vars(arguments) | {"native": str(native), "output_dir": str(output)},
         "head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip(),
         "nativeSha256": hashlib.sha256(pinned_native.read_bytes()).hexdigest(),
-        "writerSha256": hashlib.sha256(
-            (BENCHMARK.parent / "common/src/main/java/dev/vortex/spark/write/VortexOutputWriter.java").read_bytes()
-        ).hexdigest(),
+        "writerSha256": hashlib.sha256(writer_source.read_bytes()).hexdigest(),
+        "benchmarkSha256": hashlib.sha256((BENCHMARK / "CapacityBench.java").read_bytes()).hexdigest(),
         "javaVersion": subprocess.check_output(
             [str(java_home / "bin/java"), "-version"], stderr=subprocess.STDOUT, text=True
         ),
@@ -230,7 +240,7 @@ def main():
                     str(rows),
                     str(batch),
                     mode,
-                    "262144" if name == "byte-limited-outlier" else "0",
+                    str({"byte-limited-outlier": 262144, "byte-limited-steady": 4096}.get(name, 0)),
                 ]
                 result = run_case(command, output / f"{tag}.log") | {"case": name, "iteration": iteration}
                 results.append(result)
