@@ -167,6 +167,11 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
     }
 
     private static DataType sparkType(Field field) {
+        // Extension types can export as Arrow structs without supporting native struct projections.
+        if (field.getType() instanceof ArrowType.ExtensionType
+                || field.getMetadata().containsKey(ArrowType.ExtensionType.EXTENSION_METADATA_KEY_NAME)) {
+            return DataTypes.NullType;
+        }
         // Only names, nullability and struct and array shapes are matched against, so leaf types are left unconverted:
         // a file column Spark cannot read only fails a query that reads it.
         if (field.getType() instanceof ArrowType.List || field.getType() instanceof ArrowType.ListView) {
