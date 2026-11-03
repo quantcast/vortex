@@ -486,16 +486,13 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "test scan producer panic")]
-    #[allow(clippy::panic, reason = "test producer panic propagation")]
     fn default_scan_propagates_producer_panics() {
         let runtime = CurrentThreadRuntime::new();
         let batches = stream::iter(0..2).map(|value| {
-            if value == 1 {
-                panic!("test scan producer panic");
-            }
+            assert!(value != 1, "test scan producer panic");
             value
         });
-        let _ = scan_iterator(&runtime, None, batches).collect::<Vec<_>>();
+        drop(scan_iterator(&runtime, None, batches).collect::<Vec<_>>());
     }
 
     #[rstest]
