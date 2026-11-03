@@ -21,6 +21,30 @@ VARIANTS = (
     "ordered-rewrite-baseline",
     "ordered-rewrite-bridge",
 )
+WRITER_BATCH_ROWS = 8192
+WORKER_THREADS = 4
+JVM_FLAGS = (
+    "-Xms256m",
+    "-Xmx2g",
+    "-XX:MaxDirectMemorySize=8g",
+    "-XX:+UseG1GC",
+    *(
+        f"--add-opens=java.base/{p}=ALL-UNNAMED"
+        for p in (
+            "sun.nio.ch",
+            "java.nio",
+            "sun.util.calendar",
+            "sun.security.action",
+            "java.lang.invoke",
+            "java.util",
+            "java.io",
+        )
+    ),
+)
+
+
+def is_rewrite(variant: str) -> bool:
+    return variant.startswith("ordered-rewrite")
 
 
 def sha256(path: Path) -> str:
@@ -56,9 +80,7 @@ def main():
     args.java_home = args.java_home.resolve()
     if args.sink != "discard":
         sink = Path(args.sink).resolve()
-        if any(v.startswith("ordered-rewrite") for v in variants) and (
-            sink == args.input or (sink.exists() and sink.samefile(args.input))
-        ):
+        if any(map(is_rewrite, variants)) and sink.exists() and sink.samefile(args.input):
             parser.error("The rewrite sink must not overwrite the input file")
         args.sink = str(sink)
     args.output.mkdir(parents=True, exist_ok=False)
@@ -83,21 +105,14 @@ public final class NativeLoader {
     for name in ("VortexMemoryBench.java", "run.py", "measurement.py"):
         shutil.copyfile(HERE / name, args.output / name)
     classpath = args.classpath_file.read_text().strip()
-    subprocess.run(
-        [
-            str(args.java_home / "bin/javac"),
-            "-proc:none",
-            "-cp",
-            classpath,
-            "-d",
-            str(classes),
-            str(HERE / "VortexMemoryBench.java"),
-            str(loader),
-        ],
-        check=True,
-    )
+
+    def javac(destination: Path, *sources: Path):
+        command = [str(args.java_home / "bin/javac"), "-proc:none", "-cp", classpath, "-d", str(destination)]
+        subprocess.run(command + [str(source) for source in sources], check=True)
+
+    javac(classes, HERE / "VortexMemoryBench.java", loader)
     ordered_classes = args.output / "ordered-classes"
-    if any(v.startswith("ordered-rewrite") for v in variants):
+    if any(map(is_rewrite, variants)):
         ordered_classes.mkdir()
         source = REPOSITORY / "java/vortex-spark/common/src/main/java/dev/vortex/spark/read/VortexPartitionReader.java"
         code = source.read_text()
@@ -110,18 +125,7 @@ public final class NativeLoader {
                 "var options = ScanOptions.builder().ordered(true);",
             )
         )
-        subprocess.run(
-            [
-                str(args.java_home / "bin/javac"),
-                "-proc:none",
-                "-cp",
-                classpath,
-                "-d",
-                str(ordered_classes),
-                str(ordered_source),
-            ],
-            check=True,
-        )
+        javac(ordered_classes, ordered_source)
     manifest = {
         "arguments": {k: str(v) for k, v in vars(args).items()},
         "commit": subprocess.check_output(
@@ -131,11 +135,11 @@ public final class NativeLoader {
         ).strip(),
         "baselineSha256": sha256(baseline),
         "candidateSha256": sha256(candidate) if candidate is not None else None,
-        "writerBatchRows": 8192,
+        "writerBatchRows": WRITER_BATCH_ROWS,
         "writerBatchBytes": 0,
-        "workerThreads": 4,
+        "workerThreads": WORKER_THREADS,
         "sourceSplitConcurrency": "default",
-        "orderedSource": {v: v.startswith("ordered-rewrite") for v in variants},
+        "orderedSource": {v: is_rewrite(v) for v in variants},
         "sourceBytes": args.input.stat().st_size,
         "sourceSha256": sha256(args.input),
     }
@@ -144,43 +148,24 @@ public final class NativeLoader {
         offset = repetition % len(variants)
         for variant in variants[offset:] + variants[:offset]:
             selected = candidate if variant.endswith("bridge") else baseline
+            selected_classpath = str(classes) + os.pathsep + classpath
+            if is_rewrite(variant):
+                selected_classpath = str(ordered_classes) + os.pathsep + selected_classpath
             command = [
                 str(args.java_home / "bin/java"),
-                "-Xms256m",
-                "-Xmx2g",
-                "-XX:MaxDirectMemorySize=8g",
-                "-XX:+UseG1GC",
+                *JVM_FLAGS,
                 f"-Dvortex.memory.native={selected.resolve()}",
-            ]
-            command += [
-                f"--add-opens=java.base/{p}=ALL-UNNAMED"
-                for p in [
-                    "sun.nio.ch",
-                    "java.nio",
-                    "sun.util.calendar",
-                    "sun.security.action",
-                    "java.lang.invoke",
-                    "java.util",
-                    "java.io",
-                ]
-            ]
-            selected_classpath = str(classes) + os.pathsep + classpath
-            if variant.startswith("ordered-rewrite"):
-                selected_classpath = str(ordered_classes) + os.pathsep + selected_classpath
-            command += [
                 "-cp",
                 selected_classpath,
                 "dev.vortex.spark.write.VortexMemoryBench",
-                str(args.input.resolve()),
-                "8192",
-                "0",
-                "auto",
-                "4",
+                str(args.input),
+                str(WRITER_BATCH_ROWS),
+                str(WORKER_THREADS),
                 args.sink,
                 str(variant.startswith("read")).lower(),
-                "0",
-                "verify" if args.verify else "",
             ]
+            if args.verify:
+                command.append("verify")
             tag = f"{variant}-{repetition}"
             print("START", tag, flush=True)
             result = measure(command, args.output / f"{tag}.log", dict(os.environ, SPARK_LOCAL_IP="127.0.0.1"))

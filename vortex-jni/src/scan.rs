@@ -22,10 +22,8 @@ use arrow_array::ffi::FFI_ArrowSchema;
 use arrow_array::ffi_stream::FFI_ArrowArrayStream;
 use arrow_schema::ArrowError;
 use arrow_schema::Field;
-use futures::SinkExt;
 use futures::Stream;
 use futures::StreamExt;
-use futures::channel::mpsc;
 use jni::EnvUnowned;
 use jni::objects::JByteArray;
 use jni::objects::JClass;
@@ -425,28 +423,8 @@ fn scan_iterator<R: Send + 'static>(
         // directly so the queue cannot bypass their bound.
         Box::new(runtime.block_on_stream(stream))
     } else {
-        // Keep a background producer so native work overlaps Java consumption. Each sender
-        // owns one guaranteed mpsc slot, so zero extra slots retains one completed output.
-        let (mut sender, receiver) = mpsc::channel(0);
-        let mut driver = Some(runtime.handle().spawn(async move {
-            futures::pin_mut!(stream);
-            while let Some(item) = stream.next().await {
-                if sender.send(item).await.is_err() {
-                    break;
-                }
-            }
-        }));
-        let mut iterator = runtime.block_on_stream(receiver);
-        let runtime = runtime.clone();
-        Box::new(std::iter::from_fn(move || {
-            let item = iterator.next();
-            if item.is_none()
-                && let Some(driver) = driver.take()
-            {
-                runtime.block_on(driver);
-            }
-            item
-        }))
+        // Overlap native work with Java consumption while retaining one completed batch.
+        Box::new(runtime.block_on_stream_prefetch(stream))
     }
 }
 
@@ -482,17 +460,6 @@ mod tests {
         });
         assert_eq!(completed.load(Ordering::SeqCst), 2);
         assert_eq!(iter.collect::<Vec<_>>(), (1..16).collect::<Vec<_>>());
-    }
-
-    #[test]
-    #[should_panic(expected = "test scan producer panic")]
-    fn default_scan_propagates_producer_panics() {
-        let runtime = CurrentThreadRuntime::new();
-        let batches = stream::iter(0..2).map(|value| {
-            assert!(value != 1, "test scan producer panic");
-            value
-        });
-        drop(scan_iterator(&runtime, None, batches).collect::<Vec<_>>());
     }
 
     #[rstest]

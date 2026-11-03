@@ -5,7 +5,6 @@ package dev.vortex.spark.write;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.management.ThreadMXBean;
-import dev.vortex.api.VortexWriter;
 import dev.vortex.io.NativeWritable;
 import dev.vortex.spark.VortexOptions;
 import dev.vortex.spark.VortexSparkSession;
@@ -28,6 +27,7 @@ import scala.runtime.BoxedUnit;
 /** Local measurement of Vortex scans and Vortex-to-Vortex rewrites, including native finish. */
 public final class VortexMemoryBench {
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final String DIGEST = "sum(cast(xxhash64(to_json(struct(*))) as decimal(38,0)))";
     private static final AtomicLong arrowPeak = new AtomicLong();
     private static final AtomicLong bufferedPeak = new AtomicLong();
     private static final AtomicLong rowCount = new AtomicLong();
@@ -75,44 +75,38 @@ public final class VortexMemoryBench {
 
         @Override
         public BoxedUnit apply(scala.collection.Iterator<InternalRow> rows) {
+            long count = 0;
+            if (control) {
+                while (rows.hasNext()) {
+                    rows.next();
+                    ++count;
+                }
+                rowCount.addAndGet(count);
+                return BoxedUnit.UNIT;
+            }
             try {
-                VortexOutputWriter writer = control
-                        ? null
-                        : new VortexOutputWriter("peak-memory", schema, VortexOptions.of(options), new Sink(output));
-                var allocator = control ? null : writer.allocator();
-                var field = VortexOutputWriter.class.getDeclaredField("vortexWriter");
-                field.setAccessible(true);
-                VortexWriter nativeWriter = control ? null : (VortexWriter) field.get(writer);
-                long count = 0;
+                var writer =
+                        new VortexOutputWriter("peak-memory", schema, VortexOptions.of(options), new Sink(output));
+                var allocator = writer.allocator();
                 try {
                     while (rows.hasNext()) {
-                        InternalRow row = rows.next();
-                        if (writer != null) {
-                            writer.write(row);
-                        }
+                        writer.write(rows.next());
                         ++count;
-                        if (writer != null && count % 256 == 0) {
-                            bufferedPeak.accumulateAndGet(nativeWriter.bufferedBytes(), Math::max);
-                        }
-                        if (writer != null && count % 32768 == 0) {
-                            System.out.printf(
-                                    "SAMPLE rows=%d arrow=%d buffered=%d%n",
-                                    count, allocator.getAllocatedMemory(), nativeWriter.bufferedBytes());
+                        if (count % 32768 == 0) {
+                            System.out.printf("SAMPLE rows=%d arrow=%d%n", count, allocator.getAllocatedMemory());
                         }
                     }
                 } finally {
-                    if (writer != null) {
-                        writer.close();
-                    }
+                    writer.close();
                 }
+                var summary = writer.summary();
                 rowCount.addAndGet(count);
-                if (writer != null) {
-                    arrowPeak.accumulateAndGet(allocator.getPeakMemoryAllocation(), Math::max);
-                    outputBytes.addAndGet(writer.summary().fileSize());
-                    batchCount.addAndGet(writer.summary().batchCount());
-                    if (writer.summary().rowCount() != count) {
-                        throw new AssertionError("Wrong native row count");
-                    }
+                arrowPeak.accumulateAndGet(allocator.getPeakMemoryAllocation(), Math::max);
+                bufferedPeak.accumulateAndGet(summary.peakBufferedBytes(), Math::max);
+                outputBytes.addAndGet(summary.fileSize());
+                batchCount.addAndGet(summary.batchCount());
+                if (summary.rowCount() != count) {
+                    throw new AssertionError("Wrong native row count");
                 }
                 return BoxedUnit.UNIT;
             } catch (Exception e) {
@@ -122,19 +116,15 @@ public final class VortexMemoryBench {
     }
 
     public static void main(String[] args) throws Exception {
-        // Arguments are supplied by run.py, which fixes the batch and worker settings.
+        // Arguments from run.py: input, write batch rows, worker threads, sink, read-only, [verify].
+        String input = args[0];
+        String sink = args[3];
+        boolean control = Boolean.parseBoolean(args[4]);
+        boolean verify = args.length > 5 && args[5].equals("verify");
         Map<String, String> options = new LinkedHashMap<>();
         options.put("vortex.write.batch.size", args[1]);
-        if (!args[2].equals("0")) {
-            options.put("vortex.write.batch.bytes", args[2]);
-        }
-        options.put("vortex.write.reset.capacity", args[3]);
-        options.put("vortex.workerThreads", args[4]);
-        if (args.length > 7 && !args[7].equals("0")) {
-            options.put("vortex.splitConcurrency", args[7]);
-        }
+        options.put("vortex.workerThreads", args[2]);
         options.put("vortex.splitFiles", "false");
-        boolean control = Boolean.parseBoolean(args[6]);
         SparkSession spark = SparkSession.builder()
                 .master("local[1]")
                 .appName("vortex-peak-memory")
@@ -145,17 +135,17 @@ public final class VortexMemoryBench {
                 .config("spark.sql.debug.maxToStringFields", "5")
                 .getOrCreate();
         spark.sparkContext().setLogLevel("ERROR");
-        var data = spark.read().format("vortex").options(options).load(args[0]).coalesce(1);
+        var data = spark.read().format("vortex").options(options).load(input).coalesce(1);
         var schema = data.schema();
         VortexSparkSession.get(VortexOptions.of(options));
         System.gc();
         Thread.sleep(300);
         AtomicBoolean running = new AtomicBoolean(true);
         AtomicLong heapPeak = new AtomicLong();
+        var memory = ManagementFactory.getMemoryMXBean();
         Thread sampler = new Thread(() -> {
             while (running.get()) {
-                heapPeak.accumulateAndGet(
-                        ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getUsed(), Math::max);
+                heapPeak.accumulateAndGet(memory.getHeapMemoryUsage().getUsed(), Math::max);
                 try {
                     Thread.sleep(10);
                 } catch (InterruptedException e) {
@@ -170,7 +160,7 @@ public final class VortexMemoryBench {
         System.out.println("BENCH_BEGIN");
         System.out.flush();
         long begin = System.nanoTime();
-        data.queryExecution().toRdd().foreachPartition(new Task(schema, options, args[5], control));
+        data.queryExecution().toRdd().foreachPartition(new Task(schema, options, sink, control));
         double seconds = (System.nanoTime() - begin) / 1e9;
         running.set(false);
         sampler.join();
@@ -185,19 +175,17 @@ public final class VortexMemoryBench {
         result.put("batchCount", batchCount.get());
         System.out.println("BENCH " + JSON.writeValueAsString(result));
         System.out.flush();
-        if (control && args.length > 8 && args[8].equals("verify")) {
-            String digest = "sum(cast(xxhash64(to_json(struct(*))) as decimal(38,0)))";
-            System.out.println("VERIFIED_READ " + data.selectExpr("count(*)", digest).collectAsList());
+        if (control && verify) {
+            System.out.println("VERIFIED_READ " + data.selectExpr("count(*)", DIGEST).collectAsList());
         }
-        if (!control && !args[5].equals("discard")) {
+        if (!control && !sink.equals("discard")) {
             var written = spark.read()
                     .format("vortex")
                     .options(Map.of("vortex.splitConcurrency", "4"))
-                    .load(args[5])
+                    .load(sink)
                     .selectExpr(schema.fieldNames());
-            String digest = "sum(cast(xxhash64(to_json(struct(*))) as decimal(38,0)))";
-            var expected = data.selectExpr("count(*)", digest).collectAsList();
-            var actual = written.selectExpr("count(*)", digest).collectAsList();
+            var expected = data.selectExpr("count(*)", DIGEST).collectAsList();
+            var actual = written.selectExpr("count(*)", DIGEST).collectAsList();
             if (!expected.equals(actual)) {
                 throw new AssertionError("Readback mismatch: " + expected + " / " + actual);
             }

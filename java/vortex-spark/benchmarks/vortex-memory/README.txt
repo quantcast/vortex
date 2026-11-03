@@ -116,10 +116,3 @@ Metrics:
 Independent peaks cannot be added/subtracted to infer another memory category.
 Multi-task executors, object-store latency/backpressure, partition-writer fanout
 and a broad query mix remain unmeasured.
-
-Validation performed during the investigation: release JNI build, Java connector
-compilation, benchmark javac compilation, the measurements above and digest
-checks. Regression tests were added for the output bound and producer panic
-propagation; automated tests, linters and formatters were not run. The harness
-was tidied and unused exploratory variants removed when preparing this draft;
-the tidied harness and new classpath helper have not been rerun.
