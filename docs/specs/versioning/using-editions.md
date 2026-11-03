@@ -50,6 +50,12 @@ options = vortex.io.VortexWriteOptions.default().with_edition("core2025.10.0")
 vortex.io.write(array, "data.vortex", edition="core2025.10.0")
 ```
 
+Spark session providers should select the core edition before starting writes: the JNI selection
+is shared by users of that session. The per-write `vortex.listLayout=true` option keeps that core
+selection in a session fork and additionally permits the experimental list layout. Later changes
+to the parent session do not change the fork's selection. Files written with this option require
+a reader that supports the list layout, even when an older core edition is selected.
+
 An edition declaration describes permitted formats, but registering it does not install the code to
 read or write those formats. When constructing a session without the defaults, register the required
 implementations and declarations, then enable the target editions. See

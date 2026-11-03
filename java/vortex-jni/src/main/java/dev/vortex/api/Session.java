@@ -34,7 +34,8 @@ public final class Session {
      * Enable the edition with the name {@code edition}, for example {@code core2025.10.0}. The edition replaces the
      * enabled edition of the same family. Only writers that start after this call use it.
      *
-     * <p>Select an older edition to write files that older Vortex readers can read.
+     * <p>Select an older edition to write files that older Vortex readers can read. This selection is shared by users
+     * of this session; configure it before starting writers, for example when initializing a Spark session provider.
      */
     public void enableEdition(String edition) {
         NativeSession.enableEdition(pointer, edition);

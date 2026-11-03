@@ -255,7 +255,8 @@ pub fn write(
     store: Option<AnyVortexStore>,
     edition: Option<&str>,
 ) -> PyVortexResult<()> {
-    let session = write_session(edition)?;
+    let session =
+        write_session(edition).map_err(|error| PyValueError::new_err(error.to_string()))?;
     py.detach(|| {
         current_runtime().block_on(async move {
             match resolve_store(path, store.map(|x| x.into_inner()))? {

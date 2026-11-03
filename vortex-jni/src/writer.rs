@@ -522,6 +522,8 @@ mod tests {
     use vortex::array::validity::Validity;
     use vortex::buffer::Buffer;
     use vortex::buffer::ByteBufferMut;
+    use vortex::editions::CORE_2025_10_0;
+    use vortex::editions::CORE_2026_08_3;
     use vortex::editions::ComponentKind;
     use vortex::editions::EditionSessionExt;
     use vortex::editions::UNSTABLE;
@@ -588,6 +590,27 @@ mod tests {
         let mut after = session.enabled_editions().editions();
         after.sort();
         assert_eq!(after, editions);
+        Ok(())
+    }
+
+    #[test]
+    fn list_layout_write_preserves_the_selected_core_edition() -> VortexResult<()> {
+        let session = *new_session();
+        session.enable_edition(CORE_2025_10_0)?;
+        let write = write_session(&session, true)?;
+        let selected = write.enabled_editions().editions();
+        assert!(selected.contains(&CORE_2025_10_0));
+        assert!(selected.contains(&LIST_LAYOUT_EDITION));
+        assert!(!selected.contains(&CORE_2026_08_3));
+        assert!(
+            !session
+                .enabled_editions()
+                .editions()
+                .contains(&LIST_LAYOUT_EDITION)
+        );
+
+        session.enable_edition(CORE_2026_08_3)?;
+        assert_eq!(write.enabled_editions().editions(), selected);
         Ok(())
     }
 

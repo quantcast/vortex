@@ -59,6 +59,8 @@ def test_write_without_edition_uses_zoned_layout(tmp_path):
     assert b"vortex.zoned" in layout_ids(path)
 
 
-def test_unknown_edition_is_rejected():
+def test_unknown_edition_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="Unknown Vortex edition"):
         vx.io.VortexWriteOptions.default().with_edition("core1999.01.0")
+    with pytest.raises(ValueError, match="Unknown Vortex edition"):
+        vx.io.write(table(), str(tmp_path / "unknown.vortex"), edition="core1999.01.0")
