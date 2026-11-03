@@ -59,7 +59,8 @@ final class VortexFileFormat
       VortexFooterReader.inferSchema(
         files.asJava,
         VortexIo.create(vortexOptions, hadoopConf),
-        vortexOptions
+        vortexOptions,
+        spark.sessionState.conf.caseSensitiveAnalysis
       )
     )
   }
