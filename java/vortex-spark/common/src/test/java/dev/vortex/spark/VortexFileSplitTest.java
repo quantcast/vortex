@@ -114,6 +114,39 @@ public final class VortexFileSplitTest {
 
     @ParameterizedTest(name = "{0}")
     @ValueSource(strings = {"v2", "v1", "v1-rows"})
+    @DisplayName("Each file split preserves row order across chunks, including with a pushed filter")
+    void fileSplitsPreserveRowOrder(String mode) {
+        Path output = write(rows(ROWS).coalesce(1), "ordered", null);
+        long fileSize = fileSizes(output).get(0);
+        for (long splitSize : new long[] {fileSize + 1, fileSize / 3 + 1}) {
+            Dataset<Row> read = read(output, mode, splitSize);
+            assertEquals(
+                    expectedPartitions(List.of(fileSize), splitSize), read.rdd().getNumPartitions());
+            for (boolean filtered : new boolean[] {false, true}) {
+                Dataset<Row> selected = filtered ? read.filter("id >= 101 and id < 250003") : read;
+                List<List<Row>> partitions =
+                        selected.select("id").javaRDD().glom().collect();
+                long count = 0;
+                for (List<Row> partition : partitions) {
+                    long previous = -1;
+                    for (Row row : partition) {
+                        long id = row.getLong(0);
+                        assertTrue(
+                                id > previous,
+                                "mode=" + mode + " splitSize=" + splitSize + " filtered=" + filtered + ": row " + id
+                                        + " followed " + previous);
+                        previous = id;
+                        count++;
+                    }
+                }
+                long expected = filtered ? 250_003 - 101 : ROWS;
+                assertEquals(expected, count);
+            }
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"v2", "v1", "v1-rows"})
     @DisplayName("Each split reads its own contiguous rows, also when one task reads several splits of a file")
     void splitsSpreadRowsAcrossTasks(String mode) {
         Path output = write(rows(ROWS).coalesce(1), "spread", null);

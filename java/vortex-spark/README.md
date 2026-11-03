@@ -51,6 +51,9 @@ configuration. This also enables standard file-source options such as `pathGlobF
 Only files that end with `.vortex` belong to a Vortex dataset. Writes produce that extension, and
 reads skip every other file.
 
+Reads preserve each file split's original row order, including across native scan chunks.
+Spark does not guarantee a global row order across partitions.
+
 ```sql
 CREATE TABLE student (id INT, name STRING) USING vortex;
 INSERT INTO student VALUES (1, 'Alice'), (2, 'Bob');

@@ -114,7 +114,8 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
             ReadTypes.check(
                     projectedSchema, arrowFields, caseSensitive, file.toPath().toString());
 
-            var options = ScanOptions.builder();
+            // Spark can consume a sorted file without sorting again (for example, a bucketed merge join).
+            var options = ScanOptions.builder().ordered(true);
             if (io.splitConcurrency() > 0) {
                 options.splitConcurrency(io.splitConcurrency());
             }
