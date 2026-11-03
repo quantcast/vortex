@@ -3,6 +3,7 @@
 
 package dev.vortex.spark.write;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -10,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import dev.vortex.api.DataSource;
 import dev.vortex.api.Scan;
 import dev.vortex.api.ScanOptions;
+import dev.vortex.jni.NativeFiles;
 import dev.vortex.relocated.org.apache.arrow.memory.ArrowBuf;
 import dev.vortex.relocated.org.apache.arrow.memory.BufferAllocator;
 import dev.vortex.relocated.org.apache.arrow.memory.RootAllocator;
@@ -21,6 +23,7 @@ import dev.vortex.spark.VortexSparkSession;
 import dev.vortex.spark.io.HadoopWritable;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -638,6 +641,25 @@ final class VortexOutputWriterTest {
         writer.close();
 
         assertEquals(expected, readRows(writer.path()));
+    }
+
+    @Test
+    void storesFooterMetadata() throws IOException {
+        StructType schema = new StructType().add("id", DataTypes.LongType, false);
+        String path = tempDir.resolve("metadata.vortex").toUri().toString();
+        byte[] value = "v1".getBytes(StandardCharsets.UTF_8);
+        VortexOutputWriter writer = new VortexOutputWriter(
+                path,
+                schema,
+                VortexOptions.empty(),
+                HadoopWritable.create(new Configuration(), path),
+                Map.of("app.version", value));
+        writer.write(new GenericInternalRow(new Object[] {7L}));
+        writer.close();
+
+        Map<String, byte[]> metadata = NativeFiles.readMetadata(VortexSparkSession.get(), path, Map.of());
+        assertArrayEquals(value, metadata.get("app.version"));
+        assertEquals(List.of("7"), readRows(path));
     }
 
     private VortexOutputWriter writer(String name, StructType schema, Map<String, String> values) {
