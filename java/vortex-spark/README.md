@@ -53,6 +53,9 @@ reads skip every other file.
 
 Reads preserve each file split's original row order, including across native scan chunks.
 Spark does not guarantee a global row order across partitions.
+Preserving order can delay output behind a slow chunk while later chunks remain buffered.
+Use `vortex.splitConcurrency` to bound concurrent native splits when tuning memory use; this
+bounds the number of splits, rather than their total bytes.
 
 ```sql
 CREATE TABLE student (id INT, name STRING) USING vortex;
