@@ -7,13 +7,6 @@ We provide two interfaces for working with Vortex from Java:
   [vortex-spark/README.md](vortex-spark/README.md) for how to load the connector into Spark
   and query Vortex files from the DataFrame API or Spark SQL.
 
-## Compatibility notes
-
-Native stream output now reuses the `byte[]` passed to `NativeWritable.write`.
-Implementations must consume the requested range synchronously and must not retain the array.
-Asynchronous sinks must copy that range into memory they own before returning.
-Native `ByteBufferWritable` buffers and derived views have the same borrowed lifetime.
-
 ## Publishing
 
 We publish the JNI artifacts and three Spark connector variants from this repo to Maven Central:

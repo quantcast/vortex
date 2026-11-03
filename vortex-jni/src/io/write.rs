@@ -4,24 +4,28 @@
 use std::io;
 use std::sync::Arc;
 
+use jni::Env;
 use jni::JValue;
 use jni::JavaVM;
 use jni::objects::JByteArray;
 use jni::objects::JObject;
 use jni::refs::Global;
+use jni::sys::jint;
 use vortex::error::VortexExpect;
 use vortex::error::vortex_err;
 use vortex::io::IoBuf;
 use vortex::io::VortexWrite;
 
+use crate::errors::JNIError;
 use crate::io::with_jvm;
 
-/// Bound heap staging independently of the size of a native output buffer.
-const WRITE_SCRATCH_BYTES: usize = 65_536;
+/// Size of the `byte[]` each array-mode writer reuses to stage native output for Java, so its
+/// heap use stays fixed however large a native output buffer is.
+const WRITE_SCRATCH_BYTES: usize = 64 * 1024;
 
 enum WriteMode {
     Direct,
-    Array(Option<Global<JByteArray<'static>>>),
+    Array(Global<JByteArray<'static>>),
 }
 
 /// A [`VortexWrite`] backed by a Java object implementing `dev.vortex.io.NativeWritable`.
@@ -39,23 +43,22 @@ pub(crate) struct JavaWrite {
 
 impl JavaWrite {
     pub(crate) fn new(
+        env: &mut Env,
         vm: JavaVM,
         writable: Arc<Global<JObject<'static>>>,
         direct_buffers: bool,
-    ) -> Self {
-        Self {
-            vm,
-            writable,
-            mode: if direct_buffers {
-                WriteMode::Direct
-            } else {
-                WriteMode::Array(None)
-            },
-        }
+    ) -> Result<Self, JNIError> {
+        let mode = if direct_buffers {
+            WriteMode::Direct
+        } else {
+            let array = JByteArray::new(env, WRITE_SCRATCH_BYTES)?;
+            WriteMode::Array(env.new_global_ref(&array)?)
+        };
+        Ok(Self { vm, writable, mode })
     }
 
-    fn write_slice(&mut self, bytes: &[u8]) -> io::Result<()> {
-        match &mut self.mode {
+    fn write_slice(&self, bytes: &[u8]) -> io::Result<()> {
+        match &self.mode {
             WriteMode::Direct => {
                 for chunk in bytes.chunks(i32::MAX as usize) {
                     with_jvm(&self.vm, |env| {
@@ -100,20 +103,10 @@ impl JavaWrite {
                     .map_err(io::Error::other)?;
                 }
             }
-            WriteMode::Array(scratch) => {
-                if bytes.is_empty() {
-                    return Ok(());
-                }
+            WriteMode::Array(array) => {
                 with_jvm(&self.vm, |env| {
-                    let array = match scratch {
-                        Some(array) => array,
-                        None => {
-                            let array = JByteArray::new(env, WRITE_SCRATCH_BYTES)?;
-                            scratch.insert(env.new_global_ref(&array)?)
-                        }
-                    };
                     for chunk in bytes.chunks(WRITE_SCRATCH_BYTES) {
-                        let jlen = i32::try_from(chunk.len()).vortex_expect("64 KiB fits in i32");
+                        let jlen = jint::try_from(chunk.len()).vortex_expect("64 KiB fits in jint");
                         // SAFETY: u8 and i8 have the same size and alignment; only the bit
                         // representation is copied into Java's signed byte array.
                         let signed = unsafe {
@@ -213,7 +206,9 @@ mod tests {
 
         let thread_vm = vm.clone();
         std::thread::spawn(move || {
-            let mut write = JavaWrite::new(thread_vm.clone(), Arc::new(writable), false);
+            let write = with_jvm(&thread_vm, |env| {
+                JavaWrite::new(env, thread_vm.clone(), Arc::new(writable), false)
+            })?;
             write.write_slice(b"vortex")?;
             write.flush_upcall()?;
             // `with_jvm` attaches permanently: the thread stays attached until it

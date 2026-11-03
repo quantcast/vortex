@@ -22,6 +22,8 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -45,10 +47,22 @@ final class NativeOutputBufferTest {
         NativeLoader.loadJni();
     }
 
+    /** Random bytes, so each 64 KiB chunk is distinct and can be recognized in a write. */
     private static byte[] payload() {
         byte[] bytes = new byte[3 * 65_536 + 17];
         new Random(0).nextBytes(bytes);
         return bytes;
+    }
+
+    /** Index of the payload chunk that {@code buffer[offset, offset + length)} holds exactly, or -1. */
+    private static int payloadChunk(byte[] payload, byte[] buffer, int offset, int length) {
+        for (int start = 0, index = 0; start < payload.length; start += 65_536, index++) {
+            int end = Math.min(start + 65_536, payload.length);
+            if (end - start == length && Arrays.equals(payload, start, end, buffer, offset, offset + length)) {
+                return index;
+            }
+        }
+        return -1;
     }
 
     private static long writeMetadata(NativeWritable sink, byte[] payload) throws IOException {
@@ -130,7 +144,7 @@ final class NativeOutputBufferTest {
     void legacyWritesReuseOneBoundedArrayAcrossLargeBuffers() throws IOException {
         Path path = directory.resolve("legacy.vortex");
         byte[] payload = payload();
-        AtomicInteger calls = new AtomicInteger();
+        List<Integer> chunks = new ArrayList<>();
         try (OutputStream output = Files.newOutputStream(path)) {
             NativeWritable sink = new NativeWritable() {
                 private byte[] firstArray;
@@ -143,7 +157,10 @@ final class NativeOutputBufferTest {
                     assertSame(firstArray, buffer, "reuse staging across upcalls and native buffers");
                     assertEquals(65_536, buffer.length);
                     assertTrue(length > 0 && length <= buffer.length);
-                    calls.incrementAndGet();
+                    int chunk = payloadChunk(payload, buffer, offset, length);
+                    if (chunk >= 0) {
+                        chunks.add(chunk);
+                    }
                     output.write(buffer, offset, length);
                 }
 
@@ -158,7 +175,7 @@ final class NativeOutputBufferTest {
                 }
             };
             assertEquals(writeMetadata(sink, payload), Files.size(path));
-            assertTrue(calls.get() > 4, "large native buffers must be split into bounded writes");
+            assertEquals(List.of(0, 1, 2, 3), chunks, "the payload is written as 64 KiB chunks in order");
         }
         assertArrayEquals(
                 payload,
@@ -262,7 +279,7 @@ final class NativeOutputBufferTest {
 
     @Test
     void legacyWriteExceptionsStopChunkingAndReachTheCaller() {
-        AtomicInteger fullChunks = new AtomicInteger();
+        byte[] payload = payload();
         AtomicInteger callsAfterFailure = new AtomicInteger();
         AtomicBoolean failed = new AtomicBoolean();
         NativeWritable sink = new NativeWritable() {
@@ -271,8 +288,8 @@ final class NativeOutputBufferTest {
                 if (failed.get()) {
                     callsAfterFailure.incrementAndGet();
                 }
-                // Fail inside the payload's chunk loop, after one full chunk succeeded.
-                if (length == buffer.length && fullChunks.incrementAndGet() == 2) {
+                // Fail inside the payload's chunk loop, after its first chunk succeeded.
+                if (payloadChunk(payload, buffer, offset, length) == 1) {
                     failed.set(true);
                     throw new IOException("injected array write failure");
                 }
@@ -284,7 +301,7 @@ final class NativeOutputBufferTest {
             @Override
             public void close() {}
         };
-        IOException error = assertThrows(IOException.class, () -> writeMetadata(sink, payload()));
+        IOException error = assertThrows(IOException.class, () -> writeMetadata(sink, payload));
         assertTrue(failed.get());
         assertEquals(0, callsAfterFailure.get());
         assertTrue(error.getCause().getMessage().contains("injected array write failure"), error.toString());
