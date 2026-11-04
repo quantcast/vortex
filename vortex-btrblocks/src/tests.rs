@@ -112,8 +112,10 @@ fn test_default_compressor_roundtrip() -> VortexResult<()> {
     Ok(())
 }
 
-#[test]
-fn test_extreme_second_timestamps_roundtrip() -> VortexResult<()> {
+#[rstest]
+#[case::seconds(TimeUnit::Seconds)]
+#[case::milliseconds(TimeUnit::Milliseconds)]
+fn test_extreme_timestamps_roundtrip(#[case] unit: TimeUnit) -> VortexResult<()> {
     let compressor = BtrBlocksCompressorBuilder::from_session(&SESSION)
         .unrestricted()
         .build();
@@ -124,12 +126,13 @@ fn test_extreme_second_timestamps_roundtrip() -> VortexResult<()> {
             _ => 1_700_000_000 + i,
         }))
         .into_array(),
-        TimeUnit::Seconds,
+        unit,
         None,
     )
     .into_array();
     let compressed = assert_roundtrip(&compressor, &input)?;
-    assert!(!compressed.is::<DateTimeParts>());
+    assert!(compressed.is::<DateTimeParts>());
+
     Ok(())
 }
 

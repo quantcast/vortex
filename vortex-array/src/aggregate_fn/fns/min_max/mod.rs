@@ -613,7 +613,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_min_max_beyond_jiff_range() -> VortexResult<()> {
-        // 9999-12-31T00:00:00Z
+        // Midnight on 9999-12-31 UTC.
         const END_OF_9999_US: i64 = 253_402_214_400_000_000;
         let timestamps = TemporalArray::new_timestamp(
             PrimitiveArray::from_iter([0i64, END_OF_9999_US]).into_array(),
@@ -624,12 +624,14 @@ mod tests {
         let mut ctx = SESSION.create_execution_ctx();
         let MinMaxResult { min, max } =
             min_max(&timestamps, &mut ctx, NumericalAggregateOpts::default())?
-                .vortex_expect("non-empty array");
+                .vortex_expect("two non-null timestamps have min and max");
+
         assert_eq!(min.as_extension().to_storage_scalar(), 0i64.into());
         assert_eq!(
             max.as_extension().to_storage_scalar(),
             END_OF_9999_US.into()
         );
+
         Ok(())
     }
 

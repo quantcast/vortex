@@ -606,7 +606,7 @@ public final class VortexDataSourceWriteTest {
                         "if(id % 11 = 0, null, cast(id % 128 as tinyint)) as tiny",
                         "if(id % 13 = 0, null, cast(id as smallint)) as small",
                         "if(id % 17 = 0, null, cast(id * 31 as int)) as i",
-                        "if(id % 19 = 0, null, cast(id as float) / 3) as f",
+                        "if(id % 19 = 0, null, cast(id / 3 as float)) as f",
                         "if(id % 23 = 0, null, cast(id as double) / 7) as d",
                         "if(id % 5 = 0, null, concat('s-', id)) as s",
                         "if(id % 29 = 0, null, cast(concat('b', id) as binary)) as bin",
@@ -646,6 +646,7 @@ public final class VortexDataSourceWriteTest {
                                 'a', cast(id % 1000 as decimal(9, 2)), 'b', cast(null as decimal(9, 2)))),
                             'inner', if(id % 3 = 0, null, named_struct('s', concat('n', id), 'l', array(id))))) as runs""");
 
+        assertEquals(DataTypes.FloatType, expected.schema().apply("f").dataType());
         for (int batchSize : new int[] {1, 300, 65536}) {
             Path outputPath = tempDir.resolve("nulls_batch_" + batchSize);
             expected.write()

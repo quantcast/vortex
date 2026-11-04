@@ -80,7 +80,7 @@ public final class VortexOutputWriter extends OutputWriter {
     private VortexWriter vortexWriter;
     private BufferAllocator allocator;
     private VectorSchemaRoot vectorSchemaRoot;
-    private ArrowFieldWriter[] fieldWriters;
+    private ArrowFieldWriter<?>[] fieldWriters;
     private int batchRowCount = 0;
     private long batchCount;
     private long peakBatchArrowBytes;
@@ -129,7 +129,7 @@ public final class VortexOutputWriter extends OutputWriter {
             // Small start so writers that see few rows hold little memory; Arrow grows on demand.
             resetInitialCapacity(true);
             StructField[] fields = schema.fields();
-            this.fieldWriters = new ArrowFieldWriter[fields.length];
+            this.fieldWriters = new ArrowFieldWriter<?>[fields.length];
             for (int i = 0; i < fields.length; i++) {
                 fieldWriters[i] = ArrowFieldWriter.create(vectorSchemaRoot.getVector(i), fields[i].dataType());
             }
@@ -293,7 +293,7 @@ public final class VortexOutputWriter extends OutputWriter {
             resetInitialCapacity(capacityReset == CapacityReset.ALWAYS || reachedBytes);
         }
         vectorSchemaRoot.clear();
-        for (ArrowFieldWriter writer : fieldWriters) {
+        for (ArrowFieldWriter<?> writer : fieldWriters) {
             writer.reset();
         }
         batchRowCount = 0;
