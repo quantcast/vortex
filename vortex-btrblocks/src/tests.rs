@@ -46,6 +46,7 @@ use vortex_edition::declarations::core::CORE_2026_08_3;
 use vortex_error::VortexResult;
 use vortex_fastlanes::Delta;
 use vortex_session::VortexSession;
+use vortex_sparse::Sparse;
 
 use crate::BtrBlocksCompressor;
 use crate::BtrBlocksCompressorBuilder;
@@ -197,5 +198,38 @@ fn test_cuda_binary_zstd_follows_editions(
     let compressed = assert_roundtrip(&compressor, &input)?;
     assert_eq!(compressed.encoding_id(), expected);
 
+    Ok(())
+}
+
+#[test]
+fn null_dominated_strings_release_source_buffer() -> VortexResult<()> {
+    // The mostly-null slice shares the dense rows' data buffers but holds under 128 buffer bytes
+    // per row, so the compressor does not compact it before choosing a scheme.
+    let dense = vec![b'a'; 100];
+    let parent = VarBinViewArray::from_iter(
+        (0..9192u32).map(|i| match i {
+            0..1000 => Some(dense.clone()),
+            // Distinct 4-byte prefixes keep the dictionary scheme from winning.
+            _ if i % 20 == 0 => {
+                Some(format!("{:08x}-sparse-value", i.wrapping_mul(2_654_435_761)).into_bytes())
+            }
+            _ => None,
+        }),
+        DType::Utf8(Nullability::Nullable),
+    );
+    let backing = parent.bytes_at(0);
+    let source = parent.into_array().slice(1000..9192)?;
+
+    let compressor = BtrBlocksCompressorBuilder::from_session(&SESSION)
+        .unrestricted()
+        .build();
+    let compressed = assert_roundtrip(&compressor, &source)?;
+    assert!(compressed.is::<Sparse>());
+    drop(source);
+
+    assert!(
+        backing.try_into_mut().is_ok(),
+        "sparse patch values retained the source buffer"
+    );
     Ok(())
 }

@@ -10,6 +10,7 @@ use vortex_array::ExecutionCtx;
 use vortex_array::IntoArray;
 use vortex_array::VTable;
 use vortex_array::arrays::PrimitiveArray;
+use vortex_array::arrays::VarBinViewArray;
 use vortex_array::arrays::primitive::PrimitiveArrayExt;
 use vortex_compressor::scheme::ChildSelection;
 use vortex_compressor::scheme::CompressionEstimate;
@@ -115,9 +116,19 @@ impl Scheme for NullDominatedSparseScheme {
                 exec_ctx,
             )?;
 
+            // The patch values share the input's data buffers, which can hold far more bytes
+            // than the few non-null values reference.
+            let values = sparse
+                .patches()
+                .values()
+                .clone()
+                .execute::<VarBinViewArray>(exec_ctx)?
+                .compact_buffers(exec_ctx)?
+                .into_array();
+
             Sparse::try_new(
                 compressed_indices,
-                sparse.patches().values().clone(),
+                values,
                 sparse.len(),
                 sparse.fill_scalar().clone(),
                 exec_ctx,
