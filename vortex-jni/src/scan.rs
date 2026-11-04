@@ -419,11 +419,12 @@ fn scan_iterator<R: Send + 'static>(
     stream: impl Stream<Item = R> + Send + 'static,
 ) -> Box<dyn Iterator<Item = R> + Send> {
     if split_concurrency.is_some() {
-        // The thread-safe bridge queues another batch per core, independently of the stream's
-        // conversion lookahead. Drive capped scans directly so that queue cannot bypass the cap.
+        // An output queue adds to conversion lookahead. Drive explicitly capped scans
+        // directly so the queue cannot bypass their bound.
         Box::new(runtime.block_on_stream(stream))
     } else {
-        Box::new(runtime.block_on_stream_thread_safe(|_| stream))
+        // Overlap native work with Java consumption while retaining one completed batch.
+        Box::new(runtime.block_on_stream_prefetch(stream))
     }
 }
 
@@ -441,6 +442,25 @@ mod tests {
     use vortex::io::runtime::current::CurrentThreadRuntime;
 
     use super::scan_iterator;
+
+    #[test]
+    fn default_scan_keeps_only_one_completed_output_ahead() {
+        let runtime = CurrentThreadRuntime::new();
+        let completed = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&completed);
+        let batches = stream::iter(0..16).inspect(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        let mut iter = scan_iterator(&runtime, None, batches);
+        assert_eq!(iter.next(), Some(0));
+        runtime.block_on(async {
+            for _ in 0..64 {
+                runtime.handle().spawn(async {}).await;
+            }
+        });
+        assert_eq!(completed.load(Ordering::SeqCst), 2);
+        assert_eq!(iter.collect::<Vec<_>>(), (1..16).collect::<Vec<_>>());
+    }
 
     #[rstest]
     #[case(1)]
