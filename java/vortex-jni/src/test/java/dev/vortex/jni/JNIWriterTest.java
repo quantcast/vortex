@@ -296,82 +296,90 @@ public final class JNIWriterTest {
         Path outputPath = tempDir.resolve("test_ffi.vortex");
         String writePath = outputPath.toAbsolutePath().toUri().toString();
 
-        BufferAllocator allocator = ArrowAllocation.rootAllocator();
-        Schema schema = personSchema();
+        try (BufferAllocator allocator =
+                ArrowAllocation.rootAllocator().newChildAllocator("batch-schema-release", 0, Long.MAX_VALUE)) {
+            Schema schema = personSchema();
 
-        Session session = Session.create();
-        VortexWriteSummary summary;
-        long bytesWhileOpen;
-        try (VortexWriter writer = VortexWriter.builder(session, writePath, schema, allocator)
-                        .build();
-                VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
-            VarCharVector nameVec = (VarCharVector) root.getVector("name");
-            IntVector ageVec = (IntVector) root.getVector("age");
+            Session session = Session.create();
+            VortexWriteSummary summary;
+            long bytesWhileOpen;
+            try (VortexWriter writer = VortexWriter.builder(session, writePath, schema, allocator)
+                            .build();
+                    VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+                VarCharVector nameVec = (VarCharVector) root.getVector("name");
+                IntVector ageVec = (IntVector) root.getVector("age");
 
-            nameVec.allocateNew(3);
-            ageVec.allocateNew(3);
+                nameVec.allocateNew(3);
+                ageVec.allocateNew(3);
 
-            nameVec.setSafe(0, "Alice".getBytes(UTF_8));
-            nameVec.setSafe(1, "Bob".getBytes(UTF_8));
-            nameVec.setSafe(2, "Carol".getBytes(UTF_8));
-            ageVec.setSafe(0, 30);
-            ageVec.setSafe(1, 25);
-            ageVec.setSafe(2, 40);
+                nameVec.setSafe(0, "Alice".getBytes(UTF_8));
+                nameVec.setSafe(1, "Bob".getBytes(UTF_8));
+                nameVec.setSafe(2, "Carol".getBytes(UTF_8));
+                ageVec.setSafe(0, 30);
+                ageVec.setSafe(1, 25);
+                ageVec.setSafe(2, 40);
 
-            root.setRowCount(3);
+                root.setRowCount(3);
 
-            if (independentBuffers) {
-                writer.writeBatch(root, allocator);
-            } else {
-                try (ArrowArray arrowArray = ArrowArray.allocateNew(allocator);
-                        ArrowSchema arrowSchemaFfi = ArrowSchema.allocateNew(allocator)) {
-                    Data.exportVectorSchemaRoot(allocator, root, null, arrowArray, arrowSchemaFfi);
-                    writer.writeBatch(arrowArray.memoryAddress(), arrowSchemaFfi.memoryAddress());
+                if (independentBuffers) {
+                    writer.writeBatch(root, allocator);
+                } else {
+                    try (ArrowArray arrowArray = ArrowArray.allocateNew(allocator);
+                            ArrowSchema arrowSchemaFfi = ArrowSchema.allocateNew(allocator)) {
+                        try {
+                            Data.exportVectorSchemaRoot(allocator, root, null, arrowArray, arrowSchemaFfi);
+                            writer.writeBatch(arrowArray.memoryAddress(), arrowSchemaFfi.memoryAddress());
+                        } finally {
+                            arrowArray.release();
+                            arrowSchemaFfi.release();
+                        }
+                    }
                 }
+                root.clear();
+                bytesWhileOpen = writer.bytesWritten();
+                summary = writer.finish();
+                assertEquals(summary.fileSize(), writer.bytesWritten());
             }
-            root.clear();
-            bytesWhileOpen = writer.bytesWritten();
-            summary = writer.finish();
-            assertEquals(summary.fileSize(), writer.bytesWritten());
-        }
 
-        assertTrue(Files.exists(outputPath), "output file should exist");
-        assertTrue(bytesWhileOpen >= 0);
-        assertTrue(bytesWhileOpen <= summary.fileSize());
-        assertEquals(Files.size(outputPath), summary.fileSize());
-        assertEquals(3L, summary.rowCount());
-        assertEquals(2, summary.columnStatistics().size());
-        assertEquals(0, summary.columnStatistics().get(0).columnIndex());
-        assertTrue(summary.columnStatistics().get(0).compressedSize() > 0);
-        assertEquals(3L, summary.columnStatistics().get(0).valueCount());
-        assertEquals(0L, summary.columnStatistics().get(0).nullValueCount().orElseThrow());
-        assertEquals("Alice", summary.columnStatistics().get(0).lowerBound().orElseThrow());
-        assertEquals("Carol", summary.columnStatistics().get(0).upperBound().orElseThrow());
-        assertEquals(25, summary.columnStatistics().get(1).lowerBound().orElseThrow());
-        assertEquals(40, summary.columnStatistics().get(1).upperBound().orElseThrow());
+            assertTrue(Files.exists(outputPath), "output file should exist");
+            assertTrue(bytesWhileOpen >= 0);
+            assertTrue(bytesWhileOpen <= summary.fileSize());
+            assertEquals(Files.size(outputPath), summary.fileSize());
+            assertEquals(3L, summary.rowCount());
+            assertEquals(2, summary.columnStatistics().size());
+            assertEquals(0, summary.columnStatistics().get(0).columnIndex());
+            assertTrue(summary.columnStatistics().get(0).compressedSize() > 0);
+            assertEquals(3L, summary.columnStatistics().get(0).valueCount());
+            assertEquals(0L, summary.columnStatistics().get(0).nullValueCount().orElseThrow());
+            assertEquals("Alice", summary.columnStatistics().get(0).lowerBound().orElseThrow());
+            assertEquals("Carol", summary.columnStatistics().get(0).upperBound().orElseThrow());
+            assertEquals(25, summary.columnStatistics().get(1).lowerBound().orElseThrow());
+            assertEquals(40, summary.columnStatistics().get(1).upperBound().orElseThrow());
 
-        DataSource ds = DataSource.open(session, writePath);
-        assertEquals(new DataSource.RowCount.Exact(3L), ds.rowCount());
+            DataSource ds = DataSource.open(session, writePath);
+            assertEquals(new DataSource.RowCount.Exact(3L), ds.rowCount());
 
-        Scan scan = ds.scan(ScanOptions.of());
-        List<String> names = new ArrayList<>();
-        List<Integer> ages = new ArrayList<>();
-        while (scan.hasNext()) {
-            Partition p = scan.next();
-            try (ArrowReader reader = p.scanArrow(allocator)) {
-                while (reader.loadNextBatch()) {
-                    VectorSchemaRoot resultRoot = reader.getVectorSchemaRoot();
-                    ViewVarCharVector nameOut = (ViewVarCharVector) resultRoot.getVector("name");
-                    IntVector ageOut = (IntVector) resultRoot.getVector("age");
-                    for (int i = 0; i < resultRoot.getRowCount(); i++) {
-                        names.add(nameOut.getObject(i).toString());
-                        ages.add(ageOut.getObject(i));
+            Scan scan = ds.scan(ScanOptions.of());
+            List<String> names = new ArrayList<>();
+            List<Integer> ages = new ArrayList<>();
+            while (scan.hasNext()) {
+                Partition p = scan.next();
+                try (ArrowReader reader = p.scanArrow(allocator)) {
+                    while (reader.loadNextBatch()) {
+                        VectorSchemaRoot resultRoot = reader.getVectorSchemaRoot();
+                        ViewVarCharVector nameOut = (ViewVarCharVector) resultRoot.getVector("name");
+                        IntVector ageOut = (IntVector) resultRoot.getVector("age");
+                        for (int i = 0; i < resultRoot.getRowCount(); i++) {
+                            names.add(nameOut.getObject(i).toString());
+                            ages.add(ageOut.getObject(i));
+                        }
                     }
                 }
             }
+            assertEquals(List.of("Alice", "Bob", "Carol"), names);
+            assertEquals(List.of(30, 25, 40), ages);
+            assertEquals(0, allocator.getAllocatedMemory());
         }
-        assertEquals(List.of("Alice", "Bob", "Carol"), names);
-        assertEquals(List.of(30, 25, 40), ages);
     }
 
     @ParameterizedTest
@@ -380,60 +388,122 @@ public final class JNIWriterTest {
         Path outputPath = tempDir.resolve("test_map.vortex");
         String writePath = outputPath.toAbsolutePath().toUri().toString();
 
-        BufferAllocator allocator = ArrowAllocation.rootAllocator();
-        Schema schema = mapSchema();
-        Session session = Session.create();
+        try (BufferAllocator allocator =
+                ArrowAllocation.rootAllocator().newChildAllocator("batch-schema-release", 0, Long.MAX_VALUE)) {
+            Schema schema = mapSchema();
+            Session session = Session.create();
 
-        try (VortexWriter writer = VortexWriter.builder(session, writePath, schema, allocator)
-                        .build();
-                VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
-            populateMapRoot(root);
-            if (independentBuffers) {
-                writer.writeBatch(root, allocator);
-            } else {
-                try (ArrowArray array = ArrowArray.allocateNew(allocator);
-                        ArrowSchema ffi = ArrowSchema.allocateNew(allocator)) {
-                    try {
-                        Data.exportVectorSchemaRoot(allocator, root, null, array, ffi);
-                        writer.writeBatch(array.memoryAddress(), ffi.memoryAddress());
-                    } finally {
-                        array.release();
-                        ffi.release();
+            try (VortexWriter writer = VortexWriter.builder(session, writePath, schema, allocator)
+                            .build();
+                    VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+                populateMapRoot(root);
+                if (independentBuffers) {
+                    writer.writeBatch(root, allocator);
+                } else {
+                    try (ArrowArray array = ArrowArray.allocateNew(allocator);
+                            ArrowSchema ffi = ArrowSchema.allocateNew(allocator)) {
+                        try {
+                            Data.exportVectorSchemaRoot(allocator, root, null, array, ffi);
+                            writer.writeBatch(array.memoryAddress(), ffi.memoryAddress());
+                        } finally {
+                            array.release();
+                            ffi.release();
+                        }
                     }
                 }
             }
-        }
 
-        DataSource dataSource = DataSource.open(session, writePath);
-        assertEquals(
-                new ArrowType.Map(false),
-                dataSource.arrowSchema(allocator).findField("map").getType());
+            DataSource dataSource = DataSource.open(session, writePath);
+            assertEquals(
+                    new ArrowType.Map(false),
+                    dataSource.arrowSchema(allocator).findField("map").getType());
 
-        int rows = 0;
-        Scan scan = dataSource.scan(ScanOptions.of());
-        while (scan.hasNext()) {
-            Partition partition = scan.next();
-            try (ArrowReader reader = partition.scanArrow(allocator)) {
-                while (reader.loadNextBatch()) {
-                    rows += reader.getVectorSchemaRoot().getRowCount();
-                    MapVector map = (MapVector) reader.getVectorSchemaRoot().getVector("map");
-                    StructVector entries = (StructVector) map.getDataVector();
-                    IntVector keys = entries.getChild(MapVector.KEY_NAME, IntVector.class);
-                    BigIntVector values = entries.getChild(MapVector.VALUE_NAME, BigIntVector.class);
+            int rows = 0;
+            Scan scan = dataSource.scan(ScanOptions.of());
+            while (scan.hasNext()) {
+                Partition partition = scan.next();
+                try (ArrowReader reader = partition.scanArrow(allocator)) {
+                    while (reader.loadNextBatch()) {
+                        rows += reader.getVectorSchemaRoot().getRowCount();
+                        MapVector map = (MapVector) reader.getVectorSchemaRoot().getVector("map");
+                        StructVector entries = (StructVector) map.getDataVector();
+                        IntVector keys = entries.getChild(MapVector.KEY_NAME, IntVector.class);
+                        BigIntVector values = entries.getChild(MapVector.VALUE_NAME, BigIntVector.class);
 
-                    int firstOffset = map.getOffsetBuffer().getInt(0);
-                    assertEquals(2, map.getInnerValueCountAt(0));
-                    assertEquals(1, keys.get(firstOffset));
-                    assertEquals(10L, values.get(firstOffset));
-                    assertEquals(2, keys.get(firstOffset + 1));
-                    assertEquals(20L, values.get(firstOffset + 1));
-                    assertTrue(map.isNull(1));
-                    assertFalse(map.isNull(2));
-                    assertEquals(0, map.getInnerValueCountAt(2));
+                        int firstOffset = map.getOffsetBuffer().getInt(0);
+                        assertEquals(2, map.getInnerValueCountAt(0));
+                        assertEquals(1, keys.get(firstOffset));
+                        assertEquals(10L, values.get(firstOffset));
+                        assertEquals(2, keys.get(firstOffset + 1));
+                        assertEquals(20L, values.get(firstOffset + 1));
+                        assertTrue(map.isNull(1));
+                        assertFalse(map.isNull(2));
+                        assertEquals(0, map.getInnerValueCountAt(2));
+                    }
                 }
             }
+            assertEquals(3, rows);
+            assertEquals(0, allocator.getAllocatedMemory());
         }
-        assertEquals(3, rows);
+    }
+
+    @ParameterizedTest(name = "nested={0}, rejected={1}")
+    @CsvSource({"false, false", "true, false", "false, true", "true, true"})
+    public void testAddressBatchBorrowsSchema(boolean nested, boolean rejected) throws IOException {
+        Schema schema = nested
+                ? mapSchema()
+                : new Schema(List.of(Field.notNullable("value", new ArrowType.Int(32, true))));
+        // A different column count reaches the native schema guard after taking ownership of the array.
+        Schema writerSchema = rejected
+                ? new Schema(List.of("a", "b", "c").stream()
+                        .map(name -> Field.notNullable(name, new ArrowType.Int(32, true)))
+                        .toList())
+                : schema;
+        Session session = Session.create();
+        String path = tempDir.resolve("borrowed-schema.vortex").toUri().toString();
+        try (BufferAllocator allocator =
+                ArrowAllocation.rootAllocator().newChildAllocator("borrowed-schema", 0, Long.MAX_VALUE)) {
+            try (VortexWriter writer = VortexWriter.builder(session, path, writerSchema, allocator)
+                            .build();
+                    VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+                if (nested) {
+                    populateMapRoot(root);
+                } else {
+                    root.allocateNew();
+                    ((IntVector) root.getVector("value")).setSafe(0, 42);
+                    root.setRowCount(1);
+                }
+                try (ArrowSchema ffi = ArrowSchema.allocateNew(allocator)) {
+                    try {
+                        Data.exportSchema(allocator, schema, null, ffi);
+                        for (int batch = 0; batch < 3; batch++) {
+                            try (ArrowArray array = ArrowArray.allocateNew(allocator)) {
+                                try {
+                                    Data.exportVectorSchemaRoot(allocator, root, null, array);
+                                    if (rejected) {
+                                        IOException failure = assertThrows(
+                                                IOException.class,
+                                                () -> writer.writeBatch(array.memoryAddress(), ffi.memoryAddress()));
+                                        assertNotNull(failure.getCause());
+                                        assertTrue(failure.getCause().getMessage().contains("batch.num_columns()"));
+                                    } else {
+                                        writer.writeBatch(array.memoryAddress(), ffi.memoryAddress());
+                                    }
+                                    assertEquals(0, array.snapshot().release, "native import must move the array");
+                                    assertTrue(ffi.snapshot().release != 0, "the borrowed schema must remain reusable");
+                                } finally {
+                                    array.release();
+                                }
+                            }
+                        }
+                    } finally {
+                        ffi.release();
+                    }
+                }
+                assertEquals(rejected ? 0 : 3L * root.getRowCount(), writer.finish().rowCount());
+            }
+            assertEquals(0, allocator.getAllocatedMemory());
+        }
     }
 
     /**
@@ -489,8 +559,13 @@ public final class JNIWriterTest {
 
             try (ArrowArray arrowArray = ArrowArray.allocateNew(allocator);
                     ArrowSchema arrowSchemaFfi = ArrowSchema.allocateNew(allocator)) {
-                Data.exportVectorSchemaRoot(allocator, root, null, arrowArray, arrowSchemaFfi);
-                writer.writeBatch(arrowArray.memoryAddress(), arrowSchemaFfi.memoryAddress());
+                try {
+                    Data.exportVectorSchemaRoot(allocator, root, null, arrowArray, arrowSchemaFfi);
+                    writer.writeBatch(arrowArray.memoryAddress(), arrowSchemaFfi.memoryAddress());
+                } finally {
+                    arrowArray.release();
+                    arrowSchemaFfi.release();
+                }
             }
         }
     }
@@ -612,8 +687,13 @@ public final class JNIWriterTest {
 
             try (ArrowArray arrowArray = ArrowArray.allocateNew(allocator);
                     ArrowSchema arrowSchemaFfi = ArrowSchema.allocateNew(allocator)) {
-                Data.exportVectorSchemaRoot(allocator, root, null, arrowArray, arrowSchemaFfi);
-                writer.writeBatch(arrowArray.memoryAddress(), arrowSchemaFfi.memoryAddress());
+                try {
+                    Data.exportVectorSchemaRoot(allocator, root, null, arrowArray, arrowSchemaFfi);
+                    writer.writeBatch(arrowArray.memoryAddress(), arrowSchemaFfi.memoryAddress());
+                } finally {
+                    arrowArray.release();
+                    arrowSchemaFfi.release();
+                }
             }
         }
 

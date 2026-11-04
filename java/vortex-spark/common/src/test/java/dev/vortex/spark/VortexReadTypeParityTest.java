@@ -579,8 +579,13 @@ public final class VortexReadTypeParityTest {
             root.allocateNew();
             fill.accept(root);
             root.setRowCount(rowCount);
-            Data.exportVectorSchemaRoot(allocator, root, null, array, arrowSchema);
-            writer.writeBatch(array.memoryAddress(), arrowSchema.memoryAddress());
+            try {
+                Data.exportVectorSchemaRoot(allocator, root, null, array, arrowSchema);
+                writer.writeBatch(array.memoryAddress(), arrowSchema.memoryAddress());
+            } finally {
+                array.release();
+                arrowSchema.release();
+            }
         }
     }
 }

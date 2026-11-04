@@ -45,6 +45,10 @@ public final class NativeWriter {
     /**
      * Write a batch directly from Arrow C Data Interface addresses.
      *
+     * <p>Import moves the array and clears its release callback. The schema is borrowed for this call and may be reused
+     * afterward. The caller owns both outer structs and must release the exported schema before closing it. Cleanup
+     * must also release an array not consumed by import, including when the call fails before import.
+     *
      * @param writerPointer pointer from {@link #create}
      * @param arrowArrayAddress address of an {@code ArrowArray} struct
      * @param arrowSchemaAddress address of an {@code ArrowSchema} struct

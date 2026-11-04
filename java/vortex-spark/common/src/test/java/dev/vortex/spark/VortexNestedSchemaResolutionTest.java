@@ -279,8 +279,13 @@ public final class VortexNestedSchemaResolutionTest {
             root.allocateNew();
             fill.accept(root);
             root.setRowCount(1);
-            Data.exportVectorSchemaRoot(allocator, root, null, array, arrowSchema);
-            writer.writeBatch(array.memoryAddress(), arrowSchema.memoryAddress());
+            try {
+                Data.exportVectorSchemaRoot(allocator, root, null, array, arrowSchema);
+                writer.writeBatch(array.memoryAddress(), arrowSchema.memoryAddress());
+            } finally {
+                array.release();
+                arrowSchema.release();
+            }
         }
     }
 

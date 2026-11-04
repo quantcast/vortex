@@ -94,8 +94,13 @@ public final class ListContainsFilterTest {
 
             try (ArrowArray array = ArrowArray.allocateNew(allocator);
                     ArrowSchema arrowSchema = ArrowSchema.allocateNew(allocator)) {
-                Data.exportVectorSchemaRoot(allocator, root, null, array, arrowSchema);
-                writer.writeBatch(array.memoryAddress(), arrowSchema.memoryAddress());
+                try {
+                    Data.exportVectorSchemaRoot(allocator, root, null, array, arrowSchema);
+                    writer.writeBatch(array.memoryAddress(), arrowSchema.memoryAddress());
+                } finally {
+                    array.release();
+                    arrowSchema.release();
+                }
             }
             writer.finish();
         }

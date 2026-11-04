@@ -84,8 +84,13 @@ public final class SpatialTypesTest {
 
             try (ArrowArray arrowArray = ArrowArray.allocateNew(allocator);
                     ArrowSchema arrowSchemaFfi = ArrowSchema.allocateNew(allocator)) {
-                Data.exportVectorSchemaRoot(allocator, root, null, arrowArray, arrowSchemaFfi);
-                writer.writeBatch(arrowArray.memoryAddress(), arrowSchemaFfi.memoryAddress());
+                try {
+                    Data.exportVectorSchemaRoot(allocator, root, null, arrowArray, arrowSchemaFfi);
+                    writer.writeBatch(arrowArray.memoryAddress(), arrowSchemaFfi.memoryAddress());
+                } finally {
+                    arrowArray.release();
+                    arrowSchemaFfi.release();
+                }
             }
         }
     }
