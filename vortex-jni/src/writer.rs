@@ -202,19 +202,24 @@ fn write_summary_to_java<'local>(
     )?)
 }
 
+/// Quantcast's editions. Named for the fork rather than the crate, so it can't collide with a
+/// family upstream declares in `vortex-jni`.
 static LIST_LAYOUT_FAMILY: EditionFamily = EditionFamily {
-    name: "jni",
+    name: "qc",
     origin: "vortex-jni",
-    doc: "Components a JNI write can opt into without enabling the rest of the unstable edition.",
+    doc: "Components a JNI write can opt into without enabling the rest of the unstable edition, \
+          maintained in Quantcast's fork.",
 };
 
-/// A draft edition holding only the unstable list layout.
-const LIST_LAYOUT_EDITION: EditionId = EditionId::new("jni", 2026, 11, 0);
+/// An edition holding only the list layout, which upstream keeps in its unstable edition. It
+/// freezes in 0.91.0; `list_layout_golden` already holds its format fixed.
+const LIST_LAYOUT_EDITION: EditionId = EditionId::new("qc", 2026, 11, 0);
 
 static LIST_LAYOUT_DECLARATION: EditionDeclaration = EditionDeclaration {
     edition: Edition {
         id: LIST_LAYOUT_EDITION,
-        immutable: false,
+        immutable: true,
+        // Set to "0.91.0" once the fork's first 0.91.0 build is cut, which freezes the edition.
         min_library_version: None,
     },
     added: &[EditionMember::layout(&"vortex.list")],
@@ -230,7 +235,10 @@ pub(crate) fn register_list_layout_edition(session: &VortexSession) -> VortexRes
 /// The list layout is only written while an edition containing it is enabled, and enabled
 /// editions are shared by every clone of a session. A list-layout write therefore runs in a fork
 /// of the session, which keeps its registrations, with an enabled-editions set of its own.
-fn write_session(session: &VortexSession, list_layout: bool) -> VortexResult<VortexSession> {
+pub(crate) fn write_session(
+    session: &VortexSession,
+    list_layout: bool,
+) -> VortexResult<VortexSession> {
     if !list_layout {
         return Ok(session.clone());
     }
@@ -367,7 +375,8 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_createStream(
         write_options.validate_metadata()?;
         let buffered_bytes = write_options.buffered_bytes_tracker();
 
-        let mut write = CountingVortexWrite::new(JavaWrite::new(env, vm, writable, direct_buffers)?);
+        let mut write =
+            CountingVortexWrite::new(JavaWrite::new(env, vm, writable, direct_buffers)?);
         let bytes_written = write.counter();
         let handle = session.handle().spawn(async move {
             let summary = write_options.write(&mut write, stream).await?;
@@ -513,40 +522,39 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_close(
 #[cfg(test)]
 mod tests {
     use std::any::Any;
-
-    use vortex::array::IntoArray;
-    use vortex::array::VortexSessionExecute;
-    use vortex::array::arrays::ListArray;
-    use vortex::array::arrays::StructArray;
-    use vortex::array::validity::Validity;
-    use vortex::buffer::Buffer;
-    use vortex::buffer::ByteBufferMut;
-    use vortex::editions::ComponentKind;
-    use vortex::editions::EditionSessionExt;
-    use vortex::editions::UNSTABLE;
-    use vortex::error::VortexResult;
-    use vortex::file::OpenOptionsSessionExt;
-    use vortex::file::WriteOptionsSessionExt;
-    use vortex::io::runtime::BlockingRuntime;
-    use vortex::layout::LayoutRef;
-    use vortex::layout::VTable;
-    use vortex::layout::layouts::flat::Flat;
-    use vortex::layout::layouts::list::List;
-    use vortex::session::SessionExt;
-    use vortex::session::SessionVar;
-    use vortex::session::registry::Id;
-
     use std::sync::Arc;
 
     use futures::StreamExt;
     use futures::future::BoxFuture;
     use parking_lot::Mutex;
+    use vortex::array::IntoArray;
+    use vortex::array::VortexSessionExecute;
+    use vortex::array::arrays::ListArray;
+    use vortex::array::arrays::StructArray;
     use vortex::array::buffer::BufferHandle;
+    use vortex::array::validity::Validity;
     use vortex::buffer::Alignment;
+    use vortex::buffer::Buffer;
     use vortex::buffer::ByteBuffer;
+    use vortex::buffer::ByteBufferMut;
+    use vortex::editions::ComponentKind;
+    use vortex::editions::EditionSessionExt;
+    use vortex::editions::UNSTABLE;
+    use vortex::error::VortexExpect;
+    use vortex::error::VortexResult;
+    use vortex::file::OpenOptionsSessionExt;
     use vortex::file::VortexOpenOptions;
+    use vortex::file::WriteOptionsSessionExt;
     use vortex::io::VortexReadAt;
+    use vortex::io::runtime::BlockingRuntime;
+    use vortex::layout::LayoutRef;
+    use vortex::layout::VTable;
+    use vortex::layout::layouts::flat::Flat;
+    use vortex::layout::layouts::list::List;
     use vortex::scan::ScanRequest;
+    use vortex::session::SessionExt;
+    use vortex::session::SessionVar;
+    use vortex::session::registry::Id;
     use vortex_arrow::ArrowSessionExt;
 
     use super::LIST_LAYOUT_EDITION;
@@ -596,6 +604,18 @@ mod tests {
         ComponentKind::DType,
         ComponentKind::Aggregate,
     ];
+
+    #[test]
+    fn list_layout_edition_becomes_immutable() -> VortexResult<()> {
+        let session = *new_session();
+        session.editions().validate()?;
+        let edition = session
+            .editions()
+            .find(&LIST_LAYOUT_EDITION)
+            .vortex_expect("the list layout edition is registered");
+        assert!(edition.immutable, "{edition:?}");
+        Ok(())
+    }
 
     #[test]
     fn list_layout_write_enables_only_the_list_layout() -> VortexResult<()> {
