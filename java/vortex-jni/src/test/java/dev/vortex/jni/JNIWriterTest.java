@@ -450,9 +450,8 @@ public final class JNIWriterTest {
     @ParameterizedTest(name = "nested={0}, rejected={1}")
     @CsvSource({"false, false", "true, false", "false, true", "true, true"})
     public void testAddressBatchBorrowsSchema(boolean nested, boolean rejected) throws IOException {
-        Schema schema = nested
-                ? mapSchema()
-                : new Schema(List.of(Field.notNullable("value", new ArrowType.Int(32, true))));
+        Schema schema =
+                nested ? mapSchema() : new Schema(List.of(Field.notNullable("value", new ArrowType.Int(32, true))));
         // A different column count reaches the native schema guard after taking ownership of the array.
         Schema writerSchema = rejected
                 ? new Schema(List.of("a", "b", "c").stream()
@@ -485,7 +484,8 @@ public final class JNIWriterTest {
                                                 IOException.class,
                                                 () -> writer.writeBatch(array.memoryAddress(), ffi.memoryAddress()));
                                         assertNotNull(failure.getCause());
-                                        assertTrue(failure.getCause().getMessage().contains("batch.num_columns()"));
+                                        assertTrue(
+                                                failure.getCause().getMessage().contains("batch.num_columns()"));
                                     } else {
                                         writer.writeBatch(array.memoryAddress(), ffi.memoryAddress());
                                     }
@@ -500,7 +500,8 @@ public final class JNIWriterTest {
                         ffi.release();
                     }
                 }
-                assertEquals(rejected ? 0 : 3L * root.getRowCount(), writer.finish().rowCount());
+                assertEquals(
+                        rejected ? 0 : 3L * root.getRowCount(), writer.finish().rowCount());
             }
             assertEquals(0, allocator.getAllocatedMemory());
         }
