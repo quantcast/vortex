@@ -27,6 +27,9 @@ use vortex_array::dtype::NativePType;
 use vortex_array::match_each_decimal_value_type;
 use vortex_array::match_each_native_ptype;
 use vortex_array::scalar::Scalar;
+use vortex_array::scalar::ScalarValue;
+use vortex_buffer::BufferString;
+use vortex_buffer::ByteBuffer;
 use vortex_error::VortexResult;
 use vortex_mask::Mask;
 
@@ -164,6 +167,24 @@ pub(crate) fn compress_as_constant(
     Ok(if accepted { compressed } else { array })
 }
 
+/// Copies string and binary bytes, including nested ones, into their own allocations.
+///
+/// Scalars extracted from an array can slice its buffers, so a constant built from one would
+/// otherwise keep the whole source array alive.
+fn detach_bytes(value: ScalarValue) -> ScalarValue {
+    match value {
+        ScalarValue::Utf8(s) => ScalarValue::Utf8(BufferString::from(s.as_str())),
+        ScalarValue::Binary(b) => ScalarValue::Binary(ByteBuffer::copy_from(&b)),
+        ScalarValue::Tuple(children) => ScalarValue::Tuple(
+            children
+                .into_iter()
+                .map(|child| child.map(detach_bytes))
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
 /// Encodes an array whose valid values are all equal.
 ///
 /// Returns a [`ConstantArray`], wrapped in a [`MaskedArray`] when the array has some nulls, or a
@@ -182,7 +203,8 @@ fn compress_constant(source: &ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<
         );
     };
 
-    let scalar = source.execute_scalar(first_valid, ctx)?;
+    let (dtype, value) = source.execute_scalar(first_valid, ctx)?.into_parts();
+    let scalar = Scalar::try_new(dtype, value.map(detach_bytes))?;
     let const_arr = ConstantArray::new(scalar, source.len()).into_array();
 
     if mask.all_true() {
