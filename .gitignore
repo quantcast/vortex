@@ -193,6 +193,7 @@ benchmarks/.out
 
 # Scratch
 *.vortex
+!vortex-jni/goldenfiles/**/*.vortex
 *.parquet
 !docs/_static/example.parquet
 

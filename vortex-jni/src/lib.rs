@@ -25,6 +25,8 @@ mod errors;
 mod expression;
 mod file;
 mod io;
+#[cfg(test)]
+mod list_layout_golden;
 mod logging;
 mod object_store;
 mod runtime;

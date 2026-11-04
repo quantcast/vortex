@@ -230,7 +230,10 @@ pub(crate) fn register_list_layout_edition(session: &VortexSession) -> VortexRes
 /// The list layout is only written while an edition containing it is enabled, and enabled
 /// editions are shared by every clone of a session. A list-layout write therefore runs in a fork
 /// of the session, which keeps its registrations, with an enabled-editions set of its own.
-fn write_session(session: &VortexSession, list_layout: bool) -> VortexResult<VortexSession> {
+pub(crate) fn write_session(
+    session: &VortexSession,
+    list_layout: bool,
+) -> VortexResult<VortexSession> {
     if !list_layout {
         return Ok(session.clone());
     }
@@ -367,7 +370,8 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_createStream(
         write_options.validate_metadata()?;
         let buffered_bytes = write_options.buffered_bytes_tracker();
 
-        let mut write = CountingVortexWrite::new(JavaWrite::new(env, vm, writable, direct_buffers)?);
+        let mut write =
+            CountingVortexWrite::new(JavaWrite::new(env, vm, writable, direct_buffers)?);
         let bytes_written = write.counter();
         let handle = session.handle().spawn(async move {
             let summary = write_options.write(&mut write, stream).await?;
@@ -513,40 +517,38 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_close(
 #[cfg(test)]
 mod tests {
     use std::any::Any;
+    use std::sync::Arc;
 
+    use futures::StreamExt;
+    use futures::future::BoxFuture;
+    use parking_lot::Mutex;
     use vortex::array::IntoArray;
     use vortex::array::VortexSessionExecute;
     use vortex::array::arrays::ListArray;
     use vortex::array::arrays::StructArray;
+    use vortex::array::buffer::BufferHandle;
     use vortex::array::validity::Validity;
+    use vortex::buffer::Alignment;
     use vortex::buffer::Buffer;
+    use vortex::buffer::ByteBuffer;
     use vortex::buffer::ByteBufferMut;
     use vortex::editions::ComponentKind;
     use vortex::editions::EditionSessionExt;
     use vortex::editions::UNSTABLE;
     use vortex::error::VortexResult;
     use vortex::file::OpenOptionsSessionExt;
+    use vortex::file::VortexOpenOptions;
     use vortex::file::WriteOptionsSessionExt;
+    use vortex::io::VortexReadAt;
     use vortex::io::runtime::BlockingRuntime;
     use vortex::layout::LayoutRef;
     use vortex::layout::VTable;
     use vortex::layout::layouts::flat::Flat;
     use vortex::layout::layouts::list::List;
+    use vortex::scan::ScanRequest;
     use vortex::session::SessionExt;
     use vortex::session::SessionVar;
     use vortex::session::registry::Id;
-
-    use std::sync::Arc;
-
-    use futures::StreamExt;
-    use futures::future::BoxFuture;
-    use parking_lot::Mutex;
-    use vortex::array::buffer::BufferHandle;
-    use vortex::buffer::Alignment;
-    use vortex::buffer::ByteBuffer;
-    use vortex::file::VortexOpenOptions;
-    use vortex::io::VortexReadAt;
-    use vortex::scan::ScanRequest;
     use vortex_arrow::ArrowSessionExt;
 
     use super::LIST_LAYOUT_EDITION;
