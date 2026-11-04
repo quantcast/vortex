@@ -362,6 +362,7 @@ pub extern "system" fn Java_dev_vortex_jni_NativeFiles_listFiles(
         for path in paths_vec.into_iter() {
             let path_string = env.new_string(path)?;
             paths_list.add(env, path_string.as_ref())?;
+            env.delete_local_ref(path_string);
         }
 
         Ok(raw)
@@ -386,6 +387,7 @@ pub extern "system" fn Java_dev_vortex_jni_NativeFiles_delete(
             let uri = uris.get_element(env, idx)?;
             let uri_str = env.cast_local::<JString>(uri)?;
             delete_uris.push(uri_str.try_to_string(env)?);
+            env.delete_local_ref(uri_str);
         }
 
         if delete_uris.is_empty() {
@@ -411,9 +413,13 @@ pub extern "system" fn Java_dev_vortex_jni_NativeFiles_delete(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use object_store::registry::ObjectStoreRegistry;
     use rstest::rstest;
     use vortex::error::VortexResult;
     use vortex::file::multi::parse_uri_or_path;
+    use vortex_cloud::Registry;
 
     use super::listed_file_url;
     use super::listing_base_url;
@@ -443,12 +449,6 @@ mod tests {
         "with space.vortex",
         "https://s3.us-east-1.amazonaws.com/bucket/with%20space.vortex"
     )]
-    #[case::repeated_separators(
-        "https://s3.us-east-1.amazonaws.com/bucket//dir//",
-        "dir",
-        "dir/file.vortex",
-        "https://s3.us-east-1.amazonaws.com/bucket/dir/file.vortex"
-    )]
     #[case::encoded_key_separator(
         "s3://bucket/dir%2Fsubdir",
         "dir/subdir",
@@ -463,12 +463,33 @@ mod tests {
     )]
     fn listed_urls_preserve_keys_and_mounts(
         #[case] input: &str,
-        #[case] prefix: &str,
+        #[case] expected_prefix: &str,
         #[case] key: &str,
         #[case] expected: &str,
     ) -> VortexResult<()> {
-        let base = listing_base_url(&parse_uri_or_path(input)?, prefix)?;
-        assert_eq!(listed_file_url(&base, key)?.as_str(), expected);
+        let url = parse_uri_or_path(input)?;
+        let registry = Registry::with_vars([("aws_region".to_string(), "us-east-1".to_string())]);
+        let (store, prefix) = registry.resolve(&url)?;
+        assert_eq!(prefix.as_ref(), expected_prefix);
+
+        let base = listing_base_url(&url, prefix.as_ref())?;
+        let listed = listed_file_url(&base, key)?;
+        assert_eq!(listed.as_str(), expected);
+
+        let (listed_store, listed_path) = registry.resolve(&listed)?;
+        assert!(Arc::ptr_eq(&store, &listed_store));
+        assert_eq!(listed_path.as_ref(), key);
+        Ok(())
+    }
+
+    #[test]
+    fn listing_base_accepts_a_normalized_prefix() -> VortexResult<()> {
+        let url = parse_uri_or_path("https://s3.us-east-1.amazonaws.com/bucket//dir//")?;
+        let base = listing_base_url(&url, "dir")?;
+        assert_eq!(
+            listed_file_url(&base, "dir/file.vortex")?.as_str(),
+            "https://s3.us-east-1.amazonaws.com/bucket/dir/file.vortex"
+        );
         Ok(())
     }
 
