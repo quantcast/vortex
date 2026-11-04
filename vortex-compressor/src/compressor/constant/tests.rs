@@ -16,6 +16,7 @@ use vortex_array::arrays::DictArray;
 use vortex_array::arrays::ExtensionArray;
 use vortex_array::arrays::Masked;
 use vortex_array::arrays::PrimitiveArray;
+use vortex_array::arrays::StructArray;
 use vortex_array::arrays::TemporalArray;
 use vortex_array::arrays::VarBinViewArray;
 use vortex_array::arrays::varbinview::BinaryView;
@@ -87,29 +88,48 @@ fn constant_string_compresses_without_schemes() -> VortexResult<()> {
 }
 
 #[rstest]
-#[case::utf8(false)]
-#[case::binary(true)]
+#[case::utf8(DType::Utf8 as fn(Nullability) -> DType, b'a')]
+#[case::binary(DType::Binary, 0xff)]
 fn constant_bytes_release_source_buffer(
-    #[case] binary: bool,
+    #[case] dtype: fn(Nullability) -> DType,
+    #[case] byte: u8,
+    // 8 bytes is inlined in the views buffer; 128 bytes lives in a data buffer.
     #[values(8, 128)] width: usize,
-    #[values(false, true)] nullable: bool,
+    #[values(Nullability::NonNullable, Nullability::Nullable)] nullability: Nullability,
 ) -> VortexResult<()> {
-    let nullability = Nullability::from(nullable);
-    let dtype = if binary {
-        DType::Binary(nullability)
-    } else {
-        DType::Utf8(nullability)
-    };
-    let value = vec![if binary { 255 } else { b'a' }; width];
+    let value = vec![byte; width];
     let source = VarBinViewArray::from_iter(
-        (0..8192).map(|i| (!nullable || i % 5 != 0).then_some(value.as_slice())),
-        dtype,
+        (0..1024).map(|i| (!nullability.is_nullable() || i % 5 != 0).then_some(value.as_slice())),
+        dtype(nullability),
     );
-    // Short values slice the views buffer; long values slice a data buffer.
-    let backing = source.bytes_at(usize::from(nullable));
+    let backing = source.bytes_at(1);
     let source = source.into_array();
     let mut ctx = SESSION.create_execution_ctx();
     let compressed = empty_compressor().compress(&source, &mut ctx)?;
+    assert_arrays_eq!(compressed, source, &mut ctx);
+    drop(source);
+
+    assert!(
+        backing.try_into_mut().is_ok(),
+        "constant retained the source buffer"
+    );
+    Ok(())
+}
+
+#[test]
+fn constant_nested_bytes_release_source_buffer() -> VortexResult<()> {
+    let value = vec![b'a'; 128];
+    let field = VarBinViewArray::from_iter(
+        (0..1024).map(|_| Some(value.as_slice())),
+        DType::Utf8(Nullability::NonNullable),
+    );
+    let backing = field.bytes_at(1);
+    let storage = StructArray::from_fields(&[("name", field.into_array())])?.into_array();
+    let dtype = ExtDType::<StructExtension>::try_new(0, storage.dtype().clone())?;
+    let source = ExtensionArray::new(dtype.erased(), storage).into_array();
+    let mut ctx = SESSION.create_execution_ctx();
+    let compressed = empty_compressor().compress(&source, &mut ctx)?;
+    assert!(compressed.is::<Constant>());
     assert_arrays_eq!(compressed, source, &mut ctx);
     drop(source);
 
@@ -295,6 +315,40 @@ impl ExtVTable for FloatExtension {
 
     fn unpack_native<'a>(_dtype: &'a ExtDType<Self>, value: &'a ScalarValue) -> VortexResult<f64> {
         value.as_primitive().cast::<f64>()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+struct StructExtension;
+
+impl ExtVTable for StructExtension {
+    type Metadata = u8;
+    type NativeValue<'a> = &'a ScalarValue;
+
+    #[expect(clippy::disallowed_methods, reason = "test-only id")]
+    fn id(&self) -> ExtId {
+        ExtId::new("test.struct")
+    }
+
+    fn serialize_metadata(&self, metadata: &u8) -> VortexResult<Vec<u8>> {
+        Ok(vec![*metadata])
+    }
+
+    fn deserialize_metadata(&self, metadata: &[u8]) -> VortexResult<u8> {
+        vortex_ensure!(metadata.len() == 1, "expected one metadata byte");
+        Ok(metadata[0])
+    }
+
+    fn validate_dtype(dtype: &ExtDType<Self>) -> VortexResult<()> {
+        vortex_ensure!(dtype.storage_dtype().is_struct(), "expected struct storage");
+        Ok(())
+    }
+
+    fn unpack_native<'a>(
+        _dtype: &'a ExtDType<Self>,
+        value: &'a ScalarValue,
+    ) -> VortexResult<&'a ScalarValue> {
+        Ok(value)
     }
 }
 

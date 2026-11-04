@@ -167,6 +167,24 @@ pub(crate) fn compress_as_constant(
     Ok(if accepted { compressed } else { array })
 }
 
+/// Copies string and binary bytes, including nested ones, into their own allocations.
+///
+/// Scalars extracted from an array can slice its buffers, so a constant built from one would
+/// otherwise keep the whole source array alive.
+fn detach_bytes(value: ScalarValue) -> ScalarValue {
+    match value {
+        ScalarValue::Utf8(s) => ScalarValue::Utf8(BufferString::from(s.as_str())),
+        ScalarValue::Binary(b) => ScalarValue::Binary(ByteBuffer::copy_from(&b)),
+        ScalarValue::Tuple(children) => ScalarValue::Tuple(
+            children
+                .into_iter()
+                .map(|child| child.map(detach_bytes))
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
 /// Encodes an array whose valid values are all equal.
 ///
 /// Returns a [`ConstantArray`], wrapped in a [`MaskedArray`] when the array has some nulls, or a
@@ -185,20 +203,8 @@ fn compress_constant(source: &ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<
         );
     };
 
-    let scalar = source.execute_scalar(first_valid, ctx)?;
-    // A string scalar can be a slice of the source's data or views buffer. Constants may
-    // remain buffered until EOF, so keeping that slice would retain the whole input chunk.
-    let scalar = match scalar.value() {
-        Some(ScalarValue::Utf8(value)) => Scalar::try_new(
-            scalar.dtype().clone(),
-            Some(ScalarValue::Utf8(BufferString::from(value.as_str()))),
-        )?,
-        Some(ScalarValue::Binary(value)) => Scalar::try_new(
-            scalar.dtype().clone(),
-            Some(ScalarValue::Binary(ByteBuffer::copy_from(value))),
-        )?,
-        _ => scalar,
-    };
+    let (dtype, value) = source.execute_scalar(first_valid, ctx)?.into_parts();
+    let scalar = Scalar::try_new(dtype, value.map(detach_bytes))?;
     let const_arr = ConstantArray::new(scalar, source.len()).into_array();
 
     if mask.all_true() {
