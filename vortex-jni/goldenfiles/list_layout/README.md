@@ -1,7 +1,7 @@
 # List layout golden files
 
-Files written with `vortex.listLayout`, in the frozen `qc2026.11.0` edition, which holds only the
-`vortex.list` layout. Frozen means every later build must read these files.
+Files written with `vortex.listLayout`, in the `qc2026.11.0` edition, which holds only the
+`vortex.list` layout. It freezes in 0.91.0; from then on, every later build must read these files.
 `src/list_layout_golden.rs` checks two things on every build:
 
 - **Reads:** each file still reads back to the values it was written from.

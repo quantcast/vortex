@@ -211,17 +211,16 @@ static LIST_LAYOUT_FAMILY: EditionFamily = EditionFamily {
           maintained in Quantcast's fork.",
 };
 
-/// A frozen edition holding only the list layout, which upstream keeps in its unstable edition.
-/// The fork promises its files stay readable; `list_layout_golden` enforces that.
+/// An edition holding only the list layout, which upstream keeps in its unstable edition. It
+/// freezes in 0.91.0; `list_layout_golden` already holds its format fixed.
 const LIST_LAYOUT_EDITION: EditionId = EditionId::new("qc", 2026, 11, 0);
 
 static LIST_LAYOUT_DECLARATION: EditionDeclaration = EditionDeclaration {
     edition: Edition {
         id: LIST_LAYOUT_EDITION,
         immutable: true,
-        // Versions can't carry the fork's suffix: this is 0.90.0-qc23, the first build with the
-        // edition.
-        min_library_version: Some("0.90.0"),
+        // Set to "0.91.0" once the fork's first 0.91.0 build is cut, which freezes the edition.
+        min_library_version: None,
     },
     added: &[EditionMember::layout(&"vortex.list")],
 };
@@ -607,14 +606,14 @@ mod tests {
     ];
 
     #[test]
-    fn list_layout_edition_is_frozen() -> VortexResult<()> {
+    fn list_layout_edition_becomes_immutable() -> VortexResult<()> {
         let session = *new_session();
         session.editions().validate()?;
         let edition = session
             .editions()
             .find(&LIST_LAYOUT_EDITION)
             .vortex_expect("the list layout edition is registered");
-        assert!(edition.immutable && !edition.is_draft(), "{edition:?}");
+        assert!(edition.immutable, "{edition:?}");
         Ok(())
     }
 
