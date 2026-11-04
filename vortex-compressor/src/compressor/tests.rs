@@ -961,3 +961,24 @@ fn extension_with_lazy_storage_is_not_passed_through() -> VortexResult<()> {
     assert_arrays_eq!(&compressed, &array, &mut exec_ctx);
     Ok(())
 }
+
+#[test]
+fn uncompressed_string_slice_releases_source_buffer() -> VortexResult<()> {
+    // 20-byte values keep the slice under the bytes-per-row gate in `compact_buffers`, although
+    // it references only a sixth of its buffer.
+    let parent = VarBinViewArray::from_iter_str((0..49152u32).map(|i| format!("value-{i:014}")));
+    let backing = parent.bytes_at(0);
+    let source = parent.into_array().slice(40960..49152)?;
+    let mut exec_ctx = SESSION.create_execution_ctx();
+
+    let compressed = CascadingCompressor::new(Vec::new()).compress(&source, &mut exec_ctx)?;
+    assert!(compressed.is::<VarBinView>());
+    assert_arrays_eq!(&compressed, &source, &mut exec_ctx);
+    drop(source);
+
+    assert!(
+        backing.try_into_mut().is_ok(),
+        "uncompressed fallback retained the source buffer"
+    );
+    Ok(())
+}

@@ -27,16 +27,33 @@ impl VarBinViewArray {
     /// that are no longer visible. We detect when there is wasted space in any of the buffers, and if
     /// so, will aggressively compact all visible outlined string data into new buffers while keeping
     /// well-utilized buffers unchanged.
+    ///
+    /// Arrays whose buffers hold few bytes per row are assumed to be well utilized and are
+    /// returned without counting the referenced bytes. Use
+    /// [`compact_buffers_exact`](Self::compact_buffers_exact) where that guess is too coarse.
     pub fn compact_buffers(&self, ctx: &mut ExecutionCtx) -> VortexResult<VarBinViewArray> {
         // If there is nothing to be gained by compaction, return the original array untouched.
-        if !self.should_compact(ctx)? {
+        if !self.should_compact(true, ctx)? {
             return Ok(self.clone());
         }
 
         self.compact_with_threshold(DEFAULT_COMPACTION_THRESHOLD, ctx)
     }
 
-    fn should_compact(&self, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
+    /// Like [`compact_buffers`](Self::compact_buffers), but always counts the bytes the views
+    /// reference, at the cost of a pass over the views and validity.
+    ///
+    /// A slice of a larger array, or a mostly null array, can hold few buffer bytes per row while
+    /// referencing only a small fraction of them.
+    pub fn compact_buffers_exact(&self, ctx: &mut ExecutionCtx) -> VortexResult<VarBinViewArray> {
+        if !self.should_compact(false, ctx)? {
+            return Ok(self.clone());
+        }
+
+        self.compact_with_threshold(DEFAULT_COMPACTION_THRESHOLD, ctx)
+    }
+
+    fn should_compact(&self, per_row_gate: bool, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
         let nbuffers = self.data_buffers().len();
 
         // If the array is entirely inlined strings, do not attempt to compact.
@@ -55,7 +72,10 @@ impl VarBinViewArray {
         }
 
         let len = u64::try_from(self.len()).unwrap_or(u64::MAX);
-        if len > 0 && buffer_total_bytes / len <= MIN_RETAINED_BYTES_PER_ROW_TO_CHECK_COMPACTION {
+        if per_row_gate
+            && len > 0
+            && buffer_total_bytes / len <= MIN_RETAINED_BYTES_PER_ROW_TO_CHECK_COMPACTION
+        {
             return Ok(false);
         }
 

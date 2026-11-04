@@ -286,7 +286,9 @@ impl Canonical {
     pub fn compact(&self, ctx: &mut ExecutionCtx) -> VortexResult<Canonical> {
         match self {
             Canonical::Bool(array) => Ok(Canonical::Bool(array.trim_bits()?)),
-            Canonical::VarBinView(array) => Ok(Canonical::VarBinView(array.compact_buffers(ctx)?)),
+            Canonical::VarBinView(array) => {
+                Ok(Canonical::VarBinView(array.compact_buffers_exact(ctx)?))
+            }
             Canonical::List(array) => Ok(Canonical::List(
                 array.rebuild(ListViewRebuildMode::TrimElements, ctx)?,
             )),
