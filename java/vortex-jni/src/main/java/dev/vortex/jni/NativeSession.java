@@ -22,4 +22,7 @@ public final class NativeSession {
      * this call. Throws a {@link RuntimeException} if the edition is not known.
      */
     public static native void enableEdition(long pointer, String edition);
+
+    /** The name of every edition the session knows, each one a name {@link #enableEdition} accepts. */
+    public static native String[] knownEditions(long pointer);
 }

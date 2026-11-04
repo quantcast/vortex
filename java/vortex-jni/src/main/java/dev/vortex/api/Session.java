@@ -6,6 +6,7 @@ package dev.vortex.api;
 import com.google.common.base.Preconditions;
 import dev.vortex.VortexCleaner;
 import dev.vortex.jni.NativeSession;
+import java.util.Set;
 
 /**
  * Handle to a native Vortex session. The session owns a current-thread async runtime and is the entry point for opening
@@ -38,6 +39,14 @@ public final class Session {
      */
     public void enableEdition(String edition) {
         NativeSession.enableEdition(pointer, edition);
+    }
+
+    /**
+     * The name of every edition this session knows, for example {@code core2025.10.0}. Each one is a name
+     * {@link #enableEdition} accepts.
+     */
+    public Set<String> knownEditions() {
+        return Set.of(NativeSession.knownEditions(pointer));
     }
 
     /** Internal: returns the native pointer. Do not free directly. */

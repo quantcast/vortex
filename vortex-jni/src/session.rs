@@ -5,8 +5,10 @@
 
 use jni::EnvUnowned;
 use jni::objects::JClass;
+use jni::objects::JObject;
 use jni::objects::JString;
 use jni::sys::jlong;
+use jni::sys::jobjectArray;
 use vortex::VortexSessionDefault;
 use vortex::editions::CORE_2026_08_3;
 use vortex::editions::EditionSessionExt;
@@ -85,5 +87,32 @@ pub extern "system" fn Java_dev_vortex_jni_NativeSession_enableEdition(
             .map_err(|error| vortex_err!("{error}"))?;
 
         Ok(())
+    })
+}
+
+/// Returns the name of every edition the session knows, for example `core2025.10.0`, as a
+/// `String[]`. Each one is a name `enableEdition` accepts.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_vortex_jni_NativeSession_knownEditions(
+    mut env: EnvUnowned,
+    _class: JClass,
+    pointer: jlong,
+) -> jobjectArray {
+    try_or_throw(&mut env, |env| {
+        // SAFETY: pointer must have been created by `newSession` and not yet freed.
+        let session = unsafe { session_ref(pointer) };
+        let editions = session.editions().editions();
+        let names = env.new_object_array(
+            i32::try_from(editions.len())
+                .map_err(|_| vortex_err!("edition count exceeds Java array range"))?,
+            jni::jni_str!("java/lang/String"),
+            JObject::null(),
+        )?;
+        for (index, edition) in editions.iter().enumerate() {
+            let name = env.new_string(edition.id.to_string())?;
+            names.set_element(env, index, &name)?;
+            env.delete_local_ref(name);
+        }
+        Ok(names.into_raw())
     })
 }
