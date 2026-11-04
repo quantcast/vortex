@@ -1,13 +1,14 @@
 # List layout golden files
 
-Files written with `vortex.listLayout`, in the draft `qc2026.11.0` edition, which holds only the
-`vortex.list` layout. `src/list_layout_golden.rs` checks two things on every build:
+Files written with `vortex.listLayout`, in the frozen `qc2026.11.0` edition, which holds only the
+`vortex.list` layout. Frozen means every later build must read these files.
+`src/list_layout_golden.rs` checks two things on every build:
 
 - **Reads:** each file still reads back to the values it was written from.
 - **Writes:** today's writer still writes the same list layouts as each file.
 
-Nothing upstream promises the list layout stays the same, since it's in Vortex's `unstable`
-edition. These files are how we find out when it changes.
+Upstream makes no such promise, since it keeps the list layout in its `unstable` edition. These
+files are how we find out when a merge changes it.
 
 ## When a test fails
 

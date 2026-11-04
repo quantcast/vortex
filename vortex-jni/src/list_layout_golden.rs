@@ -3,8 +3,9 @@
 
 //! Golden files pinning the `vortex.list` layout that `vortex.listLayout` writes.
 //!
-//! The list layout is in the draft `qc2026.11.0` edition, so nothing upstream promises it stays
-//! readable. Each file in `goldenfiles/list_layout/` was written once and is never rewritten:
+//! The list layout is in our frozen `qc2026.11.0` edition, which promises its files stay readable.
+//! Upstream makes no such promise: it keeps the layout in its unstable edition. Each file in
+//! `goldenfiles/list_layout/` was written once and is never rewritten:
 //!
 //! - every file must still read back to the values it was written from, through full scans, row
 //!   ranges, row indices, projections, filters and list pushdown;
