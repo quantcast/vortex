@@ -69,7 +69,9 @@ public final class VortexFileSplitTest {
                 "spark.sql.files.minPartitionNum",
                 "spark.sql.files.maxPartitionNum",
                 "spark.sql.codegen.wholeStage",
-                "spark.sql.sources.useV1SourceList")) {
+                "spark.sql.sources.useV1SourceList",
+                "vortex.splitFiles",
+                "spark.datasource.vortex.splitFiles")) {
             spark.conf().unset(key);
         }
     }
@@ -246,6 +248,32 @@ public final class VortexFileSplitTest {
                     spark.read().format("vortex").option(key, "false").load(output.toString());
             assertEquals(1, read.rdd().getNumPartitions(), key);
             assertEquals(ROWS, read.count(), key);
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"v2", "v1"})
+    @DisplayName("A session vortex.splitFiles=false turns splitting off, and a read option overrides it")
+    void sessionSplitFilesTurnsSplittingOff(String mode) {
+        Path output = write(rows(ROWS).coalesce(1), "session_option", null);
+        List<Long> sizes = fileSizes(output);
+        long splitSize = sizes.get(0) / 4;
+        for (String sessionKey : List.of("vortex.splitFiles", "spark.datasource.vortex.splitFiles")) {
+            spark.conf().set(sessionKey, "false");
+            String context = "mode=" + mode + " sessionKey=" + sessionKey;
+
+            Dataset<Row> read = read(output, mode, splitSize);
+            assertEquals(1, read.rdd().getNumPartitions(), context);
+            assertEquals(ROWS, read.count(), context);
+
+            Dataset<Row> overridden = spark.read()
+                    .format("vortex")
+                    .option("vortex.splitFiles", "true")
+                    .load(output.toString());
+            assertEquals(expectedPartitions(sizes, splitSize), overridden.rdd().getNumPartitions(), context);
+            assertEquals(ROWS, overridden.count(), context);
+
+            spark.conf().unset(sessionKey);
         }
     }
 

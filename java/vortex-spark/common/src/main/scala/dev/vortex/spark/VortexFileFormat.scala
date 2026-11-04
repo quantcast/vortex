@@ -69,7 +69,8 @@ final class VortexFileFormat
       sparkSession: SparkSession,
       options: Map[String, String],
       path: Path
-  ): Boolean = VortexScan.isSplitable(VortexOptions.of(options.asJava), path)
+  ): Boolean =
+    VortexScan.isSplitable(withSessionDefaults(sparkSession, options), path)
 
   override def supportBatch(
       sparkSession: SparkSession,
