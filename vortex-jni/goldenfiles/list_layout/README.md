@@ -1,6 +1,6 @@
 # List layout golden files
 
-Files written with `vortex.listLayout`, in the draft `jni2026.11.0` edition, which holds only the
+Files written with `vortex.listLayout`, in the draft `qc2026.11.0` edition, which holds only the
 `vortex.list` layout. `src/list_layout_golden.rs` checks two things on every build:
 
 - **Reads:** each file still reads back to the values it was written from.

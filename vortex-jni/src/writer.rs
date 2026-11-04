@@ -202,14 +202,17 @@ fn write_summary_to_java<'local>(
     )?)
 }
 
+/// Quantcast's editions. Named for the fork rather than the crate, so it can't collide with a
+/// family upstream declares in `vortex-jni`.
 static LIST_LAYOUT_FAMILY: EditionFamily = EditionFamily {
-    name: "jni",
+    name: "qc",
     origin: "vortex-jni",
-    doc: "Components a JNI write can opt into without enabling the rest of the unstable edition.",
+    doc: "Components a JNI write can opt into without enabling the rest of the unstable edition, \
+          maintained in Quantcast's fork.",
 };
 
 /// A draft edition holding only the unstable list layout.
-const LIST_LAYOUT_EDITION: EditionId = EditionId::new("jni", 2026, 11, 0);
+const LIST_LAYOUT_EDITION: EditionId = EditionId::new("qc", 2026, 11, 0);
 
 static LIST_LAYOUT_DECLARATION: EditionDeclaration = EditionDeclaration {
     edition: Edition {
