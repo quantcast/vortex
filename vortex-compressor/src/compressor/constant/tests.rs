@@ -86,6 +86,40 @@ fn constant_string_compresses_without_schemes() -> VortexResult<()> {
     Ok(())
 }
 
+#[rstest]
+#[case::utf8(false)]
+#[case::binary(true)]
+fn constant_bytes_release_source_buffer(
+    #[case] binary: bool,
+    #[values(8, 128)] width: usize,
+    #[values(false, true)] nullable: bool,
+) -> VortexResult<()> {
+    let nullability = Nullability::from(nullable);
+    let dtype = if binary {
+        DType::Binary(nullability)
+    } else {
+        DType::Utf8(nullability)
+    };
+    let value = vec![if binary { 255 } else { b'a' }; width];
+    let source = VarBinViewArray::from_iter(
+        (0..8192).map(|i| (!nullable || i % 5 != 0).then_some(value.as_slice())),
+        dtype,
+    );
+    // Short values slice the views buffer; long values slice a data buffer.
+    let backing = source.bytes_at(usize::from(nullable));
+    let source = source.into_array();
+    let mut ctx = SESSION.create_execution_ctx();
+    let compressed = empty_compressor().compress(&source, &mut ctx)?;
+    assert_arrays_eq!(compressed, source, &mut ctx);
+    drop(source);
+
+    assert!(
+        backing.try_into_mut().is_ok(),
+        "constant retained the source buffer"
+    );
+    Ok(())
+}
+
 #[test]
 fn constant_bool_compresses_without_schemes() -> VortexResult<()> {
     let array = BoolArray::from_iter(std::iter::repeat_n(true, 100)).into_array();

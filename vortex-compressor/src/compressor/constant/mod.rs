@@ -27,6 +27,9 @@ use vortex_array::dtype::NativePType;
 use vortex_array::match_each_decimal_value_type;
 use vortex_array::match_each_native_ptype;
 use vortex_array::scalar::Scalar;
+use vortex_array::scalar::ScalarValue;
+use vortex_buffer::BufferString;
+use vortex_buffer::ByteBuffer;
 use vortex_error::VortexResult;
 use vortex_mask::Mask;
 
@@ -183,6 +186,19 @@ fn compress_constant(source: &ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<
     };
 
     let scalar = source.execute_scalar(first_valid, ctx)?;
+    // A string scalar can be a slice of the source's data or views buffer. Constants may
+    // remain buffered until EOF, so keeping that slice would retain the whole input chunk.
+    let scalar = match scalar.value() {
+        Some(ScalarValue::Utf8(value)) => Scalar::try_new(
+            scalar.dtype().clone(),
+            Some(ScalarValue::Utf8(BufferString::from(value.as_str()))),
+        )?,
+        Some(ScalarValue::Binary(value)) => Scalar::try_new(
+            scalar.dtype().clone(),
+            Some(ScalarValue::Binary(ByteBuffer::copy_from(value))),
+        )?,
+        _ => scalar,
+    };
     let const_arr = ConstantArray::new(scalar, source.len()).into_array();
 
     if mask.all_true() {
