@@ -33,7 +33,7 @@ public final class ExpressionTest {
     }
 
     @Test
-    public void timestampLiteralsAcceptEveryLongValue() {
+    public void timestampLiteralsAcceptStorageExtremes() {
         assertNotNull(Expression.literalTimestamp(Long.MAX_VALUE, Expression.TimeUnit.SECONDS, null));
         assertNotNull(Expression.literalTimestamp(0L, Expression.TimeUnit.SECONDS, "UTC"));
     }

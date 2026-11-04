@@ -552,7 +552,7 @@ final class VortexOutputWriterTest {
             switch ((int) (i % 3)) {
                 case 0 -> writer.write(unsafeRow);
                 case 1 -> {
-                    // The same row in off-heap memory, freed as soon as write() returns.
+                    // The same row in off-heap memory, overwritten and freed as soon as write() returns.
                     int size = unsafeRow.getSizeInBytes();
                     long address = Platform.allocateMemory(size);
                     try {
@@ -582,21 +582,44 @@ final class VortexOutputWriterTest {
         assertEquals(expected, readRows(writer.path()));
     }
 
-    /** A failed write leaves the batch misaligned: the writer refuses more rows and close only releases. */
+    /** Nothing is written below a null struct, so its leaves keep their initial capacity however many rows arrive. */
     @Test
-    void closeAfterFailedWriteReleasesTheWriter() {
+    void nullStructsAllocateNothingBelowThem() {
+        StructType leaves = new StructType();
+        for (int i = 0; i < 32; i++) {
+            leaves = leaves.add("l" + i, DataTypes.LongType, true);
+        }
+        StructType schema =
+                new StructType().add("id", DataTypes.LongType, false).add("st", leaves, true);
+        VortexOutputWriter writer = writer("null-structs.vortex", schema, Map.of("vortex.write.batch.size", "4096"));
+        int rows = 4000;
+        for (long i = 0; i < rows; i++) {
+            writer.write(new GenericInternalRow(new Object[] {i, null}));
+        }
+        long held = writer.allocator().getAllocatedMemory();
+        writer.close();
+
+        assertTrue(held < 262_144, "the writer holds " + (held / 1024) + " KiB for " + rows + " rows");
+        assertEquals(rows, readRows(writer.path()).size());
+    }
+
+    /** A row that fails part-way leaves the batch misaligned, so the writer refuses later rows and drops the batch. */
+    @Test
+    void aRowThatFailsPartWayDiscardsTheBatch() {
         StructType schema =
                 new StructType().add("id", DataTypes.LongType, false).add("s", DataTypes.StringType, true);
         VortexOutputWriter writer = writer("failed.vortex", schema, Map.of());
         BufferAllocator allocator = writer.allocator();
         writer.write(new GenericInternalRow(new Object[] {1L, UTF8String.fromString("a")}));
-        assertThrows(ClassCastException.class, () -> writer.write(new GenericInternalRow(new Object[] {2L, "a"})));
-
+        // id is appended, then s fails: a java.lang.String is not a UTF8String.
+        assertThrows(ClassCastException.class, () -> writer.write(new GenericInternalRow(new Object[] {2L, "b"})));
         assertThrows(
                 IllegalStateException.class,
                 () -> writer.write(new GenericInternalRow(new Object[] {3L, UTF8String.fromString("c")})));
         writer.close();
+
         assertEquals(0, allocator.getAllocatedMemory());
+        assertEquals(List.of(), readRows(writer.path()));
     }
 
     /** A buffer released after close stands in for a late native release: close succeeds and the memory is freed. */

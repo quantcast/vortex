@@ -54,10 +54,15 @@ import org.apache.spark.unsafe.types.UTF8String;
  * their next slot without consulting the vector. The type dispatch happens once, in {@link #create}, instead of once
  * per value.
  */
-abstract class ArrowFieldWriter {
+abstract class ArrowFieldWriter<V extends FieldVector> {
+    final V vector;
     int count;
 
-    static ArrowFieldWriter create(FieldVector vector, DataType dataType) {
+    private ArrowFieldWriter(V vector) {
+        this.vector = vector;
+    }
+
+    static ArrowFieldWriter<?> create(FieldVector vector, DataType dataType) {
         if (dataType instanceof BooleanType) {
             return new BooleanWriter((BitVector) vector);
         } else if (dataType instanceof ByteType) {
@@ -87,7 +92,7 @@ abstract class ArrowFieldWriter {
         } else if (dataType instanceof StructType structType) {
             StructVector structVector = (StructVector) vector;
             StructField[] fields = structType.fields();
-            ArrowFieldWriter[] children = new ArrowFieldWriter[fields.length];
+            ArrowFieldWriter<?>[] children = new ArrowFieldWriter<?>[fields.length];
             for (int i = 0; i < fields.length; i++) {
                 children[i] = create((FieldVector) structVector.getChildByOrdinal(i), fields[i].dataType());
             }
@@ -129,102 +134,86 @@ abstract class ArrowFieldWriter {
         count = 0;
     }
 
-    private static final class BooleanWriter extends ArrowFieldWriter {
-        private final BitVector bits;
-
+    private static final class BooleanWriter extends ArrowFieldWriter<BitVector> {
         BooleanWriter(BitVector vector) {
-            this.bits = vector;
+            super(vector);
         }
 
         @Override
         void setValue(SpecializedGetters row, int ordinal) {
-            bits.setSafe(count, row.getBoolean(ordinal) ? 1 : 0);
+            vector.setSafe(count, row.getBoolean(ordinal) ? 1 : 0);
         }
     }
 
-    private static final class ByteWriter extends ArrowFieldWriter {
-        private final TinyIntVector bytes;
-
+    private static final class ByteWriter extends ArrowFieldWriter<TinyIntVector> {
         ByteWriter(TinyIntVector vector) {
-            this.bytes = vector;
+            super(vector);
         }
 
         @Override
         void setValue(SpecializedGetters row, int ordinal) {
-            bytes.setSafe(count, row.getByte(ordinal));
+            vector.setSafe(count, row.getByte(ordinal));
         }
     }
 
-    private static final class ShortWriter extends ArrowFieldWriter {
-        private final SmallIntVector shorts;
-
+    private static final class ShortWriter extends ArrowFieldWriter<SmallIntVector> {
         ShortWriter(SmallIntVector vector) {
-            this.shorts = vector;
+            super(vector);
         }
 
         @Override
         void setValue(SpecializedGetters row, int ordinal) {
-            shorts.setSafe(count, row.getShort(ordinal));
+            vector.setSafe(count, row.getShort(ordinal));
         }
     }
 
-    private static final class IntegerWriter extends ArrowFieldWriter {
-        private final IntVector ints;
-
+    private static final class IntegerWriter extends ArrowFieldWriter<IntVector> {
         IntegerWriter(IntVector vector) {
-            this.ints = vector;
+            super(vector);
         }
 
         @Override
         void setValue(SpecializedGetters row, int ordinal) {
-            ints.setSafe(count, row.getInt(ordinal));
+            vector.setSafe(count, row.getInt(ordinal));
         }
     }
 
-    private static final class LongWriter extends ArrowFieldWriter {
-        private final BigIntVector longs;
-
+    private static final class LongWriter extends ArrowFieldWriter<BigIntVector> {
         LongWriter(BigIntVector vector) {
-            this.longs = vector;
+            super(vector);
         }
 
         @Override
         void setValue(SpecializedGetters row, int ordinal) {
-            longs.setSafe(count, row.getLong(ordinal));
+            vector.setSafe(count, row.getLong(ordinal));
         }
     }
 
-    private static final class FloatWriter extends ArrowFieldWriter {
-        private final Float4Vector floats;
-
+    private static final class FloatWriter extends ArrowFieldWriter<Float4Vector> {
         FloatWriter(Float4Vector vector) {
-            this.floats = vector;
+            super(vector);
         }
 
         @Override
         void setValue(SpecializedGetters row, int ordinal) {
-            floats.setSafe(count, row.getFloat(ordinal));
+            vector.setSafe(count, row.getFloat(ordinal));
         }
     }
 
-    private static final class DoubleWriter extends ArrowFieldWriter {
-        private final Float8Vector doubles;
-
+    private static final class DoubleWriter extends ArrowFieldWriter<Float8Vector> {
         DoubleWriter(Float8Vector vector) {
-            this.doubles = vector;
+            super(vector);
         }
 
         @Override
         void setValue(SpecializedGetters row, int ordinal) {
-            doubles.setSafe(count, row.getDouble(ordinal));
+            vector.setSafe(count, row.getDouble(ordinal));
         }
     }
 
-    private static final class StringWriter extends ArrowFieldWriter {
-        private final VarCharVector strings;
-
+    private static final class StringWriter extends ArrowFieldWriter<VarCharVector> {
         StringWriter(VarCharVector vector) {
-            this.strings = vector;
+            super(vector);
         }
 
         @Override
@@ -233,71 +222,62 @@ abstract class ArrowFieldWriter {
             int length = value.numBytes();
             // Reserve the slot first: it may reallocate the data buffer. Then copy straight from the row
             // (on- or off-heap) into the Arrow buffer, without staging the bytes in a byte[].
-            strings.setValueLengthSafe(count, length);
-            value.writeToMemory(null, strings.getDataBufferAddress() + strings.getStartOffset(count));
-            strings.setIndexDefined(count);
+            vector.setValueLengthSafe(count, length);
+            value.writeToMemory(null, vector.getDataBufferAddress() + vector.getStartOffset(count));
+            vector.setIndexDefined(count);
         }
     }
 
-    private static final class BinaryWriter extends ArrowFieldWriter {
-        private final VarBinaryVector binaries;
-
+    private static final class BinaryWriter extends ArrowFieldWriter<VarBinaryVector> {
         BinaryWriter(VarBinaryVector vector) {
-            this.binaries = vector;
+            super(vector);
         }
 
         @Override
         void setValue(SpecializedGetters row, int ordinal) {
-            binaries.setSafe(count, row.getBinary(ordinal));
+            vector.setSafe(count, row.getBinary(ordinal));
         }
     }
 
-    private static final class DateWriter extends ArrowFieldWriter {
-        private final DateDayVector days;
-
+    private static final class DateWriter extends ArrowFieldWriter<DateDayVector> {
         DateWriter(DateDayVector vector) {
-            this.days = vector;
+            super(vector);
         }
 
         @Override
         void setValue(SpecializedGetters row, int ordinal) {
-            days.setSafe(count, row.getInt(ordinal));
+            vector.setSafe(count, row.getInt(ordinal));
         }
     }
 
-    private static final class TimestampWriter extends ArrowFieldWriter {
-        private final TimeStampMicroTZVector micros;
-
+    private static final class TimestampWriter extends ArrowFieldWriter<TimeStampMicroTZVector> {
         TimestampWriter(TimeStampMicroTZVector vector) {
-            this.micros = vector;
+            super(vector);
         }
 
         @Override
         void setValue(SpecializedGetters row, int ordinal) {
-            micros.setSafe(count, row.getLong(ordinal));
+            vector.setSafe(count, row.getLong(ordinal));
         }
     }
 
-    private static final class TimestampNTZWriter extends ArrowFieldWriter {
-        private final TimeStampMicroVector micros;
-
+    private static final class TimestampNTZWriter extends ArrowFieldWriter<TimeStampMicroVector> {
         TimestampNTZWriter(TimeStampMicroVector vector) {
-            this.micros = vector;
+            super(vector);
         }
 
         @Override
         void setValue(SpecializedGetters row, int ordinal) {
-            micros.setSafe(count, row.getLong(ordinal));
+            vector.setSafe(count, row.getLong(ordinal));
         }
     }
 
-    private static final class DecimalWriter extends ArrowFieldWriter {
-        private final DecimalVector decimals;
+    private static final class DecimalWriter extends ArrowFieldWriter<DecimalVector> {
         private final int precision;
         private final int scale;
 
         DecimalWriter(DecimalVector vector, int precision, int scale) {
-            this.decimals = vector;
+            super(vector);
             this.precision = precision;
             this.scale = scale;
         }
@@ -306,26 +286,25 @@ abstract class ArrowFieldWriter {
         void setValue(SpecializedGetters row, int ordinal) {
             Decimal value = row.getDecimal(ordinal, precision, scale);
             if (precision <= Decimal.MAX_LONG_DIGITS()) {
-                decimals.setSafe(count, value.toUnscaledLong());
+                vector.setSafe(count, value.toUnscaledLong());
             } else {
-                decimals.setSafe(count, value.toJavaBigDecimal());
+                vector.setSafe(count, value.toJavaBigDecimal());
             }
         }
     }
 
-    private static final class StructWriter extends ArrowFieldWriter {
-        private final StructVector struct;
-        private final ArrowFieldWriter[] children;
+    private static final class StructWriter extends ArrowFieldWriter<StructVector> {
+        private final ArrowFieldWriter<?>[] children;
 
-        StructWriter(StructVector vector, ArrowFieldWriter[] children) {
-            this.struct = vector;
+        StructWriter(StructVector vector, ArrowFieldWriter<?>[] children) {
+            super(vector);
             this.children = children;
         }
 
         @Override
         void setValue(SpecializedGetters row, int ordinal) {
             InternalRow value = row.getStruct(ordinal, children.length);
-            struct.setIndexDefined(count);
+            vector.setIndexDefined(count);
             for (int i = 0; i < children.length; i++) {
                 // Children skip the slots of null structs, so catch them up to this one.
                 children[i].count = count;
@@ -336,18 +315,17 @@ abstract class ArrowFieldWriter {
         @Override
         void reset() {
             super.reset();
-            for (ArrowFieldWriter child : children) {
+            for (ArrowFieldWriter<?> child : children) {
                 child.reset();
             }
         }
     }
 
-    private static final class ArrayWriter extends ArrowFieldWriter {
-        private final ListVector list;
-        private final ArrowFieldWriter elements;
+    private static final class ArrayWriter extends ArrowFieldWriter<ListVector> {
+        private final ArrowFieldWriter<?> elements;
 
-        ArrayWriter(ListVector vector, ArrowFieldWriter elements) {
-            this.list = vector;
+        ArrayWriter(ListVector vector, ArrowFieldWriter<?> elements) {
+            super(vector);
             this.elements = elements;
         }
 
@@ -355,11 +333,11 @@ abstract class ArrowFieldWriter {
         void setValue(SpecializedGetters row, int ordinal) {
             ArrayData value = row.getArray(ordinal);
             int length = value.numElements();
-            list.startNewValue(count);
+            vector.startNewValue(count);
             for (int i = 0; i < length; i++) {
                 elements.write(value, i);
             }
-            list.endValue(count, length);
+            vector.endValue(count, length);
         }
 
         @Override
@@ -369,14 +347,13 @@ abstract class ArrowFieldWriter {
         }
     }
 
-    private static final class MapWriter extends ArrowFieldWriter {
-        private final MapVector map;
+    private static final class MapWriter extends ArrowFieldWriter<MapVector> {
         private final StructVector entries;
-        private final ArrowFieldWriter keys;
-        private final ArrowFieldWriter values;
+        private final ArrowFieldWriter<?> keys;
+        private final ArrowFieldWriter<?> values;
 
-        MapWriter(MapVector vector, StructVector entries, ArrowFieldWriter keys, ArrowFieldWriter values) {
-            this.map = vector;
+        MapWriter(MapVector vector, StructVector entries, ArrowFieldWriter<?> keys, ArrowFieldWriter<?> values) {
+            super(vector);
             this.entries = entries;
             this.keys = keys;
             this.values = values;
@@ -388,13 +365,13 @@ abstract class ArrowFieldWriter {
             ArrayData keyArray = value.keyArray();
             ArrayData valueArray = value.valueArray();
             int length = value.numElements();
-            map.startNewValue(count);
+            vector.startNewValue(count);
             for (int i = 0; i < length; i++) {
                 entries.setIndexDefined(keys.count);
                 keys.write(keyArray, i);
                 values.write(valueArray, i);
             }
-            map.endValue(count, length);
+            vector.endValue(count, length);
         }
 
         @Override

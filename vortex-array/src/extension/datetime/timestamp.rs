@@ -25,7 +25,9 @@ use crate::dtype::extension::ExtVTable;
 use crate::extension::datetime::TimeUnit;
 use crate::scalar::ScalarValue;
 
-/// Timestamp DType.
+/// A timestamp stored as an `i64` count of seconds, milliseconds, microseconds, or nanoseconds.
+///
+/// Every storage value is valid. Formatting falls back to the raw count when jiff cannot format it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Timestamp;
 
@@ -134,7 +136,8 @@ impl fmt::Display for TimestampValue<'_> {
             TimestampValue::Microseconds(v, tz) => (TimeUnit::Microseconds, v, tz),
             TimestampValue::Nanoseconds(v, tz) => (TimeUnit::Nanoseconds, v, tz),
         };
-        // jiff cannot render the last 26 hours of year 9999, so show the raw count.
+
+        // jiff cannot format every storage value, including the last 26 hours of year 9999.
         let Ok(ts) = unit
             .to_jiff_span(value)
             .and_then(|span| Ok(jiff::Timestamp::UNIX_EPOCH.checked_add(span)?))
@@ -248,7 +251,6 @@ impl ExtVTable for Timestamp {
         let ts_value = storage_value.as_primitive().cast::<i64>()?;
         let tz = metadata.tz.as_ref();
 
-        // Any i64 count is valid, as in Arrow; jiff's range only limits Display.
         Ok(match metadata.unit {
             TimeUnit::Nanoseconds => TimestampValue::Nanoseconds(ts_value, tz),
             TimeUnit::Microseconds => TimestampValue::Microseconds(ts_value, tz),
@@ -291,19 +293,16 @@ mod tests {
     )]
     #[case::start_of_neg_9999(TimeUnit::Seconds, -377_705_116_800, "-377705116800s")]
     #[case::max(TimeUnit::Microseconds, i64::MAX, "9223372036854775807µs")]
-    #[case::max_seconds(TimeUnit::Seconds, i64::MAX, "9223372036854775807s")]
-    #[case::max_milliseconds(TimeUnit::Milliseconds, i64::MAX, "9223372036854775807ms")]
-    #[case::min_nanoseconds(TimeUnit::Nanoseconds, i64::MIN, "-9223372036854775808ns")]
-    fn accept_timestamp_beyond_jiff_range(
+    fn test_accept_timestamp_beyond_jiff_range(
         #[case] unit: TimeUnit,
         #[case] value: i64,
         #[case] expected: &str,
+        #[values(None, Some(Arc::from("UTC")))] timezone: Option<Arc<str>>,
     ) -> VortexResult<()> {
-        for tz in [None, Some(Arc::from("UTC"))] {
-            let dtype = DType::Extension(Timestamp::new_with_tz(unit, tz, Nullable).erased());
-            let scalar = Scalar::try_new(dtype, Some(ScalarValue::Primitive(PValue::I64(value))))?;
-            assert_eq!(format!("{}", scalar.as_extension()), expected);
-        }
+        let dtype = DType::Extension(Timestamp::new_with_tz(unit, timezone, Nullable).erased());
+        let scalar = Scalar::try_new(dtype, Some(ScalarValue::from(value)))?;
+        assert_eq!(scalar.as_extension().to_string(), expected);
+
         Ok(())
     }
 
@@ -339,6 +338,21 @@ mod tests {
     #[test]
     fn test_reject_timestamp_days() {
         assert!(Timestamp::try_new_with_tz(TimeUnit::Days, None, Nullable).is_err());
+    }
+
+    #[rstest]
+    #[case::seconds(TimeUnit::Seconds, i64::MAX)]
+    #[case::milliseconds(TimeUnit::Milliseconds, i64::MAX)]
+    #[case::microseconds(TimeUnit::Microseconds, i64::MAX)]
+    #[case::nanoseconds(TimeUnit::Nanoseconds, i64::MIN)]
+    fn test_accept_timestamp_storage_extremes(
+        #[case] unit: TimeUnit,
+        #[case] value: i64,
+    ) -> VortexResult<()> {
+        let dtype = DType::Extension(Timestamp::new(unit, Nullable).erased());
+        Scalar::try_new(dtype, Some(ScalarValue::from(value)))?;
+
+        Ok(())
     }
 
     #[cfg_attr(miri, ignore)]
