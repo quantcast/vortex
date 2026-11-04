@@ -30,6 +30,8 @@ use vortex::array::arrays::ListArray;
 use vortex::array::arrays::PrimitiveArray;
 use vortex::array::arrays::StructArray;
 use vortex::array::arrays::VarBinViewArray;
+use vortex::array::dtype::DType;
+use vortex::array::stream::ArrayStreamAdapter;
 use vortex::array::stream::ArrayStreamExt;
 use vortex::array::validity::Validity;
 use vortex::buffer::Buffer;
@@ -88,6 +90,13 @@ enum Case {
     InStruct,
     /// Lists that are all empty.
     AllEmpty,
+    /// A wide event schema's shape: a nullable struct holding nullable lists of nullable structs, which hold a nullable
+    /// struct, a list of strings and lists nested four deep.
+    EventShape,
+    /// Nullable lists of nullable structs.
+    NullableStructElements,
+    /// Nullable lists written as chunks with empty chunks before, between and after them.
+    ZeroRowChunks,
 }
 
 impl Case {
@@ -100,6 +109,9 @@ impl Case {
             Case::Nested => "nested",
             Case::InStruct => "in_struct",
             Case::AllEmpty => "all_empty",
+            Case::EventShape => "event_shape",
+            Case::NullableStructElements => "nullable_struct_elements",
+            Case::ZeroRowChunks => "zero_row_chunks",
         }
     }
 
@@ -196,6 +208,34 @@ impl Case {
                 )?;
                 StructArray::from_fields(&[("l", l)])?.into_array()
             }
+            Case::EventShape => event_shape(session, rows)?,
+            Case::NullableStructElements => {
+                let offsets = offsets(rows, |row| (row * 5 + 2) % 5);
+                let n = usize::try_from(last(&offsets))?;
+                let elements = StructArray::try_new(
+                    ["a", "b"].into(),
+                    [
+                        PrimitiveArray::from_option_iter(
+                            (0..n).map(|i| (i % 4 != 0).then_some(i as i64)),
+                        )
+                        .into_array(),
+                        VarBinViewArray::from_iter_nullable_str(
+                            (0..n).map(|i| (i % 6 != 0).then(|| format!("b{i}"))),
+                        )
+                        .into_array(),
+                    ],
+                    n,
+                    Validity::from_iter((0..n).map(|i| i % 9 != 0)),
+                )?;
+                let validity = Validity::from_iter((0..rows).map(|row| row % 7 != 0));
+                list(session, elements.into_array(), offsets, validity)?
+            }
+            Case::ZeroRowChunks => {
+                let offsets = offsets(rows, |row| (row * 3 + 1) % 4);
+                let elements = Buffer::from_iter((0..last(&offsets)).map(|i| i64::from(i) * 7));
+                let validity = Validity::from_iter((0..rows).map(|row| row % 10 != 0));
+                list(session, elements.into_array(), offsets, validity)?
+            }
             Case::AllEmpty => list(
                 session,
                 Buffer::<i64>::empty().into_array(),
@@ -203,13 +243,176 @@ impl Case {
                 Validity::NonNullable,
             )?,
         };
-        let name = if matches!(self, Case::InStruct) {
-            "s"
-        } else {
-            "l"
+        let name = match self {
+            Case::InStruct => "s",
+            Case::EventShape => "r",
+            _ => "l",
         };
         Ok(StructArray::from_fields(&[("id", id), (name, lists)])?.into_array())
     }
+}
+
+/// Nullable structs of `fields`, each struct valid unless `null(row)`.
+fn nullable_struct(
+    fields: &[(&str, ArrayRef)],
+    len: usize,
+    null: impl Fn(usize) -> bool,
+) -> VortexResult<ArrayRef> {
+    Ok(StructArray::try_new(
+        fields.iter().map(|(n, _)| *n).collect::<Vec<_>>().into(),
+        fields.iter().map(|(_, a)| a.clone()),
+        len,
+        Validity::from_iter((0..len).map(|row| !null(row))),
+    )?
+    .into_array())
+}
+
+fn nullable_i64(len: usize, f: impl Fn(usize) -> Option<i64>) -> ArrayRef {
+    PrimitiveArray::from_option_iter((0..len).map(f)).into_array()
+}
+
+/// A sibling string field, so a leaf's siblings are real columns. Values repeat, to keep the file small.
+fn wide_strings(len: usize, tag: &str) -> ArrayRef {
+    VarBinViewArray::from_iter_nullable_str(
+        (0..len).map(|i| (i % 5 != 0).then(|| format!("{tag}{}", i % 50))),
+    )
+    .into_array()
+}
+
+/// A nullable list over `elements`, each of `rows` lists holding `len(row)` and null when `null(row)`.
+fn nullable_list(
+    session: &VortexSession,
+    rows: usize,
+    elements: impl FnOnce(usize) -> VortexResult<ArrayRef>,
+    len: impl Fn(usize) -> usize,
+    null: impl Fn(usize) -> bool,
+) -> VortexResult<ArrayRef> {
+    let offsets = offsets(rows, |row| if null(row) { 0 } else { len(row) });
+    let n = usize::try_from(last(&offsets))?;
+    list(
+        session,
+        elements(n)?,
+        offsets,
+        Validity::from_iter((0..rows).map(|row| !null(row))),
+    )
+}
+
+/// [`Case::EventShape`]'s `r`: `{q: {imp: [{id, w, banner: {w, h, b, format: [{w, h, f}]}, tags: [utf8],
+/// seats: [{name, s, deals: [{price, d, segs: [{v, g}]}]}]}]}}`, nullable at every level.
+fn event_shape(session: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+    let imp = nullable_list(
+        session,
+        rows,
+        |n| {
+            let format = nullable_list(
+                session,
+                n,
+                |m| {
+                    nullable_struct(
+                        &[
+                            ("w", nullable_i64(m, |i| Some(i as i64 * 3))),
+                            ("h", nullable_i64(m, |i| (i % 4 != 0).then_some(i as i64))),
+                            ("f", wide_strings(m, "f")),
+                        ],
+                        m,
+                        |i| i % 8 == 0,
+                    )
+                },
+                |i| i % 3,
+                |i| i % 5 == 0,
+            )?;
+            let banner = nullable_struct(
+                &[
+                    ("w", nullable_i64(n, |i| Some(i as i64 * 2))),
+                    ("h", nullable_i64(n, |i| (i % 3 != 0).then_some(i as i64))),
+                    ("b", wide_strings(n, "b")),
+                    ("format", format),
+                ],
+                n,
+                |i| i % 6 == 0,
+            )?;
+            let tags = nullable_list(
+                session,
+                n,
+                |m| {
+                    Ok(VarBinViewArray::from_iter_nullable_str(
+                        (0..m).map(|i| (i % 7 != 0).then(|| format!("t{}", i % 13))),
+                    )
+                    .into_array())
+                },
+                |i| i % 4,
+                |i| i % 9 == 0,
+            )?;
+            let seats = nullable_list(
+                session,
+                n,
+                |m| {
+                    let deals = nullable_list(
+                        session,
+                        m,
+                        |k| {
+                            let segs = nullable_list(
+                                session,
+                                k,
+                                |j| {
+                                    nullable_struct(
+                                        &[
+                                            ("v", nullable_i64(j, |i| Some(i as i64))),
+                                            ("g", wide_strings(j, "g")),
+                                        ],
+                                        j,
+                                        |i| i % 10 == 0,
+                                    )
+                                },
+                                |i| i % 3,
+                                |i| i % 6 == 0,
+                            )?;
+                            nullable_struct(
+                                &[
+                                    (
+                                        "price",
+                                        nullable_i64(k, |i| (i % 5 != 0).then_some(i as i64 * 11)),
+                                    ),
+                                    ("d", wide_strings(k, "d")),
+                                    ("segs", segs),
+                                ],
+                                k,
+                                |i| i % 7 == 0,
+                            )
+                        },
+                        |i| i % 3,
+                        |i| i % 4 == 0,
+                    )?;
+                    nullable_struct(
+                        &[
+                            ("name", wide_strings(m, "seat")),
+                            ("s", wide_strings(m, "s")),
+                            ("deals", deals),
+                        ],
+                        m,
+                        |i| i % 8 == 0,
+                    )
+                },
+                |i| i % 4,
+                |i| i % 8 == 0,
+            )?;
+            nullable_struct(
+                &[
+                    ("id", nullable_i64(n, |i| Some(i as i64 * 10))),
+                    ("w", wide_strings(n, "w")),
+                    ("banner", banner),
+                    ("tags", tags),
+                    ("seats", seats),
+                ],
+                n,
+                |i| i % 7 == 0,
+            )
+        },
+        |row| row % 5,
+        |row| row % 11 == 0,
+    )?;
+    let q = nullable_struct(&[("imp", imp)], rows, |row| row % 13 == 0)?;
+    nullable_struct(&[("q", q)], rows, |row| row % 17 == 0)
 }
 
 /// Offsets of `rows` lists, the list of row `row` holding `len(row)` elements.
@@ -244,14 +447,37 @@ fn list(
 
 /// Writes `array` as a `vortex.listLayout` write does.
 fn write(array: ArrayRef) -> VortexResult<ByteBuffer> {
+    write_chunks(array.dtype().clone(), vec![array])
+}
+
+/// Writes `chunks` as one stream, as a `vortex.listLayout` write of several batches does.
+fn write_chunks(dtype: DType, chunks: Vec<ArrayRef>) -> VortexResult<ByteBuffer> {
     let session = write_session(&new_session(), true)?;
     let mut bytes = ByteBufferMut::empty();
-    RUNTIME.block_on(
-        session
-            .write_options()
-            .write(&mut bytes, array.to_array_stream()),
-    )?;
+    let stream = ArrayStreamAdapter::new(dtype, futures::stream::iter(chunks.into_iter().map(Ok)));
+    RUNTIME.block_on(session.write_options().write(&mut bytes, stream))?;
     Ok(bytes.freeze())
+}
+
+/// Writes `case` the way its golden file was written: in one stream, and for [`Case::ZeroRowChunks`] as several
+/// populated chunks with empty ones before, between and after them.
+fn write_case(session: &VortexSession, case: Case) -> VortexResult<ByteBuffer> {
+    let array = case.array(session)?;
+    if !matches!(case, Case::ZeroRowChunks) {
+        return write(array);
+    }
+    let empty = || array.slice(0..0);
+    let chunks = vec![
+        empty()?,
+        array.slice(0..7_000)?,
+        empty()?,
+        empty()?,
+        array.slice(7_000..15_000)?,
+        empty()?,
+        array.slice(15_000..ROWS)?,
+        empty()?,
+    ];
+    write_chunks(array.dtype().clone(), chunks)
 }
 
 /// Opens `bytes` as the JNI reader does.
@@ -336,7 +562,7 @@ fn filtered(
     array.filter(Mask::from_iter(keep.into_bit_buffer().iter()))
 }
 
-const CASES: [Case; 7] = [
+const CASES: [Case; 10] = [
     Case::Primitive,
     Case::Nullable,
     Case::Utf8,
@@ -344,6 +570,9 @@ const CASES: [Case; 7] = [
     Case::Nested,
     Case::InStruct,
     Case::AllEmpty,
+    Case::EventShape,
+    Case::NullableStructElements,
+    Case::ZeroRowChunks,
 ];
 
 #[template]
@@ -355,6 +584,9 @@ const CASES: [Case; 7] = [
 #[case::nested(Case::Nested)]
 #[case::in_struct(Case::InStruct)]
 #[case::all_empty(Case::AllEmpty)]
+#[case::event_shape(Case::EventShape)]
+#[case::nullable_struct_elements(Case::NullableStructElements)]
+#[case::zero_row_chunks(Case::ZeroRowChunks)]
 fn cases(#[case] case: Case) {}
 
 #[apply(cases)]
@@ -373,7 +605,7 @@ fn golden_file_has_list_layouts(#[case] case: Case) -> VortexResult<()> {
 fn writer_writes_the_golden_list_layouts(#[case] case: Case) -> VortexResult<()> {
     let session = new_session();
     let golden = list_layouts(golden(&session, case)?.footer().layout())?;
-    let written = open(&session, write(case.array(&session)?)?)?;
+    let written = open(&session, write_case(&session, case)?)?;
     assert_eq!(
         list_layouts(written.footer().layout())?,
         golden,
@@ -441,6 +673,28 @@ fn golden_file_reads_row_indices(#[case] case: Case) -> VortexResult<()> {
 #[case::element_field(Case::StructElements, list_transform(col("l"), element("a")))]
 #[case::nullable_element_field(Case::StructElements, list_transform(col("l"), element("b")))]
 #[case::utf8_elements(Case::Utf8, col("l"))]
+#[case::nullable_struct_element_field(
+    Case::NullableStructElements,
+    list_transform(col("l"), element("b"))
+)]
+#[case::zero_row_chunks(Case::ZeroRowChunks, col("l"))]
+#[case::event_leaf_one_list(Case::EventShape, list_transform(imp(), element("id")))]
+#[case::event_leaf_below_a_struct(Case::EventShape, list_transform(imp(), path(&["banner", "w"])))]
+#[case::event_strings_in_a_list(Case::EventShape, list_transform(imp(), element("tags")))]
+#[case::event_leaf_two_lists(
+    Case::EventShape,
+    list_transform(
+        imp(),
+        lambda(
+            "x",
+            list_transform(get_item("format", get_item("banner", var("x"))), element("w"))
+        )
+    )
+)]
+#[case::event_leaf_four_lists(
+    Case::EventShape,
+    list_transform(imp(), lambda("x", seats_deals_segs_v(var("x"))))
+)]
 fn golden_file_reads_projections(
     #[case] case: Case,
     #[case] projection: Expression,
@@ -470,6 +724,30 @@ fn golden_file_reads_filters(#[case] case: Case, #[case] filter: Expression) -> 
     Ok(())
 }
 
+/// `r.q.imp` of [`Case::EventShape`].
+fn imp() -> Expression {
+    get_item("imp", get_item("q", col("r")))
+}
+
+/// `x -> x.<a>.<b>...`, for `list_transform`.
+fn path(fields: &[&str]) -> Lambda {
+    let body = fields.iter().fold(var("x"), |e, f| get_item(*f, e));
+    Lambda::new(["x"], body).vortex_expect("lambda binds one parameter")
+}
+
+/// `<name> -> body`, for `list_transform`.
+fn lambda(name: &str, body: Expression) -> Lambda {
+    Lambda::new([name], body).vortex_expect("lambda binds one parameter")
+}
+
+/// `imp.seats[].deals[].segs[].v` below one `imp` element: three more lists, four in all.
+fn seats_deals_segs_v(imp: Expression) -> Expression {
+    let segs = |deal: Expression| list_transform(get_item("segs", deal), element("v"));
+    let deals =
+        |seat: Expression| list_transform(get_item("deals", seat), lambda("d", segs(var("d"))));
+    list_transform(get_item("seats", imp), lambda("s", deals(var("s"))))
+}
+
 /// `x -> x.<field>`, for `list_transform`.
 fn element(field: &str) -> Lambda {
     Lambda::new(["x"], get_item(field, var("x"))).vortex_expect("lambda binds one parameter")
@@ -487,7 +765,7 @@ fn write_missing_golden_files() -> VortexResult<()> {
             continue;
         }
         fs::create_dir_all(path.parent().vortex_expect("golden files have a directory"))?;
-        fs::write(&path, write(case.array(&session)?)?.as_slice())?;
+        fs::write(&path, write_case(&session, case)?.as_slice())?;
     }
     Ok(())
 }
