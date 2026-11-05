@@ -9,6 +9,7 @@ import java.io.Serializable;
 import java.util.Locale;
 import java.util.Objects;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.spark.SerializableWritable;
 import org.apache.spark.SparkContext;
 import org.apache.spark.broadcast.Broadcast;
 import scala.reflect.ClassTag;
@@ -48,8 +49,14 @@ public final class VortexIo implements Serializable {
     /** The configuration this instance carries itself, or null when it reads {@link #broadcastConf}. */
     private final SerializableHadoopConf conf;
 
-    /** The configuration broadcast to every executor once, or null when this instance carries {@link #conf}. */
-    private final Broadcast<SerializableHadoopConf> broadcastConf;
+    /**
+     * The configuration broadcast to every executor once, or null when this instance carries {@link #conf}.
+     *
+     * <p>A broadcast value goes through {@code spark.serializer}, not Java serialization. Kryo skips
+     * {@link SerializableHadoopConf}'s transient field and would hand executors a null configuration; Spark's Kryo
+     * setup serializes {@link SerializableWritable} with Java serialization, so it arrives intact under either.
+     */
+    private final Broadcast<SerializableWritable<Configuration>> broadcastConf;
 
     private final int readConcurrency;
     private final int splitConcurrency;
@@ -72,10 +79,9 @@ public final class VortexIo implements Serializable {
     public static VortexIo broadcast(VortexOptions options, Configuration hadoopConf, SparkContext context) {
         Objects.requireNonNull(options, "options");
         Objects.requireNonNull(hadoopConf, "hadoopConf");
-        ClassTag<SerializableHadoopConf> tag = ClassTag$.MODULE$.apply(SerializableHadoopConf.class);
         return new VortexIo(
                 null,
-                context.broadcast(new SerializableHadoopConf(hadoopConf), tag),
+                context.broadcast(broadcastValue(hadoopConf), BROADCAST_TAG),
                 nonNegative(options, READ_CONCURRENCY_OPTION, DEFAULT_READ_CONCURRENCY),
                 nonNegative(options, SPLIT_CONCURRENCY_OPTION, DEFAULT_SPLIT_CONCURRENCY));
     }
@@ -86,9 +92,18 @@ public final class VortexIo implements Serializable {
                 new SerializableHadoopConf(new Configuration()), null, DEFAULT_READ_CONCURRENCY, DEFAULT_SPLIT_CONCURRENCY);
     }
 
+    @SuppressWarnings("unchecked")
+    private static final ClassTag<SerializableWritable<Configuration>> BROADCAST_TAG =
+            (ClassTag<SerializableWritable<Configuration>>) (ClassTag<?>) ClassTag$.MODULE$.apply(SerializableWritable.class);
+
+    /** What {@link #broadcast} sends to executors for {@code hadoopConf}. */
+    static SerializableWritable<Configuration> broadcastValue(Configuration hadoopConf) {
+        return new SerializableWritable<>(hadoopConf);
+    }
+
     private VortexIo(
             SerializableHadoopConf conf,
-            Broadcast<SerializableHadoopConf> broadcastConf,
+            Broadcast<SerializableWritable<Configuration>> broadcastConf,
             int readConcurrency,
             int splitConcurrency) {
         this.conf = conf;

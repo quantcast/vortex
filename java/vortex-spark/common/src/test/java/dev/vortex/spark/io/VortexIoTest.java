@@ -14,7 +14,16 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.util.Map;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.spark.SerializableWritable;
+import org.apache.spark.SparkConf;
+import org.apache.spark.serializer.JavaSerializer;
+import org.apache.spark.serializer.KryoSerializer;
+import org.apache.spark.serializer.SerializerInstance;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import scala.reflect.ClassTag;
+import scala.reflect.ClassTag$;
 
 final class VortexIoTest {
     @Test
@@ -87,6 +96,25 @@ final class VortexIoTest {
 
     private static VortexOptions options(String key, String value) {
         return VortexOptions.of(Map.of(key, value));
+    }
+
+    /**
+     * A broadcast reaches remote executors through {@code spark.serializer}. Local mode hands tasks the driver's object
+     * without serializing it, so only a round trip through each serializer shows what an executor gets.
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void broadcastConfigurationSurvivesEachSparkSerializer(boolean kryo) {
+        Configuration conf = new Configuration(false);
+        conf.set("fs.s3a.endpoint", "https://storage.example");
+        SerializerInstance serializer = (kryo ? new KryoSerializer(new SparkConf()) : new JavaSerializer(new SparkConf()))
+                .newInstance();
+        ClassTag<Object> tag = ClassTag$.MODULE$.apply(Object.class);
+
+        SerializableWritable<?> shipped = (SerializableWritable<?>)
+                serializer.deserialize(serializer.serialize(VortexIo.broadcastValue(conf), tag), tag);
+
+        assertEquals("https://storage.example", ((Configuration) shipped.value()).get("fs.s3a.endpoint"));
     }
 
     private static VortexIo roundTrip(VortexIo io) throws IOException, ClassNotFoundException {
