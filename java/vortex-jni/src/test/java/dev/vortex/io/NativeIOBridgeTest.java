@@ -156,8 +156,13 @@ public final class NativeIOBridgeTest {
 
                 try (ArrowArray arrowArray = ArrowArray.allocateNew(allocator);
                         ArrowSchema arrowSchemaFfi = ArrowSchema.allocateNew(allocator)) {
-                    Data.exportVectorSchemaRoot(allocator, root, null, arrowArray, arrowSchemaFfi);
-                    writer.writeBatch(arrowArray.memoryAddress(), arrowSchemaFfi.memoryAddress());
+                    try {
+                        Data.exportVectorSchemaRoot(allocator, root, null, arrowArray, arrowSchemaFfi);
+                        writer.writeBatch(arrowArray.memoryAddress(), arrowSchemaFfi.memoryAddress());
+                    } finally {
+                        arrowArray.release();
+                        arrowSchemaFfi.release();
+                    }
                 }
 
                 // The byte counter must be live for stream writers too: bounded while
@@ -230,8 +235,13 @@ public final class NativeIOBridgeTest {
                 root.setRowCount(1);
                 try (ArrowArray arrowArray = ArrowArray.allocateNew(allocator);
                         ArrowSchema arrowSchemaFfi = ArrowSchema.allocateNew(allocator)) {
-                    Data.exportVectorSchemaRoot(allocator, root, null, arrowArray, arrowSchemaFfi);
-                    writer.writeBatch(arrowArray.memoryAddress(), arrowSchemaFfi.memoryAddress());
+                    try {
+                        Data.exportVectorSchemaRoot(allocator, root, null, arrowArray, arrowSchemaFfi);
+                        writer.writeBatch(arrowArray.memoryAddress(), arrowSchemaFfi.memoryAddress());
+                    } finally {
+                        arrowArray.release();
+                        arrowSchemaFfi.release();
+                    }
                 }
             }
         }
@@ -349,8 +359,13 @@ public final class NativeIOBridgeTest {
                     root.setRowCount(rowsPerBatch);
                     try (ArrowArray arrowArray = ArrowArray.allocateNew(allocator);
                             ArrowSchema arrowSchemaFfi = ArrowSchema.allocateNew(allocator)) {
-                        Data.exportVectorSchemaRoot(allocator, root, null, arrowArray, arrowSchemaFfi);
-                        writer.writeBatch(arrowArray.memoryAddress(), arrowSchemaFfi.memoryAddress());
+                        try {
+                            Data.exportVectorSchemaRoot(allocator, root, null, arrowArray, arrowSchemaFfi);
+                            writer.writeBatch(arrowArray.memoryAddress(), arrowSchemaFfi.memoryAddress());
+                        } finally {
+                            arrowArray.release();
+                            arrowSchemaFfi.release();
+                        }
                     }
                 }
             }

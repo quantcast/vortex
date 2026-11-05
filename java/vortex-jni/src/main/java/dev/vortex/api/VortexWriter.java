@@ -232,6 +232,12 @@ public final class VortexWriter implements AutoCloseable {
     /**
      * Write a batch directly from Arrow C Data Interface addresses. These buffers share the producer's batch release
      * callback; use {@link #writeBatch(VectorSchemaRoot, BufferAllocator)} for independently retained Java allocations.
+     *
+     * <p>Native import transfers ownership of the array, clearing its release callback, but only borrows the schema
+     * until this method returns. The schema may be reused across batches. The caller must invoke
+     * {@link ArrowSchema#release()} before closing a schema it exported: {@code close()} alone frees only the outer
+     * struct. In a {@code finally} block, also invoke {@link ArrowArray#release()} before closing the array struct to
+     * cover failures before import; release is a no-op after ownership has transferred.
      */
     public synchronized void writeBatch(long arrowArrayAddr, long arrowSchemaAddr) throws IOException {
         Preconditions.checkState(!closed.get(), "writer already closed");
