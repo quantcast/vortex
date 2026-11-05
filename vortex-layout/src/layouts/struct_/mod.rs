@@ -35,6 +35,9 @@ use crate::LayoutReaderRef;
 use crate::LayoutRef;
 use crate::VTable;
 use crate::children::OwnedLayoutChildren;
+use crate::plan::physical::PackPlan;
+use crate::plan::physical::PlanRef;
+use crate::plan::physical::PlanSlots;
 use crate::segments::SegmentSource;
 
 /// Struct layout vtable.
@@ -124,6 +127,21 @@ impl VTable for Struct {
             session.session(),
             ctx.clone(),
         )?))
+    }
+
+    fn new_plan(layout: &Layout<Self>) -> VortexResult<PlanRef> {
+        // SAFETY: Struct layout construction validates child count and row counts. Its slots are
+        // validity then one per field, which are the Pack slots, and its logical slot schema
+        // defines every field dtype plus the optional non-nullable boolean validity dtype.
+        let plan = unsafe {
+            PackPlan::from_slots_unchecked(
+                layout.struct_fields().clone(),
+                layout.dtype().nullability(),
+                layout.row_count(),
+                PlanSlots::from_layout(&layout.to_layout()),
+            )
+        };
+        Ok(plan.into_plan())
     }
 }
 
