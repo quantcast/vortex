@@ -16,6 +16,8 @@ use jni::objects::JObjectArray;
 use jni::objects::JString;
 use jni::sys::jlong;
 use jni::sys::jobject;
+use object_store::path::Path;
+use url::Url;
 use vortex::buffer::ByteBuffer;
 use vortex::error::VortexResult;
 use vortex::error::vortex_err;
@@ -297,6 +299,29 @@ pub extern "system" fn Java_dev_vortex_jni_NativeFiles_readStatisticsFromReadabl
     })
 }
 
+/// Recover the store's URL mount without decoding its namespace (for example an HF revision).
+fn listing_base_url(url: &Url, prefix: &str) -> VortexResult<Url> {
+    let segments: Vec<_> = url.path().split('/').filter(|s| !s.is_empty()).collect();
+    let depth = (0..=segments.len())
+        .find(|&depth| {
+            Path::from_url_path(segments[depth..].join("/"))
+                .is_ok_and(|path| path.as_ref() == prefix)
+        })
+        .ok_or_else(|| vortex_err!("Resolved listing prefix does not match its URL path"))?;
+    let mut base = url.clone();
+    base.set_path(&format!("/{}", segments[..depth].join("/")));
+    Ok(base)
+}
+
+fn listed_file_url(base: &Url, key: &str) -> VortexResult<Url> {
+    let mut url = base.clone();
+    url.path_segments_mut()
+        .map_err(|_| vortex_err!("Listing URL cannot contain path segments"))?
+        .pop_if_empty()
+        .extend(key.split('/'));
+    Ok(url)
+}
+
 /// List Vortex files under the given URI prefix. Returns a `java.util.ArrayList<String>`.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_vortex_jni_NativeFiles_listFiles(
@@ -314,15 +339,14 @@ pub extern "system" fn Java_dev_vortex_jni_NativeFiles_listFiles(
         let properties = extract_properties(env, &options)?;
 
         let (fs, prefix) = object_store_fs(&url, &properties, session.handle())?;
+        let base = listing_base_url(&url, &prefix)?;
 
         let mut stream = fs.list(&prefix);
 
         let paths_vec = RUNTIME.block_on(async move {
             let mut paths = Vec::new();
             while let Some(file) = stream.next().await {
-                let mut found = url.clone();
-                found.set_path(&file?.path);
-                paths.push(found.to_string());
+                paths.push(listed_file_url(&base, &file?.path)?.to_string());
             }
 
             VortexResult::Ok(paths)
@@ -338,6 +362,7 @@ pub extern "system" fn Java_dev_vortex_jni_NativeFiles_listFiles(
         for path in paths_vec.into_iter() {
             let path_string = env.new_string(path)?;
             paths_list.add(env, path_string.as_ref())?;
+            env.delete_local_ref(path_string);
         }
 
         Ok(raw)
@@ -362,26 +387,116 @@ pub extern "system" fn Java_dev_vortex_jni_NativeFiles_delete(
             let uri = uris.get_element(env, idx)?;
             let uri_str = env.cast_local::<JString>(uri)?;
             delete_uris.push(uri_str.try_to_string(env)?);
+            env.delete_local_ref(uri_str);
         }
 
         if delete_uris.is_empty() {
             return Ok(());
         }
 
-        let store_url = parse_uri_or_path(&delete_uris[0])?;
-
         let properties = extract_properties(env, &options)?;
-
-        let (fs, _path) = object_store_fs(&store_url, &properties, session.handle())?;
+        let targets = delete_uris
+            .iter()
+            .map(|uri| object_store_fs(&parse_uri_or_path(uri)?, &properties, session.handle()))
+            .collect::<VortexResult<Vec<_>>>()?;
 
         RUNTIME.block_on(async {
-            for uri in delete_uris {
-                let url = parse_uri_or_path(&uri)?;
-                fs.delete(url.path()).await?;
+            for (fs, path) in targets {
+                fs.delete(&path).await?;
             }
             VortexResult::Ok(())
         })?;
 
         Ok(())
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use object_store::registry::ObjectStoreRegistry;
+    use rstest::rstest;
+    use vortex::error::VortexResult;
+    use vortex::file::multi::parse_uri_or_path;
+    use vortex_cloud::Registry;
+
+    use super::listed_file_url;
+    use super::listing_base_url;
+
+    #[rstest]
+    #[case::file(
+        "file:///tmp/with%20space",
+        "tmp/with space",
+        "tmp/with space/literal%20name.vortex",
+        "file:///tmp/with%20space/literal%2520name.vortex"
+    )]
+    #[case::s3(
+        "s3://bucket/dir",
+        "dir",
+        "dir/Côte+%?#.vortex",
+        "s3://bucket/dir/C%C3%B4te+%25%3F%23.vortex"
+    )]
+    #[case::path_style_bucket(
+        "https://s3.us-east-1.amazonaws.com/bucket/dir",
+        "dir",
+        "dir/literal%20name.vortex",
+        "https://s3.us-east-1.amazonaws.com/bucket/dir/literal%2520name.vortex"
+    )]
+    #[case::bucket_root(
+        "https://s3.us-east-1.amazonaws.com/bucket/",
+        "",
+        "with space.vortex",
+        "https://s3.us-east-1.amazonaws.com/bucket/with%20space.vortex"
+    )]
+    #[case::encoded_key_separator(
+        "s3://bucket/dir%2Fsubdir",
+        "dir/subdir",
+        "dir/subdir/file.vortex",
+        "s3://bucket/dir/subdir/file.vortex"
+    )]
+    #[case::hf_revision(
+        "hf://datasets/org/name@refs%2Fconvert%2Fparquet/dir",
+        "dir",
+        "dir/with space.vortex",
+        "hf://datasets/org/name@refs%2Fconvert%2Fparquet/dir/with%20space.vortex"
+    )]
+    fn listed_urls_preserve_keys_and_mounts(
+        #[case] input: &str,
+        #[case] expected_prefix: &str,
+        #[case] key: &str,
+        #[case] expected: &str,
+    ) -> VortexResult<()> {
+        let url = parse_uri_or_path(input)?;
+        let registry = Registry::with_vars([("aws_region".to_string(), "us-east-1".to_string())]);
+        let (store, prefix) = registry.resolve(&url)?;
+        assert_eq!(prefix.as_ref(), expected_prefix);
+
+        let base = listing_base_url(&url, prefix.as_ref())?;
+        let listed = listed_file_url(&base, key)?;
+        assert_eq!(listed.as_str(), expected);
+
+        let (listed_store, listed_path) = registry.resolve(&listed)?;
+        assert!(Arc::ptr_eq(&store, &listed_store));
+        assert_eq!(listed_path.as_ref(), key);
+        Ok(())
+    }
+
+    #[test]
+    fn listing_base_accepts_a_normalized_prefix() -> VortexResult<()> {
+        let url = parse_uri_or_path("https://s3.us-east-1.amazonaws.com/bucket//dir//")?;
+        let base = listing_base_url(&url, "dir")?;
+        assert_eq!(
+            listed_file_url(&base, "dir/file.vortex")?.as_str(),
+            "https://s3.us-east-1.amazonaws.com/bucket/dir/file.vortex"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn listing_rejects_an_unmatched_prefix() -> VortexResult<()> {
+        let url = parse_uri_or_path("s3://bucket/dir")?;
+        assert!(listing_base_url(&url, "other").is_err());
+        Ok(())
+    }
 }

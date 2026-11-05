@@ -22,12 +22,18 @@ public final class NativeFiles {
 
     private NativeFiles() {}
 
-    /** List all Vortex files reachable under {@code uri}. */
+    /**
+     * List all Vortex files reachable under {@code uri}, returning percent-encoded URIs that can be passed to
+     * {@link #delete(Session, String[], Map)} or the URI-based reader and writer APIs.
+     */
     public static List<String> listFiles(Session session, String uri, Map<String, String> options) {
         return listFiles(session.nativePointer(), uri, options);
     }
 
-    /** Delete files at the given URIs. Silently tolerates an empty list. */
+    /**
+     * Delete files at the given URIs or local paths. Each target is resolved independently using {@code options}.
+     * Silently tolerates an empty list.
+     */
     public static void delete(Session session, String[] uris, Map<String, String> options) {
         delete(session.nativePointer(), uris, options);
     }
