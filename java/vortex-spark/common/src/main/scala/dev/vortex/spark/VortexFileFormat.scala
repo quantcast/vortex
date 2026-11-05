@@ -110,7 +110,8 @@ final class VortexFileFormat
       hadoopConf: Configuration
   ): PartitionedFile => Iterator[InternalRow] = {
     val optionMap = withSessionDefaults(spark, options)
-    val io = VortexIo.create(optionMap, hadoopConf)
+    // Broadcast once, as Spark's own file formats do, rather than shipped with every task.
+    val io = VortexIo.broadcast(optionMap, hadoopConf, spark.sparkContext)
     val caseSensitive = spark.sessionState.conf.caseSensitiveAnalysis
     skippingNonVortexFiles { (file: PartitionedFile) =>
       val reader = new VortexPartitionReader(
@@ -182,7 +183,8 @@ final class VortexFileFormat
     }
 
     val optionMap = withSessionDefaults(spark, options)
-    val io = VortexIo.create(optionMap, hadoopConf)
+    // Broadcast once, as Spark's own file formats do, rather than shipped with every task.
+    val io = VortexIo.broadcast(optionMap, hadoopConf, spark.sparkContext)
     val caseSensitive = spark.sessionState.conf.caseSensitiveAnalysis
     skippingNonVortexFiles { (file: PartitionedFile) =>
       val reader = new VortexPartitionReader(

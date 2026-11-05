@@ -160,10 +160,11 @@ public final class SparkFilterToVortexExpression {
             return Optional.empty();
         }
         DataType dataType = column.get().dataType();
-        List<Expression> elements = new ArrayList<>();
+        List<Expression> elements = new ArrayList<>(in.values().length);
+        boolean holdsNull = false;
         for (Object value : in.values()) {
-            // Without its nulls the set admits extra rows only beneath NOT, and Spark filters those again.
             if (value == null) {
+                holdsNull = true;
                 continue;
             }
             Optional<Expression> literal = literal(value, dataType);
@@ -173,6 +174,14 @@ public final class SparkFilterToVortexExpression {
             elements.add(literal.get());
         }
         Expression field = column.get().expression();
+        if (holdsNull) {
+            // A non-match must remain null beneath NOT. Range bounds would turn null into false outside the range.
+            return literal(null, dataType).map(elementType -> {
+                elements.add(elementType);
+                return Expression.in(
+                        field, Expression.literalList(elementType, true, elements.toArray(new Expression[0])));
+            });
+        }
         if (elements.isEmpty()) {
             return Optional.of(Expression.literal(false));
         }

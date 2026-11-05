@@ -279,8 +279,8 @@ row counts matter more than planning time, or set `vortex.stats.rowCount` to `fa
 reading footers at all.
 
 Each task of a split file reads the rows at the same fraction of the file as its byte range, cut
-on 8192-row boundaries. Every task reads the footer again, and a chunk that spans a cut is decoded
-by both tasks next to it.
+on 8192-row boundaries. A footer is read again on executors that haven't cached it, and a chunk
+that spans a cut is decoded by both tasks next to it.
 
 ## Supported Types
 
