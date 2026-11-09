@@ -15,6 +15,7 @@ import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.StreamCapabilities;
+import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.util.functional.FutureIO;
 
 /** A {@link dev.vortex.io.NativeReadable} that serves Vortex's reads from a Hadoop {@link FileSystem}. */
@@ -50,8 +51,8 @@ public final class HadoopReadable extends PooledReadable {
 
     @Override
     protected PositionalStream openStream() throws IOException {
-        // Use optional string keys because Spark 3.5's Hadoop lacks the newer OpenFileOptions constants.
-        // S3A can avoid a metadata HEAD for every pooled stream when the length is already known.
+        // Given the length, S3A on Hadoop 3.3.5+ skips the metadata HEAD per stream; older Hadoop
+        // (Spark 3.5) ignores these keys. String keys because 3.3.4 lacks the OpenFileOptions constants.
         CompletableFuture<FSDataInputStream> opened = fs.openFile(path)
                 .opt("fs.option.openfile.length", Long.toString(length()))
                 .opt("fs.option.openfile.read.policy", "random")
@@ -63,13 +64,7 @@ public final class HadoopReadable extends PooledReadable {
             InterruptedIOException failure = new InterruptedIOException("Interrupted while opening " + path);
             failure.initCause(e);
             // Cancelling a future need not stop the underlying open. Close any stream it produces later.
-            var unused = opened.thenAccept(stream -> {
-                try {
-                    stream.close();
-                } catch (IOException closeFailure) {
-                    failure.addSuppressed(closeFailure);
-                }
-            });
+            var unused = opened.thenAccept(IOUtils::closeStream);
             throw failure;
         } catch (ExecutionException e) {
             return FutureIO.raiseInnerCause(e);
