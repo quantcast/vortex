@@ -137,13 +137,13 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
             Optional<SplitRows> rows = splitRows(file, dataSource.rowCount());
             if (rows.isPresent() && rows.get().count() == 0) {
                 // The native scan reads a range of 0 to 0 as the whole file.
-                exhausted = true;
+                close();
             } else {
                 rows.ifPresent(range -> options.rowRangeBegin(range.begin()).rowRangeEnd(range.end()));
                 scan = dataSource.scan(options.build());
             }
-        } catch (RuntimeException e) {
-            closeReadableAfterFailure(e);
+        } catch (RuntimeException | Error e) {
+            closeAfterFailure(e);
             throw e;
         }
     }
@@ -220,6 +220,15 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
 
     @Override
     public boolean next() {
+        try {
+            return nextBatch();
+        } catch (RuntimeException | Error e) {
+            closeAfterFailure(e);
+            throw e;
+        }
+    }
+
+    private boolean nextBatch() {
         closeCurrentBatch();
         batchLoaded = false;
         if (exhausted) {
@@ -238,7 +247,7 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
                 closeCurrentReader();
             }
             if (!scan.hasNext()) {
-                exhausted = true;
+                close();
                 return false;
             }
             currentPartition = scan.next();
@@ -248,6 +257,15 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
 
     @Override
     public ColumnarBatch get() {
+        try {
+            return getBatch();
+        } catch (RuntimeException | Error e) {
+            closeAfterFailure(e);
+            throw e;
+        }
+    }
+
+    private ColumnarBatch getBatch() {
         if (!batchLoaded) {
             throw new IllegalStateException("no batch loaded; call next() first");
         }
@@ -289,19 +307,23 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
 
     @Override
     public void close() {
-        closeCurrentBatch();
-        closeCurrentReader();
-        scan = null;
-        dataSource = null;
-        session = null;
-        if (readable != null) {
-            try {
-                readable.close();
-            } catch (IOException e) {
-                throw failure("close the readable for", e);
-            } finally {
-                readable = null;
-            }
+        exhausted = true;
+        batchLoaded = false;
+        // Close in ownership order, attempting every release even if an earlier one fails.
+        try (NativeReadable closingReadable = readable;
+                DataSource closingSource = dataSource;
+                Scan closingScan = scan;
+                ArrowReader closingReader = currentReader;
+                ColumnarBatch closingBatch = currentBatch) {
+            readable = null;
+            dataSource = null;
+            scan = null;
+            currentReader = null;
+            currentBatch = null;
+            currentPartition = null;
+            session = null;
+        } catch (IOException e) {
+            throw failure("close resources for", e);
         }
     }
 
@@ -311,8 +333,9 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
 
     private void closeCurrentBatch() {
         if (currentBatch != null) {
-            currentBatch.close();
+            ColumnarBatch batch = currentBatch;
             currentBatch = null;
+            batch.close();
         }
     }
 
@@ -329,14 +352,11 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
         }
     }
 
-    private void closeReadableAfterFailure(RuntimeException failure) {
-        if (readable != null) {
-            try {
-                readable.close();
-            } catch (IOException e) {
-                failure.addSuppressed(e);
-            }
-            readable = null;
+    private void closeAfterFailure(Throwable failure) {
+        try {
+            close();
+        } catch (RuntimeException | Error closeFailure) {
+            failure.addSuppressed(closeFailure);
         }
     }
 }

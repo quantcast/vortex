@@ -6,6 +6,7 @@ package dev.vortex.api;
 import com.google.common.base.Preconditions;
 import dev.vortex.VortexCleaner;
 import dev.vortex.jni.NativePartition;
+import java.lang.ref.Reference;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.arrow.c.ArrowArrayStream;
@@ -43,12 +44,16 @@ public final class Partition {
     /** Estimated row count of the partition. Empty when unknown. */
     public OptionalLong rowCount() {
         Preconditions.checkState(!consumed.get(), "partition already consumed");
-        long[] out = new long[2];
-        NativePartition.rowCount(pointer, out);
-        if (out[1] == 0) {
-            return OptionalLong.empty();
+        try {
+            long[] out = new long[2];
+            NativePartition.rowCount(pointer, out);
+            if (out[1] == 0) {
+                return OptionalLong.empty();
+            }
+            return OptionalLong.of(out[0]);
+        } finally {
+            Reference.reachabilityFence(this);
         }
-        return OptionalLong.of(out[0]);
     }
 
     /**
@@ -59,16 +64,38 @@ public final class Partition {
         if (!consumed.compareAndSet(false, true)) {
             throw new IllegalStateException("partition already consumed");
         }
-        // Native side unconditionally takes ownership of the partition, regardless of
-        // whether the call subsequently throws, so it is correct to flip `consumed`
-        // before invoking JNI. The cleaner then always skips free for this handle.
-        ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator);
+        ArrowArrayStream stream;
         try {
-            NativePartition.scanArrow(session.nativePointer(), pointer, stream.memoryAddress());
-        } catch (RuntimeException ex) {
-            stream.close();
-            throw ex;
+            stream = ArrowArrayStream.allocateNew(allocator);
+        } catch (RuntimeException | Error failure) {
+            // JNI has not taken ownership, but the consumed handle's Cleaner will skip it.
+            try {
+                NativePartition.free(pointer);
+            } catch (RuntimeException | Error closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
         }
-        return Data.importArrayStream(allocator, stream);
+        try {
+            // JNI consumes the partition even when it throws; only the exported stream remains ours.
+            NativePartition.scanArrow(session.nativePointer(), pointer, stream.memoryAddress());
+            return Data.importArrayStream(allocator, stream);
+        } catch (RuntimeException | Error failure) {
+            try {
+                try {
+                    // Import can fail before moving the stream into its reader.
+                    if (stream.snapshot().release != 0) {
+                        stream.release();
+                    }
+                } finally {
+                    stream.close();
+                }
+            } catch (RuntimeException | Error closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 }
