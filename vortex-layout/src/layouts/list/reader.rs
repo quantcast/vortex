@@ -2202,6 +2202,7 @@ mod tests {
     #[case::two_cuts(&[1, 3], false, false)]
     #[case::null_and_empty_at_cuts(&[1, 3], true, false)]
     #[case::list_view_chunks(&[1, 3], true, true)]
+    #[case::non_nullable_list_view_chunks(&[1, 3], false, true)]
     #[tokio::test]
     async fn sliced_list_chunks_round_trip(
         #[case] cuts: &[usize],
