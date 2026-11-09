@@ -6,12 +6,15 @@ package dev.vortex.spark.io;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import dev.vortex.io.NativeReadable;
 import dev.vortex.spark.VortexOptions;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Map;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.spark.SerializableWritable;
@@ -20,12 +23,66 @@ import org.apache.spark.serializer.JavaSerializer;
 import org.apache.spark.serializer.KryoSerializer;
 import org.apache.spark.serializer.SerializerInstance;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import scala.reflect.ClassTag;
 import scala.reflect.ClassTag$;
 
 final class VortexIoTest {
+    @TempDir
+    Path tempDir;
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void coalescingDefaultsArePreserved(boolean defaults) throws IOException {
+        VortexIo io = defaults ? VortexIo.defaults() : VortexIo.create(VortexOptions.empty(), new Configuration());
+        try (NativeReadable readable = io.openReadable(file())) {
+            assertEquals(64 * 1024, readable.coalesceDistance());
+            assertEquals(16 * 1024 * 1024, readable.coalesceMaxSize());
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "vortex.read.coalesce.distance, -1",
+        "vortex.read.coalesce.distance, many",
+        "vortex.read.coalesce.distance, 2147483648",
+        "vortex.read.coalesce.maxSize, 0",
+        "vortex.read.coalesce.maxSize, -1",
+        "vortex.read.coalesce.maxSize, many",
+        "vortex.read.coalesce.maxSize, 2147483648"
+    })
+    void invalidCoalescingOptionsAreRejected(String key, String value) {
+        assertThrows(IllegalArgumentException.class, () -> VortexIo.create(options(key, value), new Configuration()));
+        // A null context proves validation happens before a broadcast is attempted.
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> VortexIo.broadcast(options(key, value), new Configuration(), null));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"0, 1", "1048576, 33554432", "2147483647, 2147483647"})
+    void coalescingOptionsReachReadableAfterSerialization(int distance, int maxSize)
+            throws IOException, ClassNotFoundException {
+        VortexIo io = VortexIo.create(
+                VortexOptions.of(Map.of(
+                        "VORTEX.READ.COALESCE.DISTANCE", Integer.toString(distance),
+                        "vortex.read.coalesce.maxsize", Integer.toString(maxSize))),
+                new Configuration());
+        try (NativeReadable readable = roundTrip(io).openReadable(file())) {
+            assertEquals(distance, readable.coalesceDistance());
+            assertEquals(maxSize, readable.coalesceMaxSize());
+        }
+    }
+
+    private VortexFile file() throws IOException {
+        Path path = tempDir.resolve("data.vortex");
+        Files.write(path, new byte[] {1});
+        return new VortexFile(path.toString(), 1);
+    }
+
     @Test
     void concurrenciesDefaultToNativeDefaults() {
         VortexIo io = VortexIo.create(VortexOptions.empty(), new Configuration());
@@ -107,8 +164,8 @@ final class VortexIoTest {
     void broadcastConfigurationSurvivesEachSparkSerializer(boolean kryo) {
         Configuration conf = new Configuration(false);
         conf.set("fs.s3a.endpoint", "https://storage.example");
-        SerializerInstance serializer = (kryo ? new KryoSerializer(new SparkConf()) : new JavaSerializer(new SparkConf()))
-                .newInstance();
+        SerializerInstance serializer =
+                (kryo ? new KryoSerializer(new SparkConf()) : new JavaSerializer(new SparkConf())).newInstance();
         ClassTag<Object> tag = ClassTag$.MODULE$.apply(Object.class);
 
         SerializableWritable<?> shipped = (SerializableWritable<?>)

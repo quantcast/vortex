@@ -36,6 +36,16 @@ public final class VortexIo implements Serializable {
     private static final int DEFAULT_READ_CONCURRENCY = 0;
 
     /**
+     * Maximum gap between merged reads, in bytes. Defaults to 64 KiB; zero merges only adjacent or overlapping reads.
+     */
+    public static final String COALESCE_DISTANCE_OPTION = "vortex.read.coalesce.distance";
+
+    /**
+     * Maximum span of a merged read, in bytes. Must be positive; defaults to 16 MiB. Individual reads may be larger.
+     */
+    public static final String COALESCE_MAX_SIZE_OPTION = "vortex.read.coalesce.maxSize";
+
+    /**
      * Option bounding how many splits of a file the native scan reads at once, in all. Each split in flight holds the
      * decoded chunks of every column it overlaps, and every task in an executor runs its own scan, which by default
      * keeps several splits in flight per core. Lowering this reduces memory held by concurrent split decoding and Arrow
@@ -60,6 +70,8 @@ public final class VortexIo implements Serializable {
 
     private final int readConcurrency;
     private final int splitConcurrency;
+    private final int coalesceDistance;
+    private final int coalesceMaxSize;
 
     /** Captures {@code hadoopConf} and the read settings found in the format options. */
     public static VortexIo create(VortexOptions options, Configuration hadoopConf) {
@@ -69,7 +81,9 @@ public final class VortexIo implements Serializable {
                 new SerializableHadoopConf(hadoopConf),
                 null,
                 nonNegative(options, READ_CONCURRENCY_OPTION, DEFAULT_READ_CONCURRENCY),
-                nonNegative(options, SPLIT_CONCURRENCY_OPTION, DEFAULT_SPLIT_CONCURRENCY));
+                nonNegative(options, SPLIT_CONCURRENCY_OPTION, DEFAULT_SPLIT_CONCURRENCY),
+                nonNegative(options, COALESCE_DISTANCE_OPTION, NativeReadable.DEFAULT_COALESCE_DISTANCE),
+                positive(options, COALESCE_MAX_SIZE_OPTION, NativeReadable.DEFAULT_COALESCE_MAX_SIZE));
     }
 
     /**
@@ -79,22 +93,28 @@ public final class VortexIo implements Serializable {
     public static VortexIo broadcast(VortexOptions options, Configuration hadoopConf, SparkContext context) {
         Objects.requireNonNull(options, "options");
         Objects.requireNonNull(hadoopConf, "hadoopConf");
+        int readConcurrency = nonNegative(options, READ_CONCURRENCY_OPTION, DEFAULT_READ_CONCURRENCY);
+        int splitConcurrency = nonNegative(options, SPLIT_CONCURRENCY_OPTION, DEFAULT_SPLIT_CONCURRENCY);
+        int coalesceDistance = nonNegative(options, COALESCE_DISTANCE_OPTION, NativeReadable.DEFAULT_COALESCE_DISTANCE);
+        int coalesceMaxSize = positive(options, COALESCE_MAX_SIZE_OPTION, NativeReadable.DEFAULT_COALESCE_MAX_SIZE);
         return new VortexIo(
                 null,
                 context.broadcast(broadcastValue(hadoopConf), BROADCAST_TAG),
-                nonNegative(options, READ_CONCURRENCY_OPTION, DEFAULT_READ_CONCURRENCY),
-                nonNegative(options, SPLIT_CONCURRENCY_OPTION, DEFAULT_SPLIT_CONCURRENCY));
+                readConcurrency,
+                splitConcurrency,
+                coalesceDistance,
+                coalesceMaxSize);
     }
 
     /** Hadoop I/O over a default configuration, for callers that have no Spark session to draw one from. */
     public static VortexIo defaults() {
-        return new VortexIo(
-                new SerializableHadoopConf(new Configuration()), null, DEFAULT_READ_CONCURRENCY, DEFAULT_SPLIT_CONCURRENCY);
+        return create(VortexOptions.empty(), new Configuration());
     }
 
     @SuppressWarnings("unchecked")
     private static final ClassTag<SerializableWritable<Configuration>> BROADCAST_TAG =
-            (ClassTag<SerializableWritable<Configuration>>) (ClassTag<?>) ClassTag$.MODULE$.apply(SerializableWritable.class);
+            (ClassTag<SerializableWritable<Configuration>>)
+                    (ClassTag<?>) ClassTag$.MODULE$.apply(SerializableWritable.class);
 
     /** What {@link #broadcast} sends to executors for {@code hadoopConf}. */
     static SerializableWritable<Configuration> broadcastValue(Configuration hadoopConf) {
@@ -105,17 +125,29 @@ public final class VortexIo implements Serializable {
             SerializableHadoopConf conf,
             Broadcast<SerializableWritable<Configuration>> broadcastConf,
             int readConcurrency,
-            int splitConcurrency) {
+            int splitConcurrency,
+            int coalesceDistance,
+            int coalesceMaxSize) {
         this.conf = conf;
         this.broadcastConf = broadcastConf;
         this.readConcurrency = readConcurrency;
         this.splitConcurrency = splitConcurrency;
+        this.coalesceDistance = coalesceDistance;
+        this.coalesceMaxSize = coalesceMaxSize;
     }
 
     private static int nonNegative(VortexOptions options, String key, int defaultValue) {
         int parsed = options.getInt(key, defaultValue);
         if (parsed < 0) {
             throw new IllegalArgumentException(String.format(Locale.ROOT, "%s must be >= 0, got %d", key, parsed));
+        }
+        return parsed;
+    }
+
+    private static int positive(VortexOptions options, String key, int defaultValue) {
+        int parsed = nonNegative(options, key, defaultValue);
+        if (parsed == 0) {
+            throw new IllegalArgumentException(key + " must be > 0");
         }
         return parsed;
     }
@@ -145,6 +177,6 @@ public final class VortexIo implements Serializable {
      */
     public NativeReadable openReadable(VortexFile file) {
         VortexFile.requireVortexExtension(file.path());
-        return HadoopReadable.open(hadoopConf(), file.path(), file.length());
+        return HadoopReadable.open(hadoopConf(), file.path(), file.length(), coalesceDistance, coalesceMaxSize);
     }
 }
