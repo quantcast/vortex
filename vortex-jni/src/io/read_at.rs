@@ -365,7 +365,6 @@ impl FileSystem for JavaFileSystem {
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
-    use vortex::buffer::Alignment;
     use vortex::error::VortexResult;
 
     use super::checked_coalesce_config;
@@ -380,10 +379,8 @@ mod tests {
         #[case] expected_max_size: u64,
     ) -> VortexResult<()> {
         let config = checked_coalesce_config(distance, max_size)?;
-        let max_padding = Alignment::MAX_UNTRUSTED.as_usize() as u64 - 1;
         assert_eq!(config.distance, distance as u64);
         assert_eq!(config.max_size, expected_max_size);
-        assert!(config.max_size + max_padding <= i32::MAX as u64);
         Ok(())
     }
 

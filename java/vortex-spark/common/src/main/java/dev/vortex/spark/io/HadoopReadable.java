@@ -3,7 +3,6 @@
 
 package dev.vortex.spark.io;
 
-import com.google.common.base.Preconditions;
 import dev.vortex.io.PooledReadable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -34,11 +33,12 @@ public final class HadoopReadable extends PooledReadable {
         return open(conf, path, length, DEFAULT_COALESCE_DISTANCE, DEFAULT_COALESCE_MAX_SIZE);
     }
 
-    /** Opens a readable with a non-negative coalescing gap and positive maximum merged size, both in bytes. */
+    /**
+     * Opens a readable with the given coalescing gap and maximum merged size, both in bytes. Native code rejects a
+     * negative gap or non-positive size when the source is registered.
+     */
     public static HadoopReadable open(
             Configuration conf, String path, long length, int coalesceDistance, int coalesceMaxSize) {
-        Preconditions.checkArgument(coalesceDistance >= 0, "coalesceDistance must be >= 0: %s", coalesceDistance);
-        Preconditions.checkArgument(coalesceMaxSize > 0, "coalesceMaxSize must be > 0: %s", coalesceMaxSize);
         Path file = new Path(path);
         try {
             FileSystem fs = file.getFileSystem(conf);

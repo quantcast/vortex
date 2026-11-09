@@ -420,12 +420,7 @@ public final class NativeIOBridgeTest {
         writePeopleFile(session, ArrowAllocation.rootAllocator(), path);
 
         try (FileChannelReadable readable = new FileChannelReadable(path.toString(), path, distance, maxSize)) {
-            if (metadata) {
-                assertEquals(2, NativeFiles.readStatistics(session, readable).size());
-            } else {
-                DataSource source = DataSource.open(session, readable);
-                assertEquals(3L, source.rowCount().asOptional().orElseThrow());
-            }
+            registerReadable(metadata, session, readable);
             assertEquals(1, readable.distanceCalls);
             assertEquals(1, readable.maxSizeCalls);
         }
@@ -446,14 +441,20 @@ public final class NativeIOBridgeTest {
         Files.write(path, new byte[] {0});
         Session session = Session.create();
         try (FileChannelReadable readable = new FileChannelReadable(path.toString(), path, distance, maxSize)) {
-            RuntimeException thrown = assertThrows(RuntimeException.class, () -> {
-                if (metadata) {
-                    NativeFiles.readStatistics(session, readable);
-                } else {
-                    DataSource.open(session, readable);
-                }
-            });
+            RuntimeException thrown =
+                    assertThrows(RuntimeException.class, () -> registerReadable(metadata, session, readable));
             assertTrue(thrown.getMessage().contains(setting), thrown.getMessage());
+        }
+    }
+
+    /** Registers {@code readable} through the file-metadata or data-source JNI entry point. */
+    private static void registerReadable(boolean metadata, Session session, NativeReadable readable) {
+        if (metadata) {
+            assertEquals(2, NativeFiles.readStatistics(session, readable).size());
+        } else {
+            assertEquals(
+                    3L,
+                    DataSource.open(session, readable).rowCount().asOptional().orElseThrow());
         }
     }
 

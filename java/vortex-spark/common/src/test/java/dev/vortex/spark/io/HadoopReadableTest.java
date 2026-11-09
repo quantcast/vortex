@@ -37,8 +37,8 @@ final class HadoopReadableTest {
         Path file = write("data.vortex", content);
 
         try (NativeReadable readable = HadoopReadable.open(conf, file.toString())) {
-            assertEquals(64 * 1024, readable.coalesceDistance());
-            assertEquals(16 * 1024 * 1024, readable.coalesceMaxSize());
+            assertEquals(NativeReadable.DEFAULT_COALESCE_DISTANCE, readable.coalesceDistance());
+            assertEquals(NativeReadable.DEFAULT_COALESCE_MAX_SIZE, readable.coalesceMaxSize());
             assertEquals(SIZE, readable.length());
             assertEquals(file.toString(), readable.name());
 
@@ -49,14 +49,6 @@ final class HadoopReadableTest {
                         slice(content, range[0], range[1]), drain(buffer), "range " + range[0] + "+" + range[1]);
             }
         }
-    }
-
-    @Test
-    void invalidCoalescingLimitsAreRejectedBeforeOpeningStorage() {
-        String missing = tempDir.resolve("missing.vortex").toString();
-        assertThrows(IllegalArgumentException.class, () -> HadoopReadable.open(conf, missing, -1, -1, 1024));
-        assertThrows(IllegalArgumentException.class, () -> HadoopReadable.open(conf, missing, -1, 0, 0));
-        assertThrows(IllegalArgumentException.class, () -> HadoopReadable.open(conf, missing, -1, 0, -1));
     }
 
     @Test

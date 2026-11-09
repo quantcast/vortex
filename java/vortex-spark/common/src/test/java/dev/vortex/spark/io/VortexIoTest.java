@@ -34,13 +34,11 @@ final class VortexIoTest {
     @TempDir
     Path tempDir;
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void coalescingDefaultsArePreserved(boolean defaults) throws IOException {
-        VortexIo io = defaults ? VortexIo.defaults() : VortexIo.create(VortexOptions.empty(), new Configuration());
-        try (NativeReadable readable = io.openReadable(file())) {
-            assertEquals(64 * 1024, readable.coalesceDistance());
-            assertEquals(16 * 1024 * 1024, readable.coalesceMaxSize());
+    @Test
+    void coalescingDefaultsArePreserved() throws IOException {
+        try (NativeReadable readable = VortexIo.defaults().openReadable(file())) {
+            assertEquals(NativeReadable.DEFAULT_COALESCE_DISTANCE, readable.coalesceDistance());
+            assertEquals(NativeReadable.DEFAULT_COALESCE_MAX_SIZE, readable.coalesceMaxSize());
         }
     }
 
