@@ -417,6 +417,7 @@ mod tests {
     use vortex_array::arrays::BoolArray;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::arrays::StructArray;
+    use vortex_array::arrays::VarBinViewArray;
     use vortex_array::assert_arrays_eq;
     use vortex_array::dtype::DType;
     use vortex_array::dtype::DecimalDType;
@@ -429,6 +430,7 @@ mod tests {
     use vortex_array::expr::dynamic;
     use vortex_array::expr::gt;
     use vortex_array::expr::gt_eq;
+    use vortex_array::expr::in_list;
     use vortex_array::expr::is_not_null;
     use vortex_array::expr::is_null;
     use vortex_array::expr::lit;
@@ -436,6 +438,7 @@ mod tests {
     use vortex_array::expr::not_eq;
     use vortex_array::expr::root;
     use vortex_array::expr::stats::Stat;
+    use vortex_array::scalar::Scalar;
     use vortex_array::scalar::ScalarValue;
     use vortex_array::scalar_fn::fns::operators::CompareOperator;
     use vortex_array::validity::Validity;
@@ -467,6 +470,307 @@ mod tests {
     fn default_bounded_stat_max_bytes() -> NonZeroUsize {
         // SAFETY: 64 is non-zero.
         unsafe { NonZeroUsize::new_unchecked(64) }
+    }
+
+    #[rstest]
+    #[case(16, false, false)]
+    #[case(17, false, false)]
+    #[case(80, false, false)]
+    #[case(80, true, false)]
+    #[case(80, false, true)]
+    #[case(80, true, true)]
+    fn in_list_prunes_gaps_between_members(
+        #[case] count: i32,
+        #[case] optimized: bool,
+        #[case] null_and_duplicate: bool,
+    ) -> VortexResult<()> {
+        let dtype = DType::Primitive(PType::I32, Nullability::Nullable);
+        let list = Scalar::list(
+            Arc::new(dtype.clone()),
+            (0..count)
+                .rev()
+                .map(|value| Scalar::from(Some(value * 10)))
+                .chain(
+                    null_and_duplicate
+                        .then_some([Some(10i32).into(), Scalar::null(dtype.clone())])
+                        .into_iter()
+                        .flatten(),
+                )
+                .collect(),
+            Nullability::NonNullable,
+        );
+        let last = (count - 1) * 10;
+        let min = Min.bind(NumericalAggregateOpts::skip_nans());
+        let max = Max.bind(NumericalAggregateOpts::skip_nans());
+        let zone_map = ZoneMap::try_new(
+            dtype.clone(),
+            StructArray::from_fields(&[
+                (
+                    min.to_string(),
+                    PrimitiveArray::from_option_iter([
+                        Some(-1i32),
+                        Some(0),
+                        Some(1),
+                        Some(9),
+                        Some(11),
+                        Some(last),
+                        Some(last + 1),
+                        None,
+                    ])
+                    .into_array(),
+                ),
+                (
+                    max.to_string(),
+                    PrimitiveArray::from_option_iter([
+                        Some(-1i32),
+                        Some(0),
+                        Some(9),
+                        Some(10),
+                        Some(19),
+                        Some(last),
+                        Some(last + 10),
+                        None,
+                    ])
+                    .into_array(),
+                ),
+            ])?,
+            Arc::new([min, max]),
+            4,
+            32,
+        )?;
+        let expr = in_list(root(), lit(list)).bind(&dtype)?;
+        let expr = if optimized {
+            expr.optimize_recursive()?
+        } else {
+            expr
+        };
+        let proof = expr
+            .falsify(&SESSION)?
+            .expect("constant IN list has a falsifier");
+        assert_arrays_eq!(
+            zone_map.prune(&proof, &SESSION)?.into_array(),
+            BoolArray::from_iter([true, false, true, false, true, false, true, false]),
+            &mut SESSION.create_execution_ctx()
+        );
+        Ok(())
+    }
+
+    #[rstest]
+    fn large_string_in_list_prunes_gaps(
+        #[values(false, true)] optimized: bool,
+    ) -> VortexResult<()> {
+        let dtype = DType::Utf8(Nullability::Nullable);
+        let list = Scalar::list(
+            Arc::new(dtype.clone()),
+            (0..80)
+                .rev()
+                .map(|value| Scalar::utf8(format!("key-{value:03}"), Nullability::Nullable))
+                .chain([Scalar::null(dtype.clone())])
+                .collect(),
+            Nullability::NonNullable,
+        );
+        let min = Min.bind(NumericalAggregateOpts::skip_nans());
+        let max = Max.bind(NumericalAggregateOpts::skip_nans());
+        let zone_map = ZoneMap::try_new(
+            dtype.clone(),
+            StructArray::from_fields(&[
+                (
+                    min.to_string(),
+                    VarBinViewArray::from_iter(
+                        [
+                            Some("key-000"),
+                            Some("key-010a"),
+                            Some("key-078z"),
+                            Some("key-080"),
+                            None,
+                        ],
+                        dtype.clone(),
+                    )
+                    .into_array(),
+                ),
+                (
+                    max.to_string(),
+                    VarBinViewArray::from_iter(
+                        [
+                            Some("key-000"),
+                            Some("key-010z"),
+                            Some("key-079"),
+                            Some("key-099"),
+                            None,
+                        ],
+                        dtype.clone(),
+                    )
+                    .into_array(),
+                ),
+            ])?,
+            Arc::new([min, max]),
+            4,
+            20,
+        )?;
+        let expr = in_list(root(), lit(list)).bind(&dtype)?;
+        let expr = if optimized {
+            expr.optimize_recursive()?
+        } else {
+            expr
+        };
+        let proof = expr
+            .falsify(&SESSION)?
+            .expect("constant IN list has a falsifier");
+        assert_arrays_eq!(
+            zone_map.prune(&proof, &SESSION)?.into_array(),
+            BoolArray::from_iter([false, true, false, true, false]),
+            &mut SESSION.create_execution_ctx()
+        );
+        Ok(())
+    }
+
+    #[rstest]
+    fn large_float_in_list_preserves_nan_and_signed_zero(
+        #[values(false, true)] optimized: bool,
+        #[values(false, true)] nan_stats: bool,
+    ) -> VortexResult<()> {
+        let dtype = DType::Primitive(PType::F64, Nullability::Nullable);
+        let list = Scalar::list(
+            Arc::new(dtype.clone()),
+            (10..30)
+                .map(|value| Scalar::from(Some(f64::from(value))))
+                .chain([Some(-0.0f64).into(), Some(f64::NAN).into()])
+                .collect(),
+            Nullability::NonNullable,
+        );
+        let min = Min.bind(NumericalAggregateOpts::skip_nans());
+        let max = Max.bind(NumericalAggregateOpts::skip_nans());
+        let mut fields = vec![
+            (
+                min.to_string(),
+                PrimitiveArray::from_option_iter([
+                    Some(5.0f64),
+                    Some(5.0),
+                    Some(-0.0),
+                    Some(0.0),
+                    None,
+                ])
+                .into_array(),
+            ),
+            (
+                max.to_string(),
+                PrimitiveArray::from_option_iter([
+                    Some(5.0f64),
+                    Some(5.0),
+                    Some(-0.0),
+                    Some(0.0),
+                    None,
+                ])
+                .into_array(),
+            ),
+        ];
+        let mut aggregates = vec![min, max];
+        if nan_stats {
+            let nan_count = NanCount.bind(EmptyOptions);
+            fields.push((
+                nan_count.to_string(),
+                PrimitiveArray::new(buffer![1u64, 0, 0, 0, 0], Validity::AllValid).into_array(),
+            ));
+            aggregates.push(nan_count);
+        }
+        let zone_map = ZoneMap::try_new(
+            dtype.clone(),
+            StructArray::from_fields(&fields)?,
+            aggregates.into(),
+            4,
+            20,
+        )?;
+        let expr = in_list(root(), lit(list)).bind(&dtype)?;
+        let expr = if optimized {
+            expr.optimize_recursive()?
+        } else {
+            expr
+        };
+        let proof = expr
+            .falsify(&SESSION)?
+            .expect("constant IN list has a falsifier");
+        // Zone zero can contain a matching NaN although its finite extrema are outside the
+        // set. Signed zero membership follows the same total order as the min/max aggregates.
+        let mut ctx = SESSION.create_execution_ctx();
+        let actual = PrimitiveArray::from_option_iter([
+            Some(f64::NAN),
+            Some(5.0),
+            Some(-0.0),
+            Some(0.0),
+            None,
+        ])
+        .into_array()
+        .apply_bound(&expr)?;
+        let matching = super::null_as_false_mask(actual.clone(), &mut ctx)?;
+        assert_arrays_eq!(
+            actual,
+            BoolArray::from_iter([Some(true), Some(false), Some(true), Some(false), None,]),
+            &mut ctx
+        );
+        let pruned = zone_map.prune(&proof, &SESSION)?;
+        for zone in 0..5 {
+            assert!(
+                !(matching.value(zone) && pruned.value(zone)),
+                "pruned matching zone {zone}"
+            );
+        }
+        let expected = if nan_stats {
+            [false, true, false, true, false]
+        } else {
+            [false; 5]
+        };
+        assert_arrays_eq!(
+            pruned.into_array(),
+            BoolArray::from_iter(expected),
+            &mut ctx
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn large_in_list_pruning_stress() -> VortexResult<()> {
+        let dtype = DType::Primitive(PType::I32, Nullability::NonNullable);
+        let list = Scalar::list(
+            Arc::new(dtype.clone()),
+            (0..16384)
+                .rev()
+                .map(|value| Scalar::from(value * 10))
+                .collect(),
+            Nullability::NonNullable,
+        );
+        let values = (0..8192)
+            .map(|zone| zone * 10 + i32::from(zone % 11 != 0))
+            .collect::<Buffer<_>>();
+        let needles = PrimitiveArray::new(values.clone(), Validity::NonNullable).into_array();
+        let bounds = PrimitiveArray::new(values, Validity::AllValid).into_array();
+        let min = Min.bind(NumericalAggregateOpts::skip_nans());
+        let max = Max.bind(NumericalAggregateOpts::skip_nans());
+        let zone_map = ZoneMap::try_new(
+            dtype.clone(),
+            StructArray::from_fields(&[
+                (min.to_string(), bounds.clone()),
+                (max.to_string(), bounds),
+            ])?,
+            Arc::new([min, max]),
+            4,
+            32768,
+        )?;
+        let expr = in_list(root(), lit(list))
+            .bind(&dtype)?
+            .optimize_recursive()?;
+        let proof = expr
+            .falsify(&SESSION)?
+            .expect("constant IN list has a falsifier");
+        let pruned = zone_map.prune(&proof, &SESSION)?;
+        let mut ctx = SESSION.create_execution_ctx();
+        // Every zone holds one distinct value. Its complement must agree with actual batch
+        // membership, including the thousands of zones between selected keys.
+        assert_arrays_eq!(
+            needles.apply_bound(&expr)?,
+            (!pruned).into_array(),
+            &mut ctx
+        );
+        Ok(())
     }
 
     #[test]

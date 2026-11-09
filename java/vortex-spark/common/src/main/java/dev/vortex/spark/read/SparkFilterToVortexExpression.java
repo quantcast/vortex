@@ -197,7 +197,7 @@ public final class SparkFilterToVortexExpression {
         Optional<Expression> lookup = literal(null, dataType)
                 .map(elementType -> Expression.in(
                         field, Expression.literalList(elementType, false, elements.toArray(new Expression[0]))));
-        // Vortex derives no zone bounds from a set, so spell them out for pruning.
+        // Explicit bounds also support types whose set membership has no stats rewrite.
         return lookup.map(set -> inBounds(in.values(), dataType, field)
                 .map(bounds -> Expression.and(bounds, set))
                 .orElse(set));
