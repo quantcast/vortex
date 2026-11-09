@@ -64,36 +64,28 @@ public final class Partition {
         if (!consumed.compareAndSet(false, true)) {
             throw new IllegalStateException("partition already consumed");
         }
-        ArrowArrayStream stream;
         try {
-            stream = ArrowArrayStream.allocateNew(allocator);
-        } catch (RuntimeException | Error failure) {
-            // JNI has not taken ownership, but the consumed handle's Cleaner will skip it.
+            ArrowArrayStream stream;
             try {
+                stream = ArrowArrayStream.allocateNew(allocator);
+            } catch (RuntimeException | Error failure) {
+                // JNI has not taken the partition yet, and the Cleaner skips consumed partitions.
                 NativePartition.free(pointer);
-            } catch (RuntimeException | Error closeFailure) {
-                failure.addSuppressed(closeFailure);
+                throw failure;
             }
-            throw failure;
-        }
-        try {
-            // JNI consumes the partition even when it throws; only the exported stream remains ours.
-            NativePartition.scanArrow(session.nativePointer(), pointer, stream.memoryAddress());
-            return Data.importArrayStream(allocator, stream);
-        } catch (RuntimeException | Error failure) {
             try {
-                try {
-                    // Import can fail before moving the stream into its reader.
-                    if (stream.snapshot().release != 0) {
-                        stream.release();
-                    }
-                } finally {
-                    stream.close();
+                // JNI consumes the partition even when it throws.
+                NativePartition.scanArrow(session.nativePointer(), pointer, stream.memoryAddress());
+                // Closes the stream struct once its reader has taken the stream.
+                return Data.importArrayStream(allocator, stream);
+            } catch (RuntimeException | Error failure) {
+                // Import can fail before moving the stream into its reader.
+                if (stream.snapshot().release != 0) {
+                    stream.release();
                 }
-            } catch (RuntimeException | Error closeFailure) {
-                failure.addSuppressed(closeFailure);
+                stream.close();
+                throw failure;
             }
-            throw failure;
         } finally {
             Reference.reachabilityFence(this);
         }

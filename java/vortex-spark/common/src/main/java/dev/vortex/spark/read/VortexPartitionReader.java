@@ -6,7 +6,6 @@ package dev.vortex.spark.read;
 import dev.vortex.api.DataSource;
 import dev.vortex.api.DataSource.RowCount;
 import dev.vortex.api.Expression;
-import dev.vortex.api.Partition;
 import dev.vortex.api.Scan;
 import dev.vortex.api.ScanOptions;
 import dev.vortex.api.Session;
@@ -65,7 +64,6 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
     private Session session;
     private DataSource dataSource;
     private Scan scan;
-    private Partition currentPartition;
     private ArrowReader currentReader;
     private ColumnarBatch currentBatch;
     private boolean batchLoaded;
@@ -250,8 +248,7 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
                 close();
                 return false;
             }
-            currentPartition = scan.next();
-            currentReader = currentPartition.scanArrow(allocator);
+            currentReader = scan.next().scanArrow(allocator);
         }
     }
 
@@ -309,7 +306,7 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
     public void close() {
         exhausted = true;
         batchLoaded = false;
-        // Close in ownership order, attempting every release even if an earlier one fails.
+        // Closes the batch first and the readable last, attempting every close even if an earlier one fails.
         try (NativeReadable closingReadable = readable;
                 DataSource closingSource = dataSource;
                 Scan closingScan = scan;
@@ -320,7 +317,6 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
             scan = null;
             currentReader = null;
             currentBatch = null;
-            currentPartition = null;
             session = null;
         } catch (IOException e) {
             throw failure("close resources for", e);
@@ -347,7 +343,6 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
                 throw failure("close the reader for", e);
             } finally {
                 currentReader = null;
-                currentPartition = null;
             }
         }
     }

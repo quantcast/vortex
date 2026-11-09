@@ -162,6 +162,18 @@ final class ReadLifecycleTest {
     }
 
     @Test
+    void closedArrowReaderLeavesNothingAllocated() throws IOException {
+        try (DataSource source = DataSource.open(session, uri);
+                Scan scan = source.scan(ScanOptions.of());
+                BufferAllocator tracked = new RootAllocator()) {
+            try (ArrowReader reader = scan.next().scanArrow(tracked)) {
+                assertValues(reader);
+            }
+            assertEquals(0, tracked.getAllocatedMemory());
+        }
+    }
+
+    @Test
     void loadedBatchSurvivesClosingItsParentHandles() throws IOException {
         DataSource source = DataSource.open(session, uri);
         Scan scan = source.scan(ScanOptions.of());
