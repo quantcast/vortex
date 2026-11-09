@@ -36,8 +36,8 @@ import org.junit.jupiter.params.provider.CsvSource;
 /**
  * Datasets whose files do not all carry the same columns.
  *
- * <p>Schema inference merges every footer, so a column added by a later write belongs to the dataset, and the files
- * written before it read as null.
+ * <p>Opting into schema merging reads every footer, so a column added by a later write belongs to the dataset, and the
+ * files written before it read as null.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public final class VortexSchemaMergeTest {
@@ -96,7 +96,7 @@ public final class VortexSchemaMergeTest {
         writeCaseFile(dir.resolve(reverse ? "b.vortex" : "a.vortex"), "id", 1L);
         writeCaseFile(dir.resolve(reverse ? "a.vortex" : "b.vortex"), "ID", 2L);
 
-        VortexOptions options = VortexOptions.of(Map.of());
+        VortexOptions options = VortexOptions.of(Map.of("vortex.mergeSchema", "true"));
         StructType ordered = VortexFooterReader.inferSchema(
                 List.of(fileStatus(dir.resolve("a.vortex")), fileStatus(dir.resolve("b.vortex"))),
                 VortexIo.create(options, spark.sparkContext().hadoopConfiguration()),
@@ -147,9 +147,11 @@ public final class VortexSchemaMergeTest {
         assertTrue(failure.getMessage().contains(".vortex"), failure.getMessage());
     }
 
-    @Test
-    void aColumnOnlyOneFileCarriesBelongsToTheDataset() {
-        Path dir = tempDir.resolve("widened");
+    @ParameterizedTest
+    @CsvSource({"v1", "v2"})
+    void aColumnOnlyOneFileCarriesBelongsToTheDataset(String mode) {
+        spark.conf().set("spark.sql.sources.useV1SourceList", mode.equals("v1") ? "vortex" : "");
+        Path dir = tempDir.resolve("widened_" + mode);
         append(dir, NARROW, RowFactory.create(1, "one"));
         append(dir, WIDE, RowFactory.create(2, "two", 2.5));
 
@@ -204,20 +206,24 @@ public final class VortexSchemaMergeTest {
         assertEquals(2, rows.get(0).getInt(0));
     }
 
-    @Test
-    void mergingCanBeTurnedOffToReadOneFooter() {
-        Path dir = tempDir.resolve("unmerged");
+    @ParameterizedTest
+    @CsvSource({"v1,", "v1,false", "v2,", "v2,false"})
+    void inferenceReadsOneFooterUnlessMergingIsEnabled(String mode, String mergeSchema) {
+        spark.conf().set("spark.sql.sources.useV1SourceList", mode.equals("v1") ? "vortex" : "");
+        Path dir = tempDir.resolve("unmerged_" + mode + "_" + mergeSchema);
         append(dir, NARROW, RowFactory.create(1, "one"));
         append(dir, NARROW, RowFactory.create(2, "two"));
 
         // An unusable footer parallelism proves which path ran: merging reads footers in a pool, while a single
         // footer read never asks for one.
-        Dataset<Row> data = spark.read()
+        var reader = spark.read()
                 .format("vortex")
-                .option("vortex.mergeSchema", "false")
                 .option("vortex.stats.rowCount", "false")
-                .option("vortex.footerParallelism", "0")
-                .load(dir.toString());
+                .option("vortex.footerParallelism", "0");
+        if (mergeSchema != null) {
+            reader.option("vortex.mergeSchema", mergeSchema);
+        }
+        Dataset<Row> data = reader.load(dir.toString());
 
         assertEquals("struct<a:int,b:string>", data.schema().simpleString());
         assertEquals(2, data.count());
@@ -227,15 +233,15 @@ public final class VortexSchemaMergeTest {
     void mergingIsFoundUnderAnyOptionCasing() {
         Path dir = tempDir.resolve("option_case");
         append(dir, NARROW, RowFactory.create(1, "one"));
+        append(dir, WIDE, RowFactory.create(2, "two", 2.5));
 
         Dataset<Row> data = spark.read()
                 .format("vortex")
-                .option("VORTEX.MERGESCHEMA", "false")
-                .option("VORTEX.STATS.ROWCOUNT", "false")
-                .option("VORTEX.FOOTERPARALLELISM", "0")
+                .option("VORTEX.MERGESCHEMA", "true")
                 .load(dir.toString());
 
-        assertEquals(1, data.count());
+        assertEquals("struct<a:int,b:string,c:double>", data.schema().simpleString());
+        assertEquals(2, data.count());
     }
 
     @Test
@@ -281,7 +287,10 @@ public final class VortexSchemaMergeTest {
     }
 
     private Dataset<Row> read(Path dir) {
-        return spark.read().format("vortex").load(dir.toString());
+        return spark.read()
+                .format("vortex")
+                .option("vortex.mergeSchema", "true")
+                .load(dir.toString());
     }
 
     private void writeCaseFile(Path file, String column, long value) throws IOException {

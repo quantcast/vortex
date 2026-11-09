@@ -82,14 +82,14 @@ is a Vortex file, schema inference fails.
 
 ### Schema Inference and Merging
 
-The schema of a dataset is the merge of every file's footer schema, so a column added by a later
-write is part of the dataset and the files written before it read as null. A field that only some
-files carry is nullable in the merged schema.
+By default, schema inference reads a single footer and uses that file's schema for the whole
+dataset. Columns present only in other files are not included. Passing an explicit `.schema(...)`
+skips inference altogether.
 
-Merging reads one footer per file on the driver before the job starts. Set `vortex.mergeSchema` to
-`false` to read a single footer and let one file's schema stand for the whole dataset, which is
-worth doing for a large dataset of uniform files. Passing an explicit `.schema(...)` skips
-inference altogether.
+Set `vortex.mergeSchema` to `true` when files have different columns. Merging reads one footer per
+file on the driver before the job starts, which can be expensive for large datasets. A column
+added by a later write is then part of the dataset and the files written before it read as null.
+A field that only some files carry is nullable in the merged schema.
 
 Only top-level columns are merged. A struct column that gained or lost a field cannot be merged,
 because the reader projects a struct as the file stores it and cannot widen one file's struct to
@@ -259,7 +259,7 @@ depends on, on the driver and executor classpath, for example
 | `vortex.session.provider`  | —       | Fully-qualified name of a `VortexSessionProvider` supplying a custom session on the driver and on every executor. |
 | `vortex.aggregatePushdown` | `true`  | Answer `COUNT(*)` from file footers. |
 | `vortex.splitFiles`        | `true`  | Let Spark split a large file across tasks, as it does Parquet files. |
-| `vortex.mergeSchema`       | `true`  | Merge every file's footer schema, rather than reading one footer. |
+| `vortex.mergeSchema`       | `false` | Merge every file's footer schema, rather than reading one footer. |
 | `vortex.stats.rowCount`    | `true`  | Read footer row counts for Spark statistics. |
 | `vortex.footerParallelism` | `8`     | Maximum concurrent footer reads, for schema merging and statistics. |
 | `vortex.stats.maxFiles`    | `1000`  | Skip footer row counts above this file count; `0` removes the bound. |
