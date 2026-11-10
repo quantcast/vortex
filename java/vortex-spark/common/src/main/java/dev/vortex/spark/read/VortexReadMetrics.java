@@ -23,8 +23,15 @@ import org.apache.spark.sql.execution.datasources.v2.FilePartitionReaderFactory;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.apache.spark.util.TaskCompletionListener;
 
-/** Cumulative successful source bytes, including footers and read-ahead, for one Spark task and scan. */
-final class VortexReadMetrics implements LongConsumer {
+/**
+ * Cumulative successful source bytes, including footers and read-ahead, for one Spark task and scan.
+ *
+ * <p>The connector's own scans count their bytes with it. A reader that opens files itself, with
+ * {@link VortexPartitionReaderFactory#buildColumnarReader(PartitionedFile, VortexReadMetrics)}, gets one from
+ * {@link #forTask}, reports {@link #currentMetricsValues} as its own, and calls {@link #publish} on the task thread
+ * after each file, so Spark's input bytes include the reads Vortex makes on its worker threads.
+ */
+public final class VortexReadMetrics implements LongConsumer {
     private static final ConcurrentMap<TaskContext, TaskBytes> TASK_BYTES = new ConcurrentHashMap<>();
     // Spark reads this legacy statistics API. A private class key keeps this entry separate from storage statistics.
     @SuppressWarnings("deprecation")
@@ -35,15 +42,29 @@ final class VortexReadMetrics implements LongConsumer {
 
     private final AtomicLong bytesRead;
     private final TaskBytes taskBytes;
+    private final TaskContext context;
     private final Thread taskThread = Thread.currentThread();
 
     VortexReadMetrics() {
-        this(new AtomicLong(), new TaskBytes());
+        this(new AtomicLong(), new TaskBytes(), null);
     }
 
-    private VortexReadMetrics(AtomicLong bytesRead, TaskBytes taskBytes) {
+    private VortexReadMetrics(AtomicLong bytesRead, TaskBytes taskBytes, TaskContext context) {
         this.bytesRead = bytesRead;
         this.taskBytes = taskBytes;
+        this.context = context;
+    }
+
+    /**
+     * The metrics of {@code scan}'s reads in the current Spark task, called on the task thread. Every call with the
+     * same {@code scan} in one task shares one cumulative total, as Spark sets custom metrics rather than adding them.
+     * Outside a task, the bytes are counted but published nowhere.
+     */
+    public static VortexReadMetrics forTask(Object scan) {
+        TaskContext context = TaskContext.get();
+        TaskBytes taskBytes = taskBytes(context);
+        return new VortexReadMetrics(
+                taskBytes.scanBytes.computeIfAbsent(scan, ignored -> new AtomicLong()), taskBytes, context);
     }
 
     @Override
@@ -68,7 +89,11 @@ final class VortexReadMetrics implements LongConsumer {
         return created;
     }
 
-    private void publishWorkerBytes(TaskContext context) {
+    /**
+     * Adds the bytes read on Vortex's worker threads since the last call to the task's input metrics. Call it on the
+     * task thread, after a file's reader is closed so its read-ahead is counted.
+     */
+    public void publish() {
         if (context == null) {
             return;
         }
@@ -90,7 +115,8 @@ final class VortexReadMetrics implements LongConsumer {
         private long publishedWorkerBytes;
     }
 
-    CustomTaskMetric[] currentMetricsValues() {
+    /** A snapshot of the cumulative total, as {@link VortexBytesReadMetric}. */
+    public CustomTaskMetric[] currentMetricsValues() {
         long snapshot = bytesRead.get();
         return new CustomTaskMetric[] {
             new CustomTaskMetric() {
@@ -111,13 +137,11 @@ final class VortexReadMetrics implements LongConsumer {
             InputPartition partition,
             Object factory,
             FileSourceOptions options,
-            BiFunction<PartitionedFile, LongConsumer, PartitionReader<ColumnarBatch>> buildReader) {
+            BiFunction<PartitionedFile, VortexReadMetrics, PartitionReader<ColumnarBatch>> buildReader) {
         TaskContext context = TaskContext.get();
-        TaskBytes taskBytes = taskBytes(context);
-        // Several input partitions can run in one coalesced task. Spark sets (rather than adds) custom metrics,
-        // so each reader of this scan must expose the same cumulative task total.
-        VortexReadMetrics metrics = new VortexReadMetrics(
-                taskBytes.scanBytes.computeIfAbsent(factory, ignored -> new AtomicLong()), taskBytes);
+        // Several input partitions can run in one coalesced task, so each reader of this scan exposes the same
+        // cumulative task total.
+        VortexReadMetrics metrics = forTask(factory);
         PartitionReader<ColumnarBatch> files = new FilePartitionReaderFactory() {
             @Override
             public FileSourceOptions options() {
@@ -142,7 +166,7 @@ final class VortexReadMetrics implements LongConsumer {
                 try {
                     return files.next();
                 } finally {
-                    metrics.publishWorkerBytes(context);
+                    metrics.publish();
                 }
             }
 
@@ -161,7 +185,7 @@ final class VortexReadMetrics implements LongConsumer {
                         throw new UncheckedIOException(e);
                     }
                 }
-                metrics.publishWorkerBytes(context);
+                metrics.publish();
                 return metrics.currentMetricsValues();
             }
 
@@ -170,7 +194,7 @@ final class VortexReadMetrics implements LongConsumer {
                 try {
                     files.close();
                 } finally {
-                    metrics.publishWorkerBytes(context);
+                    metrics.publish();
                 }
             }
         };

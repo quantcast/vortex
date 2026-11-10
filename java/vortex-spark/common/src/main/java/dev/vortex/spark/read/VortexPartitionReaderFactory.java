@@ -73,12 +73,21 @@ public final class VortexPartitionReaderFactory extends FilePartitionReaderFacto
 
     @Override
     public PartitionReader<ColumnarBatch> createColumnarReader(InputPartition partition) {
-        return VortexReadMetrics.createReader(partition, this, fileOptions, this::buildColumnarReader);
+        return VortexReadMetrics.createReader(
+                partition, this, fileOptions, (file, metrics) -> buildColumnarReader(file, (LongConsumer) metrics));
     }
 
     @Override
     public PartitionReader<ColumnarBatch> buildColumnarReader(PartitionedFile file) {
         return buildColumnarReader(file, ignored -> {});
+    }
+
+    /**
+     * A reader of {@code file} that counts its source bytes in {@code metrics}, for callers that open files one by one
+     * rather than through {@link #createColumnarReader}.
+     */
+    public PartitionReader<ColumnarBatch> buildColumnarReader(PartitionedFile file, VortexReadMetrics metrics) {
+        return buildColumnarReader(file, (LongConsumer) metrics);
     }
 
     private PartitionReader<ColumnarBatch> buildColumnarReader(PartitionedFile file, LongConsumer bytesRead) {
