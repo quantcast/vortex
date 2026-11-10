@@ -77,7 +77,7 @@ Dataset<Row> result = spark.read()
     .load("s3a://bucket/path");
 ```
 
-The defaults remain a 64 KiB gap and a 16 MiB maximum merged span. The gap must be non-negative
+The defaults are a 1 MiB gap and a 16 MiB maximum merged span. The gap must be non-negative
 (zero merges only adjacent or overlapping reads); the maximum span must be positive. Both accept
 integers up to 2147483647 bytes. The native reader caps maximums near that limit to leave room
 for alignment padding (up to 64 KiB minus one byte). Individual reads can exceed the maximum
