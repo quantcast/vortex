@@ -44,7 +44,6 @@ public final class ExpressionReachabilityTest {
                 "-Xmx32m",
                 "-Xbatch",
                 "-XX:-TieredCompilation",
-                "-XX:-DisableExplicitGC",
                 "-XX:CompileThreshold=100",
                 "-XX:CompileCommand=dontinline,dev.vortex.api.Expression::literalList",
                 "-XX:ErrorFile=" + directory.resolve("hs_err_pid%p.log")));
@@ -94,7 +93,6 @@ public final class ExpressionReachabilityTest {
                     }
                 },
                 "expression-gc-pressure");
-        gc.setDaemon(true);
         try (BufferAllocator allocator = new RootAllocator()) {
             Session session = Session.create();
             String uri = Path.of(args[0], "values.vortex").toString();
@@ -117,7 +115,7 @@ public final class ExpressionReachabilityTest {
                     for (int i = 0; i < ITERATIONS; i++) {
                         result = buildList();
                         if (i % 100 == 0 || i == ITERATIONS - 1) {
-                            checkValues(source, allocator);
+                            checkValues(source, allocator, result);
                         }
                     }
                 } finally {
@@ -138,9 +136,9 @@ public final class ExpressionReachabilityTest {
                 .sum();
     }
 
-    private static void checkValues(DataSource source, BufferAllocator allocator) throws Exception {
+    private static void checkValues(DataSource source, BufferAllocator allocator, Expression list) throws Exception {
         try (Scan scan = source.scan(ScanOptions.builder()
-                .filter(Expression.in(Expression.column("id"), result))
+                .filter(Expression.in(Expression.column("id"), list))
                 .ordered(true)
                 .build())) {
             long expected = 0;

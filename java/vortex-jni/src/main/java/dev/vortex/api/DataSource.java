@@ -254,13 +254,10 @@ public final class DataSource implements AutoCloseable {
     /** Submit a scan. */
     public synchronized Scan scan(ScanOptions options) {
         Preconditions.checkState(!closed, "data source is closed");
-        Expression projection = null;
-        Expression filter = null;
+        Objects.requireNonNull(options, "options");
+        Expression projection = options.projection().orElse(null);
+        Expression filter = options.filter().orElse(null);
         try {
-            Objects.requireNonNull(options, "options");
-
-            projection = options.projection().orElse(null);
-            filter = options.filter().orElse(null);
             long projectionPtr = projection == null ? 0L : projection.nativePointer();
             long filterPtr = filter == null ? 0L : filter.nativePointer();
             long begin = options.rowRangeBegin().orElse(0L);

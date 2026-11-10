@@ -262,17 +262,18 @@ public final class VortexWriter implements AutoCloseable {
      * file size and is equal to {@link VortexWriteSummary#fileSize()}.
      */
     public synchronized long bytesWritten() {
+        if (summary != null) {
+            return summary.fileSize();
+        }
+        Preconditions.checkState(!closed.get(), "writer closed without a write summary");
+        long bytesWritten;
         try {
-            if (summary != null) {
-                return summary.fileSize();
-            }
-            Preconditions.checkState(!closed.get(), "writer closed without a write summary");
-            long bytesWritten = NativeWriter.bytesWritten(pointer);
-            Preconditions.checkState(bytesWritten >= 0, "native writer returned an invalid byte count");
-            return bytesWritten;
+            bytesWritten = NativeWriter.bytesWritten(pointer);
         } finally {
             Reference.reachabilityFence(this);
         }
+        Preconditions.checkState(bytesWritten >= 0, "native writer returned an invalid byte count");
+        return bytesWritten;
     }
 
     /**
@@ -283,17 +284,18 @@ public final class VortexWriter implements AutoCloseable {
      * the file's observed compression ratio once flushed. After {@link #finish()}, this is zero.
      */
     public synchronized long bufferedBytes() {
+        if (summary != null) {
+            return 0;
+        }
+        Preconditions.checkState(!closed.get(), "writer closed without a write summary");
+        long bufferedBytes;
         try {
-            if (summary != null) {
-                return 0;
-            }
-            Preconditions.checkState(!closed.get(), "writer closed without a write summary");
-            long bufferedBytes = NativeWriter.bufferedBytes(pointer);
-            Preconditions.checkState(bufferedBytes >= 0, "native writer returned an invalid buffered byte count");
-            return bufferedBytes;
+            bufferedBytes = NativeWriter.bufferedBytes(pointer);
         } finally {
             Reference.reachabilityFence(this);
         }
+        Preconditions.checkState(bufferedBytes >= 0, "native writer returned an invalid buffered byte count");
+        return bufferedBytes;
     }
 
     /**
