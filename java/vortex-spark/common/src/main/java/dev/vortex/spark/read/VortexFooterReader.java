@@ -40,7 +40,7 @@ public final class VortexFooterReader {
     /** Option bounding how many footers scan statistics may read; {@code 0} removes the bound. */
     public static final String MAX_FILES_OPTION = "vortex.stats.maxFiles";
 
-    /** Option turning schema merging off, leaving the first file's schema to stand for the dataset. */
+    /** Option enabling schema merging instead of using the first file's schema for the dataset. */
     public static final String MERGE_SCHEMA_OPTION = "vortex.mergeSchema";
 
     /** Option bounding how many footers are read at once. */
@@ -56,10 +56,10 @@ public final class VortexFooterReader {
      *
      * <p>Listed files without {@link VortexFile#EXTENSION} are not part of the dataset and are skipped.
      *
-     * <p>Every file's footer is read and the schemas are merged, so a column only some files carry is still part of the
-     * dataset. A field missing from a file is nullable in the result, and the reader fills it with nulls for that
-     * file's rows. Set {@value #MERGE_SCHEMA_OPTION} to false to read one footer and let the first file's schema stand
-     * for the dataset; a dataset of uniform files then costs one footer read instead of one per file.
+     * <p>By default, only the first file's footer is read and its schema stands for the dataset. Set
+     * {@value #MERGE_SCHEMA_OPTION} to true to read every file's footer on the driver and merge their schemas. A column
+     * only some files carry is then part of the dataset and nullable in the result, and the reader fills it with nulls
+     * for the other files' rows.
      *
      * <p>Top-level names are resolved using Spark's case sensitivity setting, retaining the first spelling seen.
      *
@@ -89,7 +89,7 @@ public final class VortexFooterReader {
             return null;
         }
 
-        if (!options.getBoolean(MERGE_SCHEMA_OPTION, true)) {
+        if (!options.getBoolean(MERGE_SCHEMA_OPTION, false)) {
             VortexFile file = vortexFiles.get(0);
             return validateSchema(
                     withDataSource(file, io, options, VortexFooterReader::sparkSchema), file, caseSensitive);
