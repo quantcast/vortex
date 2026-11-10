@@ -24,6 +24,7 @@ mod dynamic_expression;
 #[cfg(test)]
 mod fn_tests;
 mod like_variant;
+mod set_disjoint;
 
 pub(crate) use builtins::register_builtins;
 
