@@ -14,6 +14,7 @@ import dev.vortex.api.Session;
 import dev.vortex.api.VortexWriter;
 import dev.vortex.io.NativeWritable;
 import java.io.IOException;
+import java.lang.ref.Reference;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -114,13 +115,19 @@ public final class IndependentBuffersTest {
                 ArrowArray array = ArrowArray.allocateNew(allocator)) {
             fill(root, 32);
             Data.exportSchema(allocator, schema, null, ffiSchema);
-            long writer = NativeWriter.create(
-                    Session.create().nativePointer(),
-                    directory.resolve("failure.vortex").toString(),
-                    ffiSchema.memoryAddress(),
-                    Map.of(),
-                    Map.of(),
-                    false);
+            Session session = Session.create();
+            long writer;
+            try {
+                writer = NativeWriter.create(
+                        session.nativePointer(),
+                        directory.resolve("failure.vortex").toString(),
+                        ffiSchema.memoryAddress(),
+                        Map.of(),
+                        Map.of(),
+                        false);
+            } finally {
+                Reference.reachabilityFence(session);
+            }
             try {
                 Data.exportVectorSchemaRoot(allocator, root, null, array);
                 // Omit the struct validity buffer while retaining its child's allocations.

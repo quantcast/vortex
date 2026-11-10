@@ -9,6 +9,7 @@ import dev.vortex.io.NativeWritable;
 import dev.vortex.jni.NativeBuffers;
 import dev.vortex.jni.NativeWriter;
 import java.io.IOException;
+import java.lang.ref.Reference;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -179,6 +180,8 @@ public final class VortexWriter implements AutoCloseable {
                     // Native failures arrive as RuntimeException. Wrap them so callers can handle every
                     // failure to open a writer as an IOException, as writeBatch and finish already do.
                     throw new IOException("failed to create writer for " + destination(), e);
+                } finally {
+                    Reference.reachabilityFence(session);
                 }
                 if (pointer <= 0) {
                     throw new IOException("failed to create writer for " + destination() + " (ptr=" + pointer + ")");
@@ -226,6 +229,8 @@ public final class VortexWriter implements AutoCloseable {
             }
         } catch (RuntimeException e) {
             throw new IOException("failed to write batch", e);
+        } finally {
+            Reference.reachabilityFence(this);
         }
     }
 
@@ -241,6 +246,8 @@ public final class VortexWriter implements AutoCloseable {
             ok = NativeWriter.writeBatch(pointer, arrowArrayAddr, arrowSchemaAddr);
         } catch (RuntimeException e) {
             throw new IOException("failed to write batch", e);
+        } finally {
+            Reference.reachabilityFence(this);
         }
         if (!ok) {
             throw new IOException("failed to write batch");
@@ -259,7 +266,12 @@ public final class VortexWriter implements AutoCloseable {
             return summary.fileSize();
         }
         Preconditions.checkState(!closed.get(), "writer closed without a write summary");
-        long bytesWritten = NativeWriter.bytesWritten(pointer);
+        long bytesWritten;
+        try {
+            bytesWritten = NativeWriter.bytesWritten(pointer);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
         Preconditions.checkState(bytesWritten >= 0, "native writer returned an invalid byte count");
         return bytesWritten;
     }
@@ -276,7 +288,12 @@ public final class VortexWriter implements AutoCloseable {
             return 0;
         }
         Preconditions.checkState(!closed.get(), "writer closed without a write summary");
-        long bufferedBytes = NativeWriter.bufferedBytes(pointer);
+        long bufferedBytes;
+        try {
+            bufferedBytes = NativeWriter.bufferedBytes(pointer);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
         Preconditions.checkState(bufferedBytes >= 0, "native writer returned an invalid buffered byte count");
         return bufferedBytes;
     }
