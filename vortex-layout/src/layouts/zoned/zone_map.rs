@@ -397,8 +397,10 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use rstest::rstest;
+    use vortex_array::ArrayRef;
     use vortex_array::IntoArray;
     use vortex_array::VortexSessionExecute;
+    use vortex_array::aggregate_fn::AggregateFnRef;
     use vortex_array::aggregate_fn::AggregateFnVTableExt;
     use vortex_array::aggregate_fn::EmptyOptions;
     use vortex_array::aggregate_fn::NumericalAggregateOpts;
@@ -472,6 +474,50 @@ mod tests {
         unsafe { NonZeroUsize::new_unchecked(64) }
     }
 
+    /// A zone map holding the skip-NaN min and max of each zone, plus any `extra` aggregates.
+    fn min_max_zone_map(
+        dtype: &DType,
+        mins: ArrayRef,
+        maxs: ArrayRef,
+        extra: impl IntoIterator<Item = (AggregateFnRef, ArrayRef)>,
+        row_count: u64,
+    ) -> VortexResult<ZoneMap> {
+        let min = Min.bind(NumericalAggregateOpts::skip_nans());
+        let max = Max.bind(NumericalAggregateOpts::skip_nans());
+        let (aggregates, fields): (Vec<_>, Vec<_>) = [(min, mins), (max, maxs)]
+            .into_iter()
+            .chain(extra)
+            .map(|(aggregate, array)| {
+                let name = aggregate.to_string();
+                (aggregate, (name, array))
+            })
+            .unzip();
+        ZoneMap::try_new(
+            dtype.clone(),
+            StructArray::from_fields(&fields)?,
+            aggregates.into(),
+            4,
+            row_count,
+        )
+    }
+
+    /// The bound `root() IN list` and its falsifier, optionally after optimization prepares the
+    /// list as a set.
+    fn in_list_falsifier(
+        dtype: &DType,
+        list: Scalar,
+        optimized: bool,
+    ) -> VortexResult<(BoundExpression, BoundExpression)> {
+        let mut expr = in_list(root(), lit(list)).bind(dtype)?;
+        if optimized {
+            expr = expr.optimize_recursive()?;
+        }
+        let proof = expr
+            .falsify(&SESSION)?
+            .expect("constant IN list has a falsifier");
+        Ok((expr, proof))
+    }
+
     #[rstest]
     #[case(16, false, false)]
     #[case(17, false, false)]
@@ -500,53 +546,34 @@ mod tests {
             Nullability::NonNullable,
         );
         let last = (count - 1) * 10;
-        let min = Min.bind(NumericalAggregateOpts::skip_nans());
-        let max = Max.bind(NumericalAggregateOpts::skip_nans());
-        let zone_map = ZoneMap::try_new(
-            dtype.clone(),
-            StructArray::from_fields(&[
-                (
-                    min.to_string(),
-                    PrimitiveArray::from_option_iter([
-                        Some(-1i32),
-                        Some(0),
-                        Some(1),
-                        Some(9),
-                        Some(11),
-                        Some(last),
-                        Some(last + 1),
-                        None,
-                    ])
-                    .into_array(),
-                ),
-                (
-                    max.to_string(),
-                    PrimitiveArray::from_option_iter([
-                        Some(-1i32),
-                        Some(0),
-                        Some(9),
-                        Some(10),
-                        Some(19),
-                        Some(last),
-                        Some(last + 10),
-                        None,
-                    ])
-                    .into_array(),
-                ),
-            ])?,
-            Arc::new([min, max]),
-            4,
+        let zone_map = min_max_zone_map(
+            &dtype,
+            PrimitiveArray::from_option_iter([
+                Some(-1i32),
+                Some(0),
+                Some(1),
+                Some(9),
+                Some(11),
+                Some(last),
+                Some(last + 1),
+                None,
+            ])
+            .into_array(),
+            PrimitiveArray::from_option_iter([
+                Some(-1i32),
+                Some(0),
+                Some(9),
+                Some(10),
+                Some(19),
+                Some(last),
+                Some(last + 10),
+                None,
+            ])
+            .into_array(),
+            [],
             32,
         )?;
-        let expr = in_list(root(), lit(list)).bind(&dtype)?;
-        let expr = if optimized {
-            expr.optimize_recursive()?
-        } else {
-            expr
-        };
-        let proof = expr
-            .falsify(&SESSION)?
-            .expect("constant IN list has a falsifier");
+        let (_, proof) = in_list_falsifier(&dtype, list, optimized)?;
         assert_arrays_eq!(
             zone_map.prune(&proof, &SESSION)?.into_array(),
             BoolArray::from_iter([true, false, true, false, true, false, true, false]),
@@ -569,53 +596,34 @@ mod tests {
                 .collect(),
             Nullability::NonNullable,
         );
-        let min = Min.bind(NumericalAggregateOpts::skip_nans());
-        let max = Max.bind(NumericalAggregateOpts::skip_nans());
-        let zone_map = ZoneMap::try_new(
-            dtype.clone(),
-            StructArray::from_fields(&[
-                (
-                    min.to_string(),
-                    VarBinViewArray::from_iter(
-                        [
-                            Some("key-000"),
-                            Some("key-010a"),
-                            Some("key-078z"),
-                            Some("key-080"),
-                            None,
-                        ],
-                        dtype.clone(),
-                    )
-                    .into_array(),
-                ),
-                (
-                    max.to_string(),
-                    VarBinViewArray::from_iter(
-                        [
-                            Some("key-000"),
-                            Some("key-010z"),
-                            Some("key-079"),
-                            Some("key-099"),
-                            None,
-                        ],
-                        dtype.clone(),
-                    )
-                    .into_array(),
-                ),
-            ])?,
-            Arc::new([min, max]),
-            4,
+        let zone_map = min_max_zone_map(
+            &dtype,
+            VarBinViewArray::from_iter(
+                [
+                    Some("key-000"),
+                    Some("key-010a"),
+                    Some("key-078z"),
+                    Some("key-080"),
+                    None,
+                ],
+                dtype.clone(),
+            )
+            .into_array(),
+            VarBinViewArray::from_iter(
+                [
+                    Some("key-000"),
+                    Some("key-010z"),
+                    Some("key-079"),
+                    Some("key-099"),
+                    None,
+                ],
+                dtype.clone(),
+            )
+            .into_array(),
+            [],
             20,
         )?;
-        let expr = in_list(root(), lit(list)).bind(&dtype)?;
-        let expr = if optimized {
-            expr.optimize_recursive()?
-        } else {
-            expr
-        };
-        let proof = expr
-            .falsify(&SESSION)?
-            .expect("constant IN list has a falsifier");
+        let (_, proof) = in_list_falsifier(&dtype, list, optimized)?;
         assert_arrays_eq!(
             zone_map.prune(&proof, &SESSION)?.into_array(),
             BoolArray::from_iter([false, true, false, true, false]),
@@ -638,89 +646,45 @@ mod tests {
                 .collect(),
             Nullability::NonNullable,
         );
-        let min = Min.bind(NumericalAggregateOpts::skip_nans());
-        let max = Max.bind(NumericalAggregateOpts::skip_nans());
-        let mut fields = vec![
-            (
-                min.to_string(),
-                PrimitiveArray::from_option_iter([
-                    Some(5.0f64),
-                    Some(5.0),
-                    Some(-0.0),
-                    Some(0.0),
-                    None,
-                ])
-                .into_array(),
-            ),
-            (
-                max.to_string(),
-                PrimitiveArray::from_option_iter([
-                    Some(5.0f64),
-                    Some(5.0),
-                    Some(-0.0),
-                    Some(0.0),
-                    None,
-                ])
-                .into_array(),
-            ),
-        ];
-        let mut aggregates = vec![min, max];
-        if nan_stats {
-            let nan_count = NanCount.bind(EmptyOptions);
-            fields.push((
-                nan_count.to_string(),
-                PrimitiveArray::new(buffer![1u64, 0, 0, 0, 0], Validity::AllValid).into_array(),
-            ));
-            aggregates.push(nan_count);
-        }
-        let zone_map = ZoneMap::try_new(
-            dtype.clone(),
-            StructArray::from_fields(&fields)?,
-            aggregates.into(),
-            4,
-            20,
-        )?;
-        let expr = in_list(root(), lit(list)).bind(&dtype)?;
-        let expr = if optimized {
-            expr.optimize_recursive()?
-        } else {
-            expr
-        };
-        let proof = expr
-            .falsify(&SESSION)?
-            .expect("constant IN list has a falsifier");
-        // Zone zero can contain a matching NaN although its finite extrema are outside the
-        // set. Signed zero membership follows the same total order as the min/max aggregates.
-        let mut ctx = SESSION.create_execution_ctx();
-        let actual = PrimitiveArray::from_option_iter([
-            Some(f64::NAN),
+        let bounds = PrimitiveArray::from_option_iter([
+            Some(5.0f64),
             Some(5.0),
             Some(-0.0),
             Some(0.0),
             None,
         ])
-        .into_array()
-        .apply_bound(&expr)?;
-        let matching = super::null_as_false_mask(actual.clone(), &mut ctx)?;
+        .into_array();
+        let nan_count = nan_stats.then(|| {
+            (
+                NanCount.bind(EmptyOptions),
+                PrimitiveArray::new(buffer![1u64, 0, 0, 0, 0], Validity::AllValid).into_array(),
+            )
+        });
+        let zone_map = min_max_zone_map(&dtype, bounds.clone(), bounds, nan_count, 20)?;
+        let (expr, proof) = in_list_falsifier(&dtype, list, optimized)?;
+        // Zone zero holds a matching NaN although its finite extrema are outside the set, so
+        // only NaN stats can prune it.
+        let mut ctx = SESSION.create_execution_ctx();
         assert_arrays_eq!(
-            actual,
-            BoolArray::from_iter([Some(true), Some(false), Some(true), Some(false), None,]),
+            PrimitiveArray::from_option_iter([
+                Some(f64::NAN),
+                Some(5.0),
+                Some(-0.0),
+                Some(0.0),
+                None,
+            ])
+            .into_array()
+            .apply_bound(&expr)?,
+            BoolArray::from_iter([Some(true), Some(false), Some(true), Some(false), None]),
             &mut ctx
         );
-        let pruned = zone_map.prune(&proof, &SESSION)?;
-        for zone in 0..5 {
-            assert!(
-                !(matching.value(zone) && pruned.value(zone)),
-                "pruned matching zone {zone}"
-            );
-        }
         let expected = if nan_stats {
             [false, true, false, true, false]
         } else {
             [false; 5]
         };
         assert_arrays_eq!(
-            pruned.into_array(),
+            zone_map.prune(&proof, &SESSION)?.into_array(),
             BoolArray::from_iter(expected),
             &mut ctx
         );
@@ -743,32 +707,15 @@ mod tests {
             .collect::<Buffer<_>>();
         let needles = PrimitiveArray::new(values.clone(), Validity::NonNullable).into_array();
         let bounds = PrimitiveArray::new(values, Validity::AllValid).into_array();
-        let min = Min.bind(NumericalAggregateOpts::skip_nans());
-        let max = Max.bind(NumericalAggregateOpts::skip_nans());
-        let zone_map = ZoneMap::try_new(
-            dtype.clone(),
-            StructArray::from_fields(&[
-                (min.to_string(), bounds.clone()),
-                (max.to_string(), bounds),
-            ])?,
-            Arc::new([min, max]),
-            4,
-            32768,
-        )?;
-        let expr = in_list(root(), lit(list))
-            .bind(&dtype)?
-            .optimize_recursive()?;
-        let proof = expr
-            .falsify(&SESSION)?
-            .expect("constant IN list has a falsifier");
+        let zone_map = min_max_zone_map(&dtype, bounds.clone(), bounds, [], 32768)?;
+        let (expr, proof) = in_list_falsifier(&dtype, list, true)?;
         let pruned = zone_map.prune(&proof, &SESSION)?;
-        let mut ctx = SESSION.create_execution_ctx();
-        // Every zone holds one distinct value. Its complement must agree with actual batch
-        // membership, including the thousands of zones between selected keys.
+        // Every zone holds one distinct value, so the zones kept must be exactly those whose
+        // value is a member, including among the thousands of zones between selected keys.
         assert_arrays_eq!(
-            needles.apply_bound(&expr)?,
             (!pruned).into_array(),
-            &mut ctx
+            needles.apply_bound(&expr)?,
+            &mut SESSION.create_execution_ctx()
         );
         Ok(())
     }

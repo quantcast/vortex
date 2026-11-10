@@ -33,21 +33,21 @@ pub(super) struct SortedValues {
 }
 
 impl SortedValues {
-    pub(super) fn new(elements: Vec<Scalar>) -> Option<Self> {
-        let dtype = elements.first()?.dtype().clone();
-        if !matches!(
+    /// Whether members of `dtype` order as their min/max aggregates do.
+    pub(super) fn supports(dtype: &DType) -> bool {
+        matches!(
             dtype,
             DType::Bool(_)
                 | DType::Primitive(..)
                 | DType::Decimal(..)
                 | DType::Utf8(_)
                 | DType::Binary(_)
-        ) || elements
-            .iter()
-            .any(|value| !value.dtype().eq_ignore_nullability(&dtype))
-        {
-            return None;
-        }
+        )
+    }
+
+    /// The members of a list of `dtype` elements, which must be [supported](Self::supports).
+    pub(super) fn new(dtype: DType, elements: Vec<Scalar>) -> Self {
+        debug_assert!(Self::supports(&dtype));
         let mut values = elements
             .into_iter()
             .filter(|value| !value.is_null())
@@ -56,22 +56,22 @@ impl SortedValues {
         // particular, floating-point order distinguishes signed zero and NaN bit patterns.
         values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
         values.dedup();
-        Some(Self {
+        Self {
             dtype,
             values: values.into(),
-        })
+        }
     }
 
     fn disjoint(&self, min: &Scalar, max: &Scalar) -> bool {
-        // Missing bounds prove nothing, including for all-null zones. Float callers also
-        // retain the existing non-NaN proof because min/max may omit matching NaN needles.
-        if min.is_null() || max.is_null() || min.partial_cmp(max).is_none() || min > max {
+        // Missing bounds prove nothing, including for all-null zones.
+        if min.is_null()
+            || max.is_null()
+            || matches!(min.partial_cmp(max), None | Some(Ordering::Greater))
+        {
             return false;
         }
         let first = self.values.partition_point(|value| value < min);
-        self.values
-            .get(first)
-            .is_none_or(|value| value.partial_cmp(max) == Some(Ordering::Greater))
+        self.values.get(first).is_none_or(|value| value > max)
     }
 }
 
@@ -106,7 +106,12 @@ impl ScalarFnVTable for SetDisjoint {
     }
 
     fn return_dtype(&self, values: &Self::Options, args: &[DType]) -> VortexResult<DType> {
-        vortex_ensure!(args[0].eq_ignore_nullability(&args[1]));
+        vortex_ensure!(
+            args[0].eq_ignore_nullability(&args[1]),
+            "Zone bounds must share a dtype, got {} and {}",
+            args[0],
+            args[1]
+        );
         vortex_ensure!(
             values.dtype.eq_ignore_nullability(&args[0]),
             "Set members must have the dtype of the zone bounds"
@@ -120,19 +125,16 @@ impl ScalarFnVTable for SetDisjoint {
         args: &dyn ExecutionArgs,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<ArrayRef> {
-        // Materialize once and retain probe state, rather than executing each bound per zone.
-        let mut min = args
-            .get(0)?
-            .execute::<RecursiveCanonical>(ctx)?
-            .0
-            .into_array()
-            .repeated_probe();
-        let mut max = args
-            .get(1)?
-            .execute::<RecursiveCanonical>(ctx)?
-            .0
-            .into_array()
-            .repeated_probe();
+        let mut probe = |idx| -> VortexResult<_> {
+            Ok(args
+                .get(idx)?
+                .execute::<RecursiveCanonical>(ctx)?
+                .0
+                .into_array()
+                .repeated_probe())
+        };
+        let mut min = probe(0)?;
+        let mut max = probe(1)?;
         let results = (0..args.row_count())
             .map(|idx| {
                 Ok(values.disjoint(

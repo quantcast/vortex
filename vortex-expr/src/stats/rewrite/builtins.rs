@@ -527,7 +527,8 @@ impl StatsRewriteRule for ListContainsAllNonNanStatsRewrite {
     }
 }
 
-/// Larger lists use one binary range lookup per zone instead of a test per element.
+/// Larger lists use one binary range lookup per zone instead of a test per element, or the
+/// list's overall bounds when its dtype is not supported by the lookup.
 const MAX_LIST_ELEMENT_FALSIFICATIONS: usize = 16;
 
 /// The smallest and largest non-null elements, or `None` when there are none or two elements
@@ -554,8 +555,7 @@ fn list_contains_falsify<P: NonNanProof>(
     let list = expr.child(0);
     let needle = expr.child(1);
 
-    // Non-float proofs are emitted by one rule only. Check before cloning and sorting a
-    // potentially large list for the other rule, whose unguarded proof would be discarded.
+    // Only one rule emits non-float proofs, so skip the list work in the other.
     if !P::EMIT_UNGUARDED_REWRITES && matches!(P::check(needle)?, NanCheck::NotNeeded) {
         return Ok(None);
     }
@@ -563,10 +563,10 @@ fn list_contains_falsify<P: NonNanProof>(
     let list_scalar = list
         .as_opt::<Literal>()
         .or_else(|| list.as_opt::<PreparedSet>().map(|set| set.list()));
-    let elements = list_scalar
-        .and_then(|scalar| scalar.as_list_opt())
-        .and_then(|list| list.elements());
-    let Some(elements) = elements else {
+    let Some(list) = list_scalar.and_then(|scalar| scalar.as_list_opt()) else {
+        return Ok(None);
+    };
+    let Some(elements) = list.elements() else {
         return Ok(None);
     };
     if elements.is_empty() {
@@ -580,24 +580,26 @@ fn list_contains_falsify<P: NonNanProof>(
         return Ok(None);
     };
 
-    let value_predicate = if elements.len() > MAX_LIST_ELEMENT_FALSIFICATIONS
-        && let Some(values) = SortedValues::new(elements.clone())
-    {
-        Some(SetDisjoint.try_new_bound_expr(values, [value_min, value_max])?)
-    } else if elements.len() > MAX_LIST_ELEMENT_FALSIFICATIONS
-        && let Some((low, high)) = non_null_bounds(&elements)
-    {
-        Some(or(
-            lt(value_max, lit(low.clone())),
-            gt(value_min, lit(high.clone())),
-        ))
-    } else {
+    let per_element = |elements: &[Scalar]| {
         and_collect(elements.iter().map(|value| {
             or(
                 lt(value_max.clone(), lit(value.clone())),
                 gt(value_min.clone(), lit(value.clone())),
             )
         }))
+    };
+    let value_predicate = if elements.len() <= MAX_LIST_ELEMENT_FALSIFICATIONS {
+        per_element(&elements)
+    } else if SortedValues::supports(list.element_dtype()) {
+        let values = SortedValues::new(list.element_dtype().clone(), elements);
+        Some(SetDisjoint.try_new_bound_expr(values, [value_min.clone(), value_max.clone()])?)
+    } else if let Some((low, high)) = non_null_bounds(&elements) {
+        Some(or(
+            lt(value_max.clone(), lit(low.clone())),
+            gt(value_min.clone(), lit(high.clone())),
+        ))
+    } else {
+        per_element(&elements)
     };
     value_predicate
         .map(|value_predicate| with_non_nan_guards::<P>([needle], value_predicate))
@@ -1261,13 +1263,13 @@ mod tests {
 
         assert_rewrite_eq!(
             falsify(&expr)?,
-            Some(
-                SetDisjoint.new_expr(
-                    SortedValues::new((0..20).map(|value| Scalar::from(Some(value))).collect())
-                        .expect("integers are ordered"),
-                    [stat(col("a"), Stat::Min), stat(col("a"), Stat::Max)],
-                )
-            )
+            Some(SetDisjoint.new_expr(
+                SortedValues::new(
+                    DType::Primitive(PType::I32, Nullability::Nullable),
+                    (0..20).map(|value| Scalar::from(Some(value))).collect(),
+                ),
+                [stat(col("a"), Stat::Min), stat(col("a"), Stat::Max)],
+            ))
         );
         Ok(())
     }
