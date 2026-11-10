@@ -8,6 +8,7 @@ import dev.vortex.spark.VortexOptions;
 import dev.vortex.spark.io.VortexFile;
 import dev.vortex.spark.io.VortexIo;
 import java.io.Serializable;
+import java.util.function.LongConsumer;
 import org.apache.spark.sql.catalyst.FileSourceOptions;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.InputPartition;
@@ -71,13 +72,30 @@ public final class VortexPartitionReaderFactory extends FilePartitionReaderFacto
     }
 
     @Override
+    public PartitionReader<ColumnarBatch> createColumnarReader(InputPartition partition) {
+        return VortexReadMetrics.createReader(partition, this, fileOptions, this::buildColumnarReader);
+    }
+
+    @Override
     public PartitionReader<ColumnarBatch> buildColumnarReader(PartitionedFile file) {
+        return buildColumnarReader(file, ignored -> {});
+    }
+
+    private PartitionReader<ColumnarBatch> buildColumnarReader(PartitionedFile file, LongConsumer bytesRead) {
         if (!VortexFile.hasVortexExtension(file.toPath().getName())) {
             return new EmptyPartitionReader<>();
         }
 
         return new VortexPartitionReader(
-                file, dataSchema, readDataSchema, readPartitionSchema, io, formatOptions, pushedFilters, caseSensitive);
+                file,
+                dataSchema,
+                readDataSchema,
+                readPartitionSchema,
+                io,
+                formatOptions,
+                pushedFilters,
+                caseSensitive,
+                bytesRead);
     }
 
     @Override

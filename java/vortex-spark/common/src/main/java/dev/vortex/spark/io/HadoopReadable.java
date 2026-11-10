@@ -8,8 +8,10 @@ import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.function.LongConsumer;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystem;
@@ -24,6 +26,7 @@ public final class HadoopReadable extends PooledReadable {
     private final FileSystem fs;
     private final int coalesceDistance;
     private final int coalesceMaxSize;
+    private final LongConsumer bytesRead;
 
     /** Opens a readable over {@code path}, stating the file for its length. */
     public static HadoopReadable open(Configuration conf, String path) {
@@ -35,7 +38,7 @@ public final class HadoopReadable extends PooledReadable {
      * stats every file when it plans the scan, so executors need not stat them again.
      */
     public static HadoopReadable open(Configuration conf, String path, long length) {
-        return open(conf, path, length, DEFAULT_COALESCE_DISTANCE, DEFAULT_COALESCE_MAX_SIZE);
+        return open(conf, path, length, DEFAULT_COALESCE_DISTANCE, DEFAULT_COALESCE_MAX_SIZE, ignored -> {});
     }
 
     /**
@@ -44,23 +47,41 @@ public final class HadoopReadable extends PooledReadable {
      */
     public static HadoopReadable open(
             Configuration conf, String path, long length, int coalesceDistance, int coalesceMaxSize) {
+        return open(conf, path, length, coalesceDistance, coalesceMaxSize, ignored -> {});
+    }
+
+    /** As {@link #open(Configuration, String, long, int, int)}, reporting each successful read's byte count. */
+    public static HadoopReadable open(
+            Configuration conf,
+            String path,
+            long length,
+            int coalesceDistance,
+            int coalesceMaxSize,
+            LongConsumer bytesRead) {
         Path file = new Path(path);
         try {
             FileSystem fs = file.getFileSystem(conf);
             long resolved = length >= 0 ? length : fs.getFileStatus(file).getLen();
-            return new HadoopReadable(path, file, fs, resolved, coalesceDistance, coalesceMaxSize);
+            return new HadoopReadable(path, file, fs, resolved, coalesceDistance, coalesceMaxSize, bytesRead);
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to open " + path, e);
         }
     }
 
     private HadoopReadable(
-            String name, Path path, FileSystem fs, long length, int coalesceDistance, int coalesceMaxSize) {
+            String name,
+            Path path,
+            FileSystem fs,
+            long length,
+            int coalesceDistance,
+            int coalesceMaxSize,
+            LongConsumer bytesRead) {
         super(name, length);
         this.path = path;
         this.fs = fs;
         this.coalesceDistance = coalesceDistance;
         this.coalesceMaxSize = coalesceMaxSize;
+        this.bytesRead = Objects.requireNonNull(bytesRead, "bytesRead");
     }
 
     @Override
@@ -93,6 +114,11 @@ public final class HadoopReadable extends PooledReadable {
         } catch (ExecutionException e) {
             return FutureIO.raiseInnerCause(e);
         }
+    }
+
+    @Override
+    protected void onBytesRead(long bytes) {
+        bytesRead.accept(bytes);
     }
 
     private static final class HadoopStream implements PositionalStream {
