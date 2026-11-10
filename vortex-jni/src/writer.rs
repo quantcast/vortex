@@ -561,7 +561,7 @@ mod tests {
     use vortex::session::SessionExt;
     use vortex::session::SessionVar;
     use vortex::session::registry::Id;
-    use vortex_arrow::ArrowSessionExt;
+    use vortex_arrow::ExecuteArrowExt;
 
     use super::LIST_LAYOUT_EDITION;
     use super::write_session;
@@ -756,7 +756,7 @@ mod tests {
                     let mut chunks = partition?.execute()?;
                     while let Some(chunk) = chunks.next().await {
                         let mut ctx = session.create_execution_ctx();
-                        session.arrow().execute_arrow(chunk?, None, &mut ctx)?;
+                        chunk?.execute_arrow(None, &mut ctx)?;
                     }
                 }
             }
