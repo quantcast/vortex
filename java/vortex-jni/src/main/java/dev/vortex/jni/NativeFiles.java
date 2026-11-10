@@ -66,12 +66,12 @@ public final class NativeFiles {
      * readable is scanned, so reading metadata and then scanning the same file share one footer read.
      */
     public static Map<String, byte[]> readMetadata(Session session, NativeReadable readable) {
+        Objects.requireNonNull(readable, "readable");
+        String name = readable.name();
+        Preconditions.checkArgument(name != null && !name.isEmpty(), "readable reported an empty name");
+        long length = readable.length();
+        Preconditions.checkArgument(length >= 0, "readable for %s reported negative length", name);
         try {
-            Objects.requireNonNull(readable, "readable");
-            String name = readable.name();
-            Preconditions.checkArgument(name != null && !name.isEmpty(), "readable reported an empty name");
-            long length = readable.length();
-            Preconditions.checkArgument(length >= 0, "readable for %s reported negative length", name);
             return readMetadataFromReadable(session.nativePointer(), readable, name, length);
         } finally {
             Reference.reachabilityFence(session);
@@ -103,12 +103,12 @@ public final class NativeFiles {
      * readable is scanned, so reading statistics and then scanning the same file share one footer read.
      */
     public static List<VortexColumnStatistics> readStatistics(Session session, NativeReadable readable) {
+        Objects.requireNonNull(readable, "readable");
+        String name = readable.name();
+        Preconditions.checkArgument(name != null && !name.isEmpty(), "readable reported an empty name");
+        long length = readable.length();
+        Preconditions.checkArgument(length >= 0, "readable for %s reported negative length", name);
         try {
-            Objects.requireNonNull(readable, "readable");
-            String name = readable.name();
-            Preconditions.checkArgument(name != null && !name.isEmpty(), "readable reported an empty name");
-            long length = readable.length();
-            Preconditions.checkArgument(length >= 0, "readable for %s reported negative length", name);
             return List.of(readStatisticsFromReadable(session.nativePointer(), readable, name, length));
         } finally {
             Reference.reachabilityFence(session);
