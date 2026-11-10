@@ -25,14 +25,21 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongConsumer;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FSInputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FutureDataInputStreamBuilder;
+import org.apache.hadoop.fs.LocalFileSystem;
 import org.apache.hadoop.fs.RawLocalFileSystem;
 import org.apache.hadoop.fs.impl.FutureDataInputStreamBuilderImpl;
 import org.junit.jupiter.api.Test;
@@ -149,8 +156,9 @@ final class HadoopReadableTest {
         Path file = write("data.vortex", content);
         int readers = 8;
         int chunk = SIZE / readers;
+        AtomicLong bytes = new AtomicLong();
 
-        try (NativeReadable readable = HadoopReadable.open(conf, file.toString())) {
+        try (NativeReadable readable = openCounting(conf, file.toString(), SIZE, bytes::addAndGet)) {
             ExecutorService pool = Executors.newFixedThreadPool(readers);
             try {
                 List<Callable<byte[]>> reads = new ArrayList<>();
@@ -177,6 +185,7 @@ final class HadoopReadableTest {
             } finally {
                 pool.shutdownNow();
             }
+            assertEquals((long) SIZE * 20, bytes.get());
         }
     }
 
@@ -187,6 +196,147 @@ final class HadoopReadableTest {
         try (NativeReadable readable = HadoopReadable.open(conf, file.toString())) {
             assertThrows(EOFException.class, () -> readable.readFully(512, ByteBuffer.allocateDirect(1024)));
             assertThrows(EOFException.class, () -> readable.readFully(1024, ByteBuffer.allocateDirect(1)));
+        }
+    }
+
+    @Test
+    void failedReadsDoNotReportRequestedBytes() throws IOException {
+        Path file = write("short.vortex", content(16));
+        AtomicLong bytes = new AtomicLong();
+        // The trusted length exceeds the storage length, so this reaches the stream's EOF guard.
+        try (NativeReadable readable = openCounting(conf, file.toString(), 32, bytes::addAndGet)) {
+            assertThrows(EOFException.class, () -> readable.readFully(0, ByteBuffer.allocateDirect(32)));
+            assertEquals(0, bytes.get());
+            readable.readFully(0, ByteBuffer.allocateDirect(16));
+            assertEquals(16, bytes.get());
+        }
+    }
+
+    @Test
+    void closeDrainsInFlightReads() throws Exception {
+        closeDuringRead(false);
+    }
+
+    @Test
+    void interruptedCloseDoesNotWaitForAStalledRead() throws Exception {
+        closeDuringRead(true);
+    }
+
+    @Test
+    void interruptedCloseSucceedsWithNoReadsInFlight() throws IOException {
+        Path file = write("idle.vortex", content(16));
+        NativeReadable readable = openCounting(conf, file.toString(), 16, ignored -> {});
+        readable.readFully(0, ByteBuffer.allocateDirect(16));
+        Thread.currentThread().interrupt();
+        try {
+            readable.close();
+            assertTrue(Thread.currentThread().isInterrupted());
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    private void closeDuringRead(boolean interrupt) throws Exception {
+        BlockingLocalFileSystem.reading = new CountDownLatch(1);
+        BlockingLocalFileSystem.finish = new CountDownLatch(1);
+        Configuration blockingConf = new Configuration(conf);
+        blockingConf.setClass("fs.file.impl", BlockingLocalFileSystem.class, org.apache.hadoop.fs.FileSystem.class);
+        blockingConf.setBoolean("fs.file.impl.disable.cache", true);
+        Path file = write("blocked.vortex", content(16));
+        AtomicLong bytes = new AtomicLong();
+        NativeReadable readable = openCounting(blockingConf, file.toString(), 16, bytes::addAndGet);
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> read = workers.submit(() -> {
+                readable.readFully(0, ByteBuffer.allocateDirect(16));
+                return null;
+            });
+            assertTrue(BlockingLocalFileSystem.reading.await(10, TimeUnit.SECONDS));
+            Future<?> close = workers.submit(() -> {
+                if (interrupt) {
+                    Thread.currentThread().interrupt();
+                    try {
+                        assertThrows(InterruptedIOException.class, readable::close);
+                        assertTrue(Thread.currentThread().isInterrupted());
+                    } finally {
+                        Thread.interrupted();
+                    }
+                } else {
+                    readable.close();
+                }
+                return null;
+            });
+            if (interrupt) {
+                close.get(10, TimeUnit.SECONDS);
+            } else {
+                assertThrows(TimeoutException.class, () -> close.get(100, TimeUnit.MILLISECONDS));
+            }
+            BlockingLocalFileSystem.finish.countDown();
+            read.get(10, TimeUnit.SECONDS);
+            close.get(10, TimeUnit.SECONDS);
+            assertEquals(16, bytes.get());
+            assertThrows(IllegalStateException.class, () -> readable.readFully(0, ByteBuffer.allocateDirect(16)));
+        } finally {
+            BlockingLocalFileSystem.finish.countDown();
+            workers.shutdownNow();
+            readable.close();
+        }
+    }
+
+    public static final class BlockingLocalFileSystem extends LocalFileSystem {
+        private static CountDownLatch reading;
+        private static CountDownLatch finish;
+
+        @Override
+        public FSDataInputStream open(org.apache.hadoop.fs.Path path, int bufferSize) throws IOException {
+            return new FSDataInputStream(new BlockingInputStream(super.open(path, bufferSize)));
+        }
+    }
+
+    private static final class BlockingInputStream extends FSInputStream {
+        private final FSDataInputStream input;
+
+        private BlockingInputStream(FSDataInputStream input) {
+            this.input = input;
+        }
+
+        @Override
+        public void seek(long position) throws IOException {
+            input.seek(position);
+        }
+
+        @Override
+        public long getPos() throws IOException {
+            return input.getPos();
+        }
+
+        @Override
+        public boolean seekToNewSource(long target) throws IOException {
+            return input.seekToNewSource(target);
+        }
+
+        @Override
+        public int read() throws IOException {
+            return input.read();
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            BlockingLocalFileSystem.reading.countDown();
+            try {
+                if (!BlockingLocalFileSystem.finish.await(10, TimeUnit.SECONDS)) {
+                    throw new IOException("read timed out");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException(e);
+            }
+            return input.read(buffer, offset, length);
+        }
+
+        @Override
+        public void close() throws IOException {
+            input.close();
         }
     }
 
@@ -280,6 +430,16 @@ final class HadoopReadableTest {
                 }
             };
         }
+    }
+
+    private static NativeReadable openCounting(Configuration conf, String path, long length, LongConsumer bytesRead) {
+        return HadoopReadable.open(
+                conf,
+                path,
+                length,
+                NativeReadable.DEFAULT_COALESCE_DISTANCE,
+                NativeReadable.DEFAULT_COALESCE_MAX_SIZE,
+                bytesRead);
     }
 
     private Path write(String name, byte[] content) throws IOException {

@@ -9,6 +9,7 @@ import dev.vortex.spark.io.VortexFile;
 import dev.vortex.spark.io.VortexIo;
 import java.io.Serializable;
 import java.util.OptionalLong;
+import java.util.function.LongConsumer;
 import org.apache.spark.sql.catalyst.FileSourceOptions;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.expressions.Expression;
@@ -76,7 +77,16 @@ public final class VortexAggregateReaderFactory extends FilePartitionReaderFacto
     }
 
     @Override
+    public PartitionReader<ColumnarBatch> createColumnarReader(InputPartition partition) {
+        return VortexReadMetrics.createReader(partition, this, fileOptions, this::buildColumnarReader);
+    }
+
+    @Override
     public PartitionReader<ColumnarBatch> buildColumnarReader(PartitionedFile file) {
+        return buildColumnarReader(file, ignored -> {});
+    }
+
+    private PartitionReader<ColumnarBatch> buildColumnarReader(PartitionedFile file, LongConsumer bytesRead) {
         if (!VortexFile.hasVortexExtension(file.toPath().getName())) {
             return new EmptyPartitionReader<>();
         }
@@ -93,7 +103,7 @@ public final class VortexAggregateReaderFactory extends FilePartitionReaderFacto
                 emitted = true;
                 // An estimate is no answer to COUNT(*), so the footer must state the count exactly.
                 OptionalLong rowCount = VortexFooterReader.exactRowCount(
-                        new VortexFile(file.toPath().toString(), file.fileSize()), io, formatOptions);
+                        new VortexFile(file.toPath().toString(), file.fileSize()), io, formatOptions, bytesRead);
                 if (rowCount.isEmpty()) {
                     throw new IllegalStateException(String.format(
                             "Vortex footer states no exact row count for %s, so COUNT(*) cannot be answered from it. "

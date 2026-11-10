@@ -27,6 +27,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.function.LongConsumer;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataType;
@@ -132,10 +133,15 @@ public final class VortexFooterReader {
      * be returned to the user as fact.
      */
     public static OptionalLong exactRowCount(VortexFile file, VortexIo io, VortexOptions options) {
+        return exactRowCount(file, io, options, ignored -> {});
+    }
+
+    static OptionalLong exactRowCount(VortexFile file, VortexIo io, VortexOptions options, LongConsumer bytesRead) {
         return withDataSource(
                 file,
                 io,
                 options,
+                bytesRead,
                 source -> source.rowCount() instanceof RowCount.Exact exact
                         ? OptionalLong.of(exact.value())
                         : OptionalLong.empty());
@@ -328,8 +334,17 @@ public final class VortexFooterReader {
 
     private static <T> T withDataSource(
             VortexFile file, VortexIo io, VortexOptions options, DataSourceFunction<T> function) {
+        return withDataSource(file, io, options, ignored -> {}, function);
+    }
+
+    private static <T> T withDataSource(
+            VortexFile file,
+            VortexIo io,
+            VortexOptions options,
+            LongConsumer bytesRead,
+            DataSourceFunction<T> function) {
         Session session = VortexSparkSession.get(options);
-        try (NativeReadable readable = io.openReadable(file);
+        try (NativeReadable readable = io.openReadable(file, bytesRead);
                 DataSource source = DataSource.open(session, List.of(readable), io.readConcurrency())) {
             return function.apply(source);
         } catch (IOException e) {
