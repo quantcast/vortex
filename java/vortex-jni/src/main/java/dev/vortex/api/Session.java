@@ -6,6 +6,7 @@ package dev.vortex.api;
 import com.google.common.base.Preconditions;
 import dev.vortex.VortexCleaner;
 import dev.vortex.jni.NativeSession;
+import java.lang.ref.Reference;
 import java.util.Set;
 
 /**
@@ -38,7 +39,11 @@ public final class Session {
      * <p>Select an older edition to write files that older Vortex readers can read.
      */
     public void enableEdition(String edition) {
-        NativeSession.enableEdition(pointer, edition);
+        try {
+            NativeSession.enableEdition(pointer, edition);
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
     /**
@@ -46,10 +51,17 @@ public final class Session {
      * {@link #enableEdition} accepts.
      */
     public Set<String> knownEditions() {
-        return Set.of(NativeSession.knownEditions(pointer));
+        try {
+            return Set.of(NativeSession.knownEditions(pointer));
+        } finally {
+            Reference.reachabilityFence(this);
+        }
     }
 
-    /** Internal: returns the native pointer. Do not free directly. */
+    /**
+     * Internal: returns the native pointer. Do not free directly. The caller must keep this session reachable while
+     * native code borrows the pointer.
+     */
     public long nativePointer() {
         return pointer;
     }
