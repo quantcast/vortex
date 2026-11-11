@@ -155,8 +155,7 @@ final class NestedSchemaPruning {
         boolean filled = false;
         for (int i = 0; i < fields.length; i++) {
             String fieldPath = path.isEmpty() ? fields[i].name() : path + "." + fields[i].name();
-            int index = lookup.indexOf(
-                    fields[i].name(), resolution.fileName(), path.isEmpty() ? "" : path + ".");
+            int index = lookup.indexOf(fields[i].name(), resolution.fileName(), path.isEmpty() ? "" : path + ".");
             if (index < 0) {
                 if (!fields[i].nullable()) {
                     throw new IllegalArgumentException(String.format(
