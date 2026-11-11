@@ -26,6 +26,15 @@ final class VortexListFilterTest {
       Arrays.asList(element)
     )
 
+  private def pushed(
+      filter: NativePredicate,
+      schema: StructType,
+      fields: java.util.List[Field]
+  ): Boolean =
+    VortexPartitionReader
+      .buildFilterExpression(Array.empty[Filter], Array(filter), schema, fields)
+      .isPresent
+
   @Test
   def executorBuildsListPredicate(): Unit = {
     // A dot here is part of the field name, not a nested path.
@@ -40,14 +49,35 @@ final class VortexListFilterTest {
       )
     )
     assertTrue(
-      VortexPartitionReader
-        .buildFilterExpression(
-          Array.empty[Filter],
-          Array[NativePredicate](filter),
-          schema,
-          fields
+      pushed(filter, schema, fields)
+    )
+  }
+
+  @Test
+  def listInsideStructIsCheckedByItsOwnPath(): Unit = {
+    val tags = ArrayType(StringType, true)
+    val struct = new StructType().add("tags", tags).add("other", IntegerType)
+    val schema = new StructType().add("s", struct)
+    val attribute = AttributeReference("s", struct)()
+    val filter = VortexListFilter(
+      ArrayContains(GetStructField(attribute, 0), Literal("sports"))
+    )
+    assertArrayEquals(
+      Array[AnyRef](Array("s", "tags")),
+      filter.references().asInstanceOf[Array[AnyRef]]
+    )
+    // The file lacks s.other, which the predicate never reads.
+    val fields = Arrays.asList(
+      new Field(
+        "s",
+        FieldType.nullable(ArrowType.Struct.INSTANCE),
+        Arrays.asList(
+          arrayField("tags", Field.nullable("element", ArrowType.Utf8.INSTANCE))
         )
-        .isPresent
+      )
+    )
+    assertTrue(
+      pushed(filter, schema, fields)
     )
   }
 
@@ -77,24 +107,18 @@ final class VortexListFilterTest {
       )
     )
     assertTrue(
-      VortexPartitionReader
-        .buildFilterExpression(
-          Array.empty[Filter],
-          Array[NativePredicate](filter),
-          schema,
-          fields(Field.nullable("price", new ArrowType.Int(32, true)))
-        )
-        .isPresent
+      pushed(
+        filter,
+        schema,
+        fields(Field.nullable("price", new ArrowType.Int(32, true)))
+      )
     )
     assertFalse(
-      VortexPartitionReader
-        .buildFilterExpression(
-          Array.empty[Filter],
-          Array[NativePredicate](filter),
-          schema,
-          fields(Field.nullable("price", new ArrowType.Int(64, true)))
-        )
-        .isPresent
+      pushed(
+        filter,
+        schema,
+        fields(Field.nullable("price", new ArrowType.Int(64, true)))
+      )
     )
   }
 

@@ -214,9 +214,7 @@ final class ReadTypes {
                 if (!(fileField.getType() instanceof ArrowType.Struct)) {
                     continue;
                 }
-                type = entry.getValue().stream().anyMatch(path -> path.length == depth + 1)
-                        ? (literalType(fileField, struct) ? struct : DataTypes.NullType)
-                        : filterable(struct, fileField.getChildren(), entry.getValue(), depth + 1);
+                type = filterable(struct, fileField.getChildren(), entry.getValue(), depth + 1);
             } else {
                 type = literalType(fileField, field.dataType()) ? field.dataType() : DataTypes.NullType;
             }

@@ -53,6 +53,19 @@ final class ReadTypesTest {
     }
 
     @Test
+    void structNullCheckKeepsNestedFieldFilters() {
+        // A file missing st.b must still push down st.a alongside Spark's inferred isnotnull(st).
+        List<Field> file = List.of(new Field(
+                "st",
+                FieldType.nullable(ArrowType.Struct.INSTANCE),
+                List.of(Field.nullable("a", new ArrowType.Int(64, true)))));
+        Filter[] filters = {new IsNotNull("st"), new GreaterThan("st.a", 1L)};
+        StructType filterable = ReadTypes.filterable(SCHEMA, file, filters);
+        assertTrue(SparkFilterToVortexExpression.isPushable(filters[0], filterable));
+        assertTrue(SparkFilterToVortexExpression.isPushable(filters[1], filterable));
+    }
+
+    @Test
     void nullChecksArePushedOnATimestampInAnotherUnit() {
         Filter[] filters = {
             new IsNull("ts"), new IsNotNull("ts"), new GreaterThan("ts", Timestamp.valueOf("2026-01-01 00:00:00"))

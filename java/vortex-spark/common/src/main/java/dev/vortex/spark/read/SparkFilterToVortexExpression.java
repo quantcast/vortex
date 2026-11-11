@@ -44,8 +44,6 @@ import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DateType;
 import org.apache.spark.sql.types.Decimal;
 import org.apache.spark.sql.types.DecimalType;
-import org.apache.spark.sql.types.DoubleType;
-import org.apache.spark.sql.types.FloatType;
 import org.apache.spark.sql.types.IntegerType;
 import org.apache.spark.sql.types.LongType;
 import org.apache.spark.sql.types.ShortType;
@@ -332,7 +330,29 @@ public final class SparkFilterToVortexExpression {
         return null;
     }
 
+    /**
+     * Whether the native scan compares values of {@code dataType} as Spark does. Vortex compares floats in total order,
+     * so -0.0 and 0.0 differ, while Spark treats them as equal. Spark cannot restore rows that Vortex drops, so these
+     * comparisons stay in Spark (see #10064).
+     */
+    static boolean comparableType(DataType dataType) {
+        return dataType instanceof BooleanType
+                || dataType instanceof ByteType
+                || dataType instanceof ShortType
+                || dataType instanceof IntegerType
+                || dataType instanceof LongType
+                || dataType instanceof StringType
+                || dataType instanceof BinaryType
+                || dataType instanceof DateType
+                || dataType instanceof TimestampType
+                || dataType instanceof TimestampNTZType
+                || dataType instanceof DecimalType;
+    }
+
     static Optional<Expression> literal(Object value, DataType dataType) {
+        if (!comparableType(dataType)) {
+            return Optional.empty();
+        }
         if (dataType instanceof BooleanType) {
             return value == null
                     ? Optional.of(Expression.nullLiteralBool())
@@ -351,11 +371,6 @@ public final class SparkFilterToVortexExpression {
         }
         if (dataType instanceof LongType) {
             return numericLiteral(value, Expression.DType.I64, number -> Expression.literal(number.longValue()));
-        }
-        if (dataType instanceof FloatType || dataType instanceof DoubleType) {
-            // Vortex compares floats in total order, so -0.0 and 0.0 differ, while Spark treats them as equal.
-            // Spark cannot restore rows that Vortex drops, so keep these comparisons in Spark (see #10064).
-            return Optional.empty();
         }
         if (dataType instanceof StringType) {
             if (value == null) {

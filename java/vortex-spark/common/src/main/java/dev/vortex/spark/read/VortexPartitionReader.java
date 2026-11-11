@@ -98,7 +98,7 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
             VortexIo io,
             VortexOptions formatOptions,
             Filter[] pushedFilters,
-            NativePredicate[] listFilters,
+            NativePredicate[] nativePredicates,
             boolean caseSensitive) {
         this.file = file;
         this.readDataSchema = readDataSchema;
@@ -153,7 +153,7 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
             // Filters are converted against this file's own columns. Spark evaluates every data filter above the
             // scan anyway, so one that reads a column this file lacks, or compares one it stores in another type, is
             // dropped rather than pushed.
-            buildFilterExpression(pushedFilters, listFilters, dataSchema, arrowFields)
+            buildFilterExpression(pushedFilters, nativePredicates, dataSchema, arrowFields)
                     .ifPresent(options::filter);
             Optional<SplitRows> rows = splitRows(file, dataSource.rowCount());
             if (rows.isPresent() && rows.get().count() == 0) {
@@ -224,24 +224,31 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
     }
 
     static Optional<Expression> buildFilterExpression(
-            Filter[] filters, NativePredicate[] listFilters, StructType dataSchema, List<Field> fileFields) {
+            Filter[] filters, NativePredicate[] nativePredicates, StructType dataSchema, List<Field> fileFields) {
         filters = filters == null ? new Filter[0] : filters;
-        StructType filterable = ReadTypes.filterable(dataSchema, fileFields, filters);
-        Expression combined = null;
+        if (filters.length == 0 && nativePredicates.length == 0) {
+            return Optional.empty();
+        }
+        List<String[]> paths = new ArrayList<>();
         for (Filter filter : filters) {
-            Optional<Expression> converted = SparkFilterToVortexExpression.convert(filter, filterable);
-            if (converted.isPresent()) {
-                combined = combined == null ? converted.get() : Expression.and(combined, converted.get());
-            }
+            paths.addAll(Arrays.asList(filter.v2references()));
         }
-        for (NativePredicate filter : listFilters) {
-            StructType listSchema = ReadTypes.filterable(dataSchema, fileFields, Arrays.asList(filter.references()));
-            Optional<Expression> converted = filter.convert(listSchema);
-            if (converted.isPresent()) {
-                combined = combined == null ? converted.get() : Expression.and(combined, converted.get());
-            }
+        for (NativePredicate predicate : nativePredicates) {
+            paths.addAll(Arrays.asList(predicate.references()));
         }
-        return Optional.ofNullable(combined);
+        StructType filterable = ReadTypes.filterable(dataSchema, fileFields, paths);
+        List<Expression> converted = new ArrayList<>();
+        for (Filter filter : filters) {
+            SparkFilterToVortexExpression.convert(filter, filterable).ifPresent(converted::add);
+        }
+        for (NativePredicate predicate : nativePredicates) {
+            predicate.convert(filterable).ifPresent(converted::add);
+        }
+        return switch (converted.size()) {
+            case 0 -> Optional.empty();
+            case 1 -> Optional.of(converted.get(0));
+            default -> Optional.of(Expression.and(converted.toArray(new Expression[0])));
+        };
     }
 
     @Override

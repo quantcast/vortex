@@ -6,7 +6,7 @@ package dev.vortex.spark.read
 import java.util.Optional
 
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{DataType, StringType, StructType}
 
 import dev.vortex.api.{Expression => VortexExpression}
 import dev.vortex.api.Expression.BinaryOp
@@ -17,13 +17,10 @@ import dev.vortex.api.Expression.BinaryOp
 final case class VortexListFilter(predicate: Expression)
     extends NativePredicate {
   override def references(): Array[Array[String]] =
-    predicate.references.toSeq.map(attribute => Array(attribute.name)).toArray
+    VortexListFilter.columnPaths(predicate).map(_.toArray).toArray
 
   def convert(schema: StructType): Optional[VortexExpression] =
-    VortexListFilter.translate(predicate, schema) match {
-      case Some(expression) => Optional.of(expression)
-      case None             => Optional.empty()
-    }
+    Optional.ofNullable(VortexListFilter.translate(predicate, schema).orNull)
 }
 
 object VortexListFilter {
@@ -37,6 +34,39 @@ object VortexListFilter {
       case _ => Seq.empty
     }
 
+  /** Nested field names of a column read, e.g. `s.tags` as `Seq("s", "tags")`.
+    */
+  private def columnPath(expression: Expression): Option[Seq[String]] =
+    expression match {
+      case attribute: AttributeReference => Some(Seq(attribute.name))
+      case field: GetStructField         =>
+        columnPath(field.child).map(_ :+ field.childSchema(field.ordinal).name)
+      case _ => None
+    }
+
+  private def columnPaths(expression: Expression): Seq[Seq[String]] =
+    columnPath(expression) match {
+      case Some(path) => Seq(path)
+      case None       => expression.children.flatMap(columnPaths)
+    }
+
+  private object ColumnPath {
+    def unapply(expression: Expression): Option[Seq[String]] =
+      columnPath(expression)
+  }
+
+  private def typeAt(schema: StructType, path: Seq[String]): Option[DataType] =
+    path.foldLeft(Option[DataType](schema)) {
+      case (Some(struct: StructType), name) =>
+        struct.fields.find(_.name == name).map(_.dataType)
+      case _ => None
+    }
+
+  /** Non-binary string collations compare differently in the native scan. */
+  private def comparable(dataType: DataType): Boolean =
+    SparkFilterToVortexExpression.comparableType(dataType) &&
+      (!dataType.isInstanceOf[StringType] || dataType == StringType)
+
   private def translate(
       expression: Expression,
       schema: StructType,
@@ -44,41 +74,32 @@ object VortexListFilter {
   ): Option[VortexExpression] = {
     def child(e: Expression): Option[VortexExpression] =
       translate(e, schema, variable)
-    def comparable(e: Expression): Boolean =
-      SparkFilterToVortexExpression.literal(null, e.dataType).isPresent &&
-        (!e.dataType.isInstanceOf[org.apache.spark.sql.types.StringType] ||
-          e.dataType == org.apache.spark.sql.types.DataTypes.StringType)
     def binary(left: Expression, right: Expression, op: BinaryOp) =
-      for {
-        _ <- if (comparable(left) && comparable(right)) Some(()) else None
-        l <- child(left)
-        r <- child(right)
-      } yield VortexExpression.binary(op, l, r)
+      if (!comparable(left.dataType) || !comparable(right.dataType)) None
+      else
+        for { l <- child(left); r <- child(right) } yield VortexExpression
+          .binary(op, l, r)
 
     expression match {
-      case attribute: AttributeReference
-          if variable.isEmpty && schema.fields.exists(field =>
-            field.name == attribute.name && field.dataType == attribute.dataType
-          ) =>
-        Some(VortexExpression.column(attribute.name))
+      case column @ ColumnPath(path) =>
+        // Lambdas may read only their own parameter.
+        if (variable.isEmpty && typeAt(schema, path).contains(column.dataType))
+          Some(VortexExpression.column(path.toArray))
+        else None
       case parameter: NamedLambdaVariable
           if variable.exists(_.exprId == parameter.exprId) =>
         Some(VortexExpression.variable(parameter.exprId.toString))
       case field: GetStructField =>
         child(field.child).map(
-          VortexExpression.getItem(
-            field.child.dataType
-              .asInstanceOf[StructType]
-              .fields(field.ordinal)
-              .name,
-            _
-          )
+          VortexExpression.getItem(field.childSchema(field.ordinal).name, _)
         )
       case literal: Literal =>
-        val converted =
-          SparkFilterToVortexExpression.literal(literal.value, literal.dataType)
-        if (converted.isPresent) Some(converted.get()) else None
-      case ArrayContains(list, needle) if comparable(needle) =>
+        Option(
+          SparkFilterToVortexExpression
+            .literal(literal.value, literal.dataType)
+            .orElse(null)
+        )
+      case ArrayContains(list, needle) if comparable(needle.dataType) =>
         for {
           l <- child(list)
           n <- child(needle)
@@ -103,15 +124,11 @@ object VortexListFilter {
       case LessThan(left, right)           => binary(left, right, BinaryOp.LT)
       case LessThanOrEqual(left, right)    => binary(left, right, BinaryOp.LTE)
       case And(left, right)                =>
-        for { l <- child(left); r <- child(right) } yield VortexExpression.and(
-          l,
-          r
-        )
+        for { l <- child(left); r <- child(right) } yield VortexExpression
+          .and(l, r)
       case Or(left, right) =>
-        for { l <- child(left); r <- child(right) } yield VortexExpression.or(
-          l,
-          r
-        )
+        for { l <- child(left); r <- child(right) } yield VortexExpression
+          .or(l, r)
       case Not(value)       => child(value).map(VortexExpression.not)
       case IsNull(value)    => child(value).map(VortexExpression.isNull)
       case IsNotNull(value) => child(value).map(VortexExpression.isNotNull)

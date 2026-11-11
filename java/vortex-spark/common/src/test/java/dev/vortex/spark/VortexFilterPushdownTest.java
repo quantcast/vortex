@@ -120,9 +120,8 @@ public final class VortexFilterPushdownTest {
                 source.where(predicate).orderBy("id").collectAsList(),
                 filtered.orderBy("id").collectAsList(),
                 predicate);
-        assertTrue(
-                filtered.queryExecution().executedPlan().toString().contains("VortexListFilter"),
-                filtered.queryExecution().executedPlan().toString());
+        String plan = filtered.queryExecution().executedPlan().toString();
+        assertTrue(plan.contains("VortexListFilter"), plan);
     }
 
     static Stream<Arguments> listPredicateCases() {
