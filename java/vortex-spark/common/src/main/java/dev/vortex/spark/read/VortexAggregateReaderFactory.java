@@ -83,7 +83,7 @@ public final class VortexAggregateReaderFactory extends FilePartitionReaderFacto
 
     @Override
     public PartitionReader<ColumnarBatch> buildColumnarReader(PartitionedFile file) {
-        return buildColumnarReader(file, ignored -> {});
+        return VortexReadMetrics.createFileReader(bytesRead -> buildColumnarReader(file, bytesRead));
     }
 
     private PartitionReader<ColumnarBatch> buildColumnarReader(PartitionedFile file, LongConsumer bytesRead) {

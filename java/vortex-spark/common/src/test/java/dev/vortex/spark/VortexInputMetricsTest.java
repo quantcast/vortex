@@ -6,34 +6,16 @@ package dev.vortex.spark;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import dev.vortex.spark.io.VortexIo;
-import dev.vortex.spark.read.VortexPartitionReaderFactory;
-import dev.vortex.spark.read.VortexReadMetrics;
-import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Stream;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.spark.api.java.JavaSparkContext;
-import org.apache.spark.paths.SparkPath;
 import org.apache.spark.scheduler.SparkListener;
 import org.apache.spark.scheduler.SparkListenerTaskEnd;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
-import org.apache.spark.sql.catalyst.FileSourceOptions;
-import org.apache.spark.sql.catalyst.InternalRow;
-import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.sql.execution.SparkPlan;
-import org.apache.spark.sql.execution.datasources.PartitionedFile;
-import org.apache.spark.sql.sources.Filter;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
-import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -118,73 +100,13 @@ final class VortexInputMetricsTest {
     }
 
     @Test
-    void filesReadOneByOneThroughTheFactoryReportTheirBytes() throws Exception {
-        // Its own files: Vortex caches what it reads of a file, which would hide the footer reads other tests count.
-        String own = table + "-one-by-one";
-        spark.range(0, 16384, 1, 4).write().format("vortex").save(own);
-        List<String> files;
-        try (Stream<Path> listed = Files.list(Path.of(own))) {
-            files = listed.map(Path::toString)
-                    .filter(f -> f.endsWith(".vortex"))
-                    .sorted()
-                    .toList();
-        }
-        assertTrue(files.size() > 1, "the table must have several files");
-        spark.sparkContext().listenerBus().waitUntilEmpty(10000);
-        listener.bytes.set(0);
-        VortexNestedSchemaPruningIoTest.BYTES_READ.set(0);
-
-        List<long[]> results = JavaSparkContext.fromSparkContext(spark.sparkContext())
-                .parallelize(List.of(0), 1)
-                .map(ignored -> readOneByOne(files))
-                .collect();
-        spark.sparkContext().listenerBus().waitUntilEmpty(10000);
-
-        long source = VortexNestedSchemaPruningIoTest.BYTES_READ.get();
-        assertEquals(16384, results.get(0)[0]);
-        assertTrue(source > 0, "the reads must read source bytes");
-        assertEquals(source, results.get(0)[1], "the custom metric must hold every file's bytes");
-        assertEquals(source, listener.bytes.get(), "task metrics must include each source byte once");
-    }
-
-    /** Reads each file with its own reader in this task, as a caller choosing its own files would: {rows, bytes}. */
-    private static long[] readOneByOne(List<String> files) {
-        VortexOptions options = VortexOptions.of(Map.of());
-        Configuration conf = new Configuration();
-        conf.set("fs.file.impl", VortexNestedSchemaPruningIoTest.CountingLocalFileSystem.class.getName());
-        conf.set("fs.file.impl.disable.cache", "true");
-        VortexPartitionReaderFactory factory = new VortexPartitionReaderFactory(
-                new FileSourceOptions(scala.collection.immutable.Map$.MODULE$.empty()),
-                VortexIo.create(options, conf),
-                options,
-                SCHEMA,
-                SCHEMA,
-                new StructType(),
-                new Filter[0],
-                false);
-        VortexReadMetrics metrics = VortexReadMetrics.forTask(factory);
-        long rows = 0;
-        for (String path : files) {
-            long length = Path.of(path).toFile().length();
-            PartitionedFile file = new PartitionedFile(
-                    InternalRow.empty(),
-                    SparkPath.fromPathString("file://" + path),
-                    0,
-                    length,
-                    new String[0],
-                    0,
-                    length,
-                    PartitionedFile.apply$default$8());
-            try (PartitionReader<ColumnarBatch> reader = factory.buildColumnarReader(file, metrics)) {
-                while (reader.next()) {
-                    rows += reader.get().numRows();
-                }
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
-            metrics.publish();
-        }
-        return new long[] {rows, metrics.currentMetricsValues()[0].value()};
+    void filesOpenedOneAtATimeReportInputBytes(@TempDir Path tempDir) throws Exception {
+        // A fresh table: Vortex caches what it reads of a file, which would hide reads the other tests already made.
+        String path = tempDir.resolve("one-at-a-time").toString();
+        spark.range(0, 16384, 1, 4).write().format("vortex").save(path);
+        Dataset<Row> read =
+                spark.read().format(OneFileAtATimeSource.class.getName()).load(path);
+        verify(read, 16384);
     }
 
     private Dataset<Row> read() {
