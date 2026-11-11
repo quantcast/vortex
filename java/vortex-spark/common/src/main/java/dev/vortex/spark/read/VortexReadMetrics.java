@@ -115,8 +115,9 @@ final class VortexReadMetrics implements LongConsumer {
             Object factory,
             FileSourceOptions options,
             BiFunction<PartitionedFile, LongConsumer, PartitionReader<ColumnarBatch>> buildReader) {
+        TaskContext context = TaskContext.get();
         // Several input partitions can run in one coalesced task, so each reader of this scan shares one total.
-        VortexReadMetrics metrics = forScan(factory);
+        VortexReadMetrics metrics = forScan(context, factory);
         PartitionReader<ColumnarBatch> files = new FilePartitionReaderFactory() {
             @Override
             public FileSourceOptions options() {
@@ -135,7 +136,7 @@ final class VortexReadMetrics implements LongConsumer {
         }.createColumnarReader(partition);
 
         // FilePartitionReader does not forward currentMetricsValues from individual files.
-        return reporting(files, metrics);
+        return reporting(context, files, metrics);
     }
 
     /**
@@ -144,19 +145,19 @@ final class VortexReadMetrics implements LongConsumer {
      */
     static PartitionReader<ColumnarBatch> createFileReader(
             Function<LongConsumer, PartitionReader<ColumnarBatch>> buildReader) {
-        VortexReadMetrics metrics = forScan(SINGLE_FILES);
-        return reporting(buildReader.apply(metrics), metrics);
+        TaskContext context = TaskContext.get();
+        VortexReadMetrics metrics = forScan(context, SINGLE_FILES);
+        return reporting(context, buildReader.apply(metrics), metrics);
     }
 
     // Spark sets (rather than adds) custom metrics, so every reader of one scan in a task must share its total.
-    private static VortexReadMetrics forScan(Object scan) {
-        TaskBytes taskBytes = taskBytes(TaskContext.get());
+    private static VortexReadMetrics forScan(TaskContext context, Object scan) {
+        TaskBytes taskBytes = taskBytes(context);
         return new VortexReadMetrics(taskBytes.scanBytes.computeIfAbsent(scan, ignored -> new AtomicLong()), taskBytes);
     }
 
     private static PartitionReader<ColumnarBatch> reporting(
-            PartitionReader<ColumnarBatch> files, VortexReadMetrics metrics) {
-        TaskContext context = TaskContext.get();
+            TaskContext context, PartitionReader<ColumnarBatch> files, VortexReadMetrics metrics) {
         return new PartitionReader<>() {
             @Override
             public boolean next() throws IOException {
