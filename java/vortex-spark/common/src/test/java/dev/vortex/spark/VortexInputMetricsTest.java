@@ -99,6 +99,16 @@ final class VortexInputMetricsTest {
         verify(read().limit(1), 1);
     }
 
+    @Test
+    void filesOpenedOneAtATimeReportInputBytes(@TempDir Path tempDir) throws Exception {
+        // A fresh table: Vortex caches what it reads of a file, which would hide reads the other tests already made.
+        String path = tempDir.resolve("one-at-a-time").toString();
+        spark.range(0, 16384, 1, 4).write().format("vortex").save(path);
+        Dataset<Row> read =
+                spark.read().format(OneFileAtATimeSource.class.getName()).load(path);
+        verify(read, 16384);
+    }
+
     private Dataset<Row> read() {
         return spark.read()
                 .schema(SCHEMA)

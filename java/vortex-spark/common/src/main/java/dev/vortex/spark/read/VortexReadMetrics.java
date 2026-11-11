@@ -10,6 +10,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiFunction;
+import java.util.function.Function;
 import java.util.function.LongConsumer;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.spark.TaskContext;
@@ -26,6 +27,8 @@ import org.apache.spark.util.TaskCompletionListener;
 /** Cumulative successful source bytes, including footers and read-ahead, for one Spark task and scan. */
 final class VortexReadMetrics implements LongConsumer {
     private static final ConcurrentMap<TaskContext, TaskBytes> TASK_BYTES = new ConcurrentHashMap<>();
+    // The scan key of files opened one at a time with buildColumnarReader(file), so they share one task total.
+    private static final Object SINGLE_FILES = new Object();
     // Spark reads this legacy statistics API. A private class key keeps this entry separate from storage statistics.
     @SuppressWarnings("deprecation")
     private static final FileSystem.Statistics NATIVE_STATISTICS =
@@ -113,11 +116,8 @@ final class VortexReadMetrics implements LongConsumer {
             FileSourceOptions options,
             BiFunction<PartitionedFile, LongConsumer, PartitionReader<ColumnarBatch>> buildReader) {
         TaskContext context = TaskContext.get();
-        TaskBytes taskBytes = taskBytes(context);
-        // Several input partitions can run in one coalesced task. Spark sets (rather than adds) custom metrics,
-        // so each reader of this scan must expose the same cumulative task total.
-        VortexReadMetrics metrics = new VortexReadMetrics(
-                taskBytes.scanBytes.computeIfAbsent(factory, ignored -> new AtomicLong()), taskBytes);
+        // Several input partitions can run in one coalesced task, so each reader of this scan shares one total.
+        VortexReadMetrics metrics = forScan(context, factory);
         PartitionReader<ColumnarBatch> files = new FilePartitionReaderFactory() {
             @Override
             public FileSourceOptions options() {
@@ -136,6 +136,28 @@ final class VortexReadMetrics implements LongConsumer {
         }.createColumnarReader(partition);
 
         // FilePartitionReader does not forward currentMetricsValues from individual files.
+        return reporting(context, files, metrics);
+    }
+
+    /**
+     * A reader of one file, opened outside a scan's {@code createColumnarReader}. Every such file in a task shares one
+     * cumulative total, so a caller that forwards {@code currentMetricsValues} reports all of them.
+     */
+    static PartitionReader<ColumnarBatch> createFileReader(
+            Function<LongConsumer, PartitionReader<ColumnarBatch>> buildReader) {
+        TaskContext context = TaskContext.get();
+        VortexReadMetrics metrics = forScan(context, SINGLE_FILES);
+        return reporting(context, buildReader.apply(metrics), metrics);
+    }
+
+    // Spark sets (rather than adds) custom metrics, so every reader of one scan in a task must share its total.
+    private static VortexReadMetrics forScan(TaskContext context, Object scan) {
+        TaskBytes taskBytes = taskBytes(context);
+        return new VortexReadMetrics(taskBytes.scanBytes.computeIfAbsent(scan, ignored -> new AtomicLong()), taskBytes);
+    }
+
+    private static PartitionReader<ColumnarBatch> reporting(
+            TaskContext context, PartitionReader<ColumnarBatch> files, VortexReadMetrics metrics) {
         return new PartitionReader<>() {
             @Override
             public boolean next() throws IOException {
