@@ -184,6 +184,10 @@ final class ReadTypes {
         for (Filter filter : filters) {
             paths.addAll(Arrays.asList(filter.v2references()));
         }
+        return filterable(schema, fileFields, paths);
+    }
+
+    static StructType filterable(StructType schema, List<Field> fileFields, List<String[]> paths) {
         return filterable(schema, fileFields, paths, 0);
     }
 
@@ -210,7 +214,9 @@ final class ReadTypes {
                 if (!(fileField.getType() instanceof ArrowType.Struct)) {
                     continue;
                 }
-                type = filterable(struct, fileField.getChildren(), entry.getValue(), depth + 1);
+                type = entry.getValue().stream().anyMatch(path -> path.length == depth + 1)
+                        ? (literalType(fileField, struct) ? struct : DataTypes.NullType)
+                        : filterable(struct, fileField.getChildren(), entry.getValue(), depth + 1);
             } else {
                 type = literalType(fileField, field.dataType()) ? field.dataType() : DataTypes.NullType;
             }
@@ -221,6 +227,24 @@ final class ReadTypes {
 
     /** Whether the file stores {@code read} values as the native scan compares filter literals of that type. */
     private static boolean literalType(Field file, DataType read) {
+        if (read instanceof ArrayType array) {
+            return (file.getType() instanceof ArrowType.List || file.getType() instanceof ArrowType.ListView)
+                    && file.getChildren().size() == 1
+                    && literalType(file.getChildren().get(0), array.elementType());
+        }
+        if (read instanceof StructType struct) {
+            if (!(file.getType() instanceof ArrowType.Struct)) {
+                return false;
+            }
+            Function<String, Field> fields = lookup(file.getChildren(), true);
+            for (StructField child : struct.fields()) {
+                Field stored = fields.apply(child.name());
+                if (stored == null || !literalType(stored, child.dataType())) {
+                    return false;
+                }
+            }
+            return true;
+        }
         if (!read.equals(leafType(file))) {
             return false;
         }

@@ -332,7 +332,7 @@ public final class SparkFilterToVortexExpression {
         return null;
     }
 
-    private static Optional<Expression> literal(Object value, DataType dataType) {
+    static Optional<Expression> literal(Object value, DataType dataType) {
         if (dataType instanceof BooleanType) {
             return value == null
                     ? Optional.of(Expression.nullLiteralBool())

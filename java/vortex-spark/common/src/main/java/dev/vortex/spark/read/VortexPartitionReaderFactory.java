@@ -39,6 +39,7 @@ public final class VortexPartitionReaderFactory extends FilePartitionReaderFacto
     private final StructType readDataSchema;
     private final StructType readPartitionSchema;
     private final Filter[] pushedFilters;
+    private final NativePredicate[] listFilters;
     private final boolean caseSensitive;
 
     public VortexPartitionReaderFactory(
@@ -49,6 +50,7 @@ public final class VortexPartitionReaderFactory extends FilePartitionReaderFacto
             StructType readDataSchema,
             StructType readPartitionSchema,
             Filter[] pushedFilters,
+            NativePredicate[] listFilters,
             boolean caseSensitive) {
         this.fileOptions = fileOptions;
         this.io = io;
@@ -57,6 +59,7 @@ public final class VortexPartitionReaderFactory extends FilePartitionReaderFacto
         this.readDataSchema = readDataSchema;
         this.readPartitionSchema = readPartitionSchema;
         this.pushedFilters = pushedFilters == null ? new Filter[0] : pushedFilters.clone();
+        this.listFilters = listFilters.clone();
         this.caseSensitive = caseSensitive;
     }
 
@@ -77,7 +80,15 @@ public final class VortexPartitionReaderFactory extends FilePartitionReaderFacto
         }
 
         return new VortexPartitionReader(
-                file, dataSchema, readDataSchema, readPartitionSchema, io, formatOptions, pushedFilters, caseSensitive);
+                file,
+                dataSchema,
+                readDataSchema,
+                readPartitionSchema,
+                io,
+                formatOptions,
+                pushedFilters,
+                listFilters,
+                caseSensitive);
     }
 
     @Override

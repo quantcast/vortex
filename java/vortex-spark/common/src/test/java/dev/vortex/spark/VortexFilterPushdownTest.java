@@ -35,6 +35,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /**
@@ -95,6 +97,42 @@ public final class VortexFilterPushdownTest {
                     data.where(predicate).orderBy("id").collectAsList(),
                     predicate);
         }
+    }
+
+    @ParameterizedTest
+    @MethodSource("listPredicateCases")
+    void listPredicatesArePushedIntoV2Scans(boolean threeValuedLogic, String predicate) {
+        SparkSession session = spark.newSession();
+        SparkSession.setActiveSession(session);
+        session.conf().set("spark.sql.sources.useV1SourceList", "");
+        session.conf().set("spark.sql.legacy.followThreeValuedLogicInArrayExists", threeValuedLogic);
+        Dataset<Row> source = session.sql("SELECT 0 AS id, array('sports', CAST(NULL AS STRING)) AS tags, "
+                + "array(named_struct('price', 101), named_struct('price', CAST(NULL AS INT))) AS items "
+                + "UNION ALL SELECT 1, array('news', NULL), array(named_struct('price', 10), named_struct('price', NULL)) "
+                + "UNION ALL SELECT 2, array(), array() "
+                + "UNION ALL SELECT 3, NULL, NULL "
+                + "UNION ALL SELECT 4, array(NULL), array(CAST(NULL AS STRUCT<price: INT>))");
+        Path output = tempDir.resolve("list_predicates_" + threeValuedLogic);
+        source.coalesce(1).write().format("vortex").save(output.toString());
+        Dataset<Row> data = session.read().format("vortex").load(output.toString());
+        Dataset<Row> filtered = data.where(predicate);
+        assertEquals(
+                source.where(predicate).orderBy("id").collectAsList(),
+                filtered.orderBy("id").collectAsList(),
+                predicate);
+        assertTrue(
+                filtered.queryExecution().executedPlan().toString().contains("VortexListFilter"),
+                filtered.queryExecution().executedPlan().toString());
+    }
+
+    static Stream<Arguments> listPredicateCases() {
+        return Stream.of(false, true).flatMap(threeValuedLogic -> Stream.of(
+                        "array_contains(tags, 'sports')",
+                        "exists(items, x -> x.price > 100)",
+                        "exists(items, x -> x.price IS NULL)",
+                        "exists(items, x -> x.price > 100 OR x.price < 20)",
+                        "exists(items, x -> NOT (x.price > 100))")
+                .map(predicate -> Arguments.of(threeValuedLogic, predicate)));
     }
 
     @Test
