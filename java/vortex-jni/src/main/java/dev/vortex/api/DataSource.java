@@ -73,9 +73,12 @@ public final class DataSource implements AutoCloseable {
         String[] uriArray = uris.toArray(String[]::new);
         Preconditions.checkArgument(
                 Arrays.stream(uriArray).allMatch(Objects::nonNull), "uris must not contain null values");
-        long sessionPointer = session.nativePointer();
-        long pointer = NativeDataSource.open(sessionPointer, uriArray, properties);
-        return new DataSource(session, pointer);
+        try {
+            long pointer = NativeDataSource.open(session.nativePointer(), uriArray, properties);
+            return new DataSource(session, pointer);
+        } finally {
+            Reference.reachabilityFence(session);
+        }
     }
 
     /** Open a single file through a caller-provided byte source. See {@link #open(Session, List, int)}. */
@@ -118,9 +121,13 @@ public final class DataSource implements AutoCloseable {
             lengths[i] = readable.length();
             Preconditions.checkArgument(lengths[i] >= 0, "readable for %s reported negative length", names[i]);
         }
-        long pointer =
-                NativeDataSource.openFiles(session.nativePointer(), readableArray, names, lengths, readConcurrency);
-        return new DataSource(session, pointer);
+        try {
+            long pointer =
+                    NativeDataSource.openFiles(session.nativePointer(), readableArray, names, lengths, readConcurrency);
+            return new DataSource(session, pointer);
+        } finally {
+            Reference.reachabilityFence(session);
+        }
     }
 
     /** Arrow schema of the data source (and of scans produced from it). */
@@ -247,12 +254,12 @@ public final class DataSource implements AutoCloseable {
     /** Submit a scan. */
     public synchronized Scan scan(ScanOptions options) {
         Preconditions.checkState(!closed, "data source is closed");
+        Objects.requireNonNull(options, "options");
+        Expression projection = options.projection().orElse(null);
+        Expression filter = options.filter().orElse(null);
         try {
-            Objects.requireNonNull(options, "options");
-
-            long projectionPtr =
-                    options.projection().map(Expression::nativePointer).orElse(0L);
-            long filterPtr = options.filter().map(Expression::nativePointer).orElse(0L);
+            long projectionPtr = projection == null ? 0L : projection.nativePointer();
+            long filterPtr = filter == null ? 0L : filter.nativePointer();
             long begin = options.rowRangeBegin().orElse(0L);
             long end = options.rowRangeEnd().orElse(0L);
             ScanOptions.SelectionMode selectionMode = options.selectionMode();
@@ -276,6 +283,8 @@ public final class DataSource implements AutoCloseable {
                     splitConcurrency);
             return Scan.fromPointer(session, scanPtr);
         } finally {
+            Reference.reachabilityFence(projection);
+            Reference.reachabilityFence(filter);
             Reference.reachabilityFence(this);
         }
     }

@@ -30,6 +30,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
+import java.util.function.LongConsumer;
 import org.apache.spark.sql.connector.read.PartitionReader;
 import org.apache.spark.sql.execution.datasources.PartitionedFile;
 import org.apache.spark.sql.execution.vectorized.ConstantColumnVector;
@@ -87,10 +88,11 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
                 formatOptions,
                 pushedFilters,
                 new NativePredicate[0],
-                caseSensitive);
+                caseSensitive,
+                ignored -> {});
     }
 
-    public VortexPartitionReader(
+    VortexPartitionReader(
             PartitionedFile file,
             StructType dataSchema,
             StructType readDataSchema,
@@ -99,14 +101,15 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
             VortexOptions formatOptions,
             Filter[] pushedFilters,
             NativePredicate[] nativePredicates,
-            boolean caseSensitive) {
+            boolean caseSensitive,
+            LongConsumer bytesRead) {
         this.file = file;
         this.readDataSchema = readDataSchema;
         this.readPartitionSchema = readPartitionSchema;
         this.allocator = ArrowAllocation.rootAllocator();
         try {
             session = VortexSparkSession.get(formatOptions);
-            readable = io.openReadable(new VortexFile(file.toPath().toString(), file.fileSize()));
+            readable = io.openReadable(new VortexFile(file.toPath().toString(), file.fileSize()), bytesRead);
             dataSource = DataSource.open(session, List.of(readable), io.readConcurrency());
 
             List<Field> arrowFields = dataSource.arrowSchema(allocator).getFields();

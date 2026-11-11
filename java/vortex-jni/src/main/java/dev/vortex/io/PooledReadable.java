@@ -7,18 +7,20 @@ import com.google.common.base.Preconditions;
 import java.io.Closeable;
 import java.io.EOFException;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * A {@link NativeReadable} that serves each of Vortex's concurrent reads from its own stream.
  *
- * <p>Streams are opened on demand and reused until this readable is closed. Subclasses supply only
- * {@link #openStream()}.
+ * <p>Streams are opened on demand and reused until this readable is closed, which waits for in-flight reads. Subclasses
+ * supply {@link #openStream()}, and may observe successful reads through {@link #onBytesRead(long)}.
  */
 public abstract class PooledReadable implements NativeReadable {
     /** Largest scratch array retained for reuse on a pooled stream; bigger reads get a one-shot array. */
@@ -27,6 +29,7 @@ public abstract class PooledReadable implements NativeReadable {
     private final String name;
     private final long length;
     private final Queue<PooledStream> pool = new ConcurrentLinkedQueue<>();
+    private final ReentrantReadWriteLock lifecycle = new ReentrantReadWriteLock();
     private volatile boolean closed = false;
 
     /**
@@ -43,6 +46,9 @@ public abstract class PooledReadable implements NativeReadable {
     /** Opens one more handle on this source. Called whenever a read finds no free stream in the pool. */
     protected abstract PositionalStream openStream() throws IOException;
 
+    /** Called on the reading thread after each read that filled its buffer, with the number of bytes read. */
+    protected void onBytesRead(long bytes) {}
+
     @Override
     public final String name() {
         return name;
@@ -55,6 +61,15 @@ public abstract class PooledReadable implements NativeReadable {
 
     @Override
     public final void readFully(long position, ByteBuffer buffer) throws IOException {
+        lifecycle.readLock().lock();
+        try {
+            readFullyOpen(position, buffer);
+        } finally {
+            lifecycle.readLock().unlock();
+        }
+    }
+
+    private void readFullyOpen(long position, ByteBuffer buffer) throws IOException {
         Preconditions.checkState(!closed, "Cannot read %s: already closed", name);
         int requested = buffer.remaining();
         if (position < 0 || position + requested > length) {
@@ -99,6 +114,7 @@ public abstract class PooledReadable implements NativeReadable {
             throw failure;
         }
 
+        onBytesRead(requested);
         pool.add(pooled);
         if (closed) {
             // Racing with close(): make sure nothing this read returned to the pool leaks. The read
@@ -114,7 +130,28 @@ public abstract class PooledReadable implements NativeReadable {
     @Override
     public void close() throws IOException {
         closed = true;
-        closeAllPooled();
+        try {
+            // Task cancellation must not wait uninterruptibly behind a stalled storage request, but an
+            // interrupted thread with nothing in flight should still close cleanly.
+            if (!lifecycle.writeLock().tryLock()) {
+                lifecycle.writeLock().lockInterruptibly();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            InterruptedIOException failure = new InterruptedIOException("Interrupted closing " + name);
+            failure.initCause(e);
+            try {
+                closeAllPooled();
+            } catch (IOException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
+        try {
+            closeAllPooled();
+        } finally {
+            lifecycle.writeLock().unlock();
+        }
     }
 
     private void closeAllPooled() throws IOException {

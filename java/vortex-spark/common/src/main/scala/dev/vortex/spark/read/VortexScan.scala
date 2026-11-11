@@ -14,6 +14,7 @@ import org.apache.spark.sql.catalyst.FileSourceOptions
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.connector.expressions.aggregate.Aggregation
 import org.apache.spark.sql.connector.read.{PartitionReaderFactory, Statistics}
+import org.apache.spark.sql.connector.metric.CustomMetric
 import org.apache.spark.sql.execution.datasources.{
   AggregatePushDownUtils,
   PartitioningAwareFileIndex
@@ -104,6 +105,9 @@ final class VortexScan(
         )
     }
   }
+
+  override def supportedCustomMetrics(): Array[CustomMetric] =
+    Array(new VortexBytesReadMetric())
 
   override def estimateStatistics(): Statistics = cachedStatistics
 

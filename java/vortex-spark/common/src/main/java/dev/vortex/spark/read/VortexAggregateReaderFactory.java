@@ -9,6 +9,7 @@ import dev.vortex.spark.io.VortexFile;
 import dev.vortex.spark.io.VortexIo;
 import java.io.Serializable;
 import java.util.OptionalLong;
+import java.util.function.LongConsumer;
 import org.apache.spark.sql.catalyst.FileSourceOptions;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.expressions.Expression;
@@ -76,7 +77,23 @@ public final class VortexAggregateReaderFactory extends FilePartitionReaderFacto
     }
 
     @Override
+    public PartitionReader<ColumnarBatch> createColumnarReader(InputPartition partition) {
+        return VortexReadMetrics.createReader(partition, this, fileOptions, this::buildColumnarReader);
+    }
+
+    /**
+     * A reader of one file, for callers that open files themselves rather than through {@link #createColumnarReader}.
+     * Call it on the Spark task thread. It adds the bytes it reads to the task's input metrics, and its
+     * {@code currentMetricsValues} is {@link VortexBytesReadMetric}: one cumulative total of every file opened this way
+     * in the task, so forward the latest reader's values rather than adding them up. Several scans in one task that
+     * open files this way each report their combined total.
+     */
+    @Override
     public PartitionReader<ColumnarBatch> buildColumnarReader(PartitionedFile file) {
+        return VortexReadMetrics.createFileReader(bytesRead -> buildColumnarReader(file, bytesRead));
+    }
+
+    private PartitionReader<ColumnarBatch> buildColumnarReader(PartitionedFile file, LongConsumer bytesRead) {
         if (!VortexFile.hasVortexExtension(file.toPath().getName())) {
             return new EmptyPartitionReader<>();
         }
@@ -93,7 +110,7 @@ public final class VortexAggregateReaderFactory extends FilePartitionReaderFacto
                 emitted = true;
                 // An estimate is no answer to COUNT(*), so the footer must state the count exactly.
                 OptionalLong rowCount = VortexFooterReader.exactRowCount(
-                        new VortexFile(file.toPath().toString(), file.fileSize()), io, formatOptions);
+                        new VortexFile(file.toPath().toString(), file.fileSize()), io, formatOptions, bytesRead);
                 if (rowCount.isEmpty()) {
                     throw new IllegalStateException(String.format(
                             "Vortex footer states no exact row count for %s, so COUNT(*) cannot be answered from it. "

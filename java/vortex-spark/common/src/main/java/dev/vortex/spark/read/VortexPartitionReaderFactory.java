@@ -8,6 +8,7 @@ import dev.vortex.spark.VortexOptions;
 import dev.vortex.spark.io.VortexFile;
 import dev.vortex.spark.io.VortexIo;
 import java.io.Serializable;
+import java.util.function.LongConsumer;
 import org.apache.spark.sql.catalyst.FileSourceOptions;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.InputPartition;
@@ -74,7 +75,23 @@ public final class VortexPartitionReaderFactory extends FilePartitionReaderFacto
     }
 
     @Override
+    public PartitionReader<ColumnarBatch> createColumnarReader(InputPartition partition) {
+        return VortexReadMetrics.createReader(partition, this, fileOptions, this::buildColumnarReader);
+    }
+
+    /**
+     * A reader of one file, for callers that open files themselves rather than through {@link #createColumnarReader}.
+     * Call it on the Spark task thread. It adds the bytes it reads to the task's input metrics, and its
+     * {@code currentMetricsValues} is {@link VortexBytesReadMetric}: one cumulative total of every file opened this way
+     * in the task, so forward the latest reader's values rather than adding them up. Several scans in one task that
+     * open files this way each report their combined total.
+     */
+    @Override
     public PartitionReader<ColumnarBatch> buildColumnarReader(PartitionedFile file) {
+        return VortexReadMetrics.createFileReader(bytesRead -> buildColumnarReader(file, bytesRead));
+    }
+
+    private PartitionReader<ColumnarBatch> buildColumnarReader(PartitionedFile file, LongConsumer bytesRead) {
         if (!VortexFile.hasVortexExtension(file.toPath().getName())) {
             return new EmptyPartitionReader<>();
         }
@@ -88,7 +105,8 @@ public final class VortexPartitionReaderFactory extends FilePartitionReaderFacto
                 formatOptions,
                 pushedFilters,
                 nativePredicates,
-                caseSensitive);
+                caseSensitive,
+                bytesRead);
     }
 
     @Override

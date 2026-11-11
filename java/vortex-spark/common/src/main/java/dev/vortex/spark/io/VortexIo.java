@@ -8,6 +8,7 @@ import dev.vortex.spark.VortexOptions;
 import java.io.Serializable;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.function.LongConsumer;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.spark.SerializableWritable;
 import org.apache.spark.SparkContext;
@@ -36,7 +37,7 @@ public final class VortexIo implements Serializable {
     private static final int DEFAULT_READ_CONCURRENCY = 0;
 
     /**
-     * Maximum gap between merged reads, in bytes. Defaults to 64 KiB; zero merges only adjacent or overlapping reads.
+     * Maximum gap between merged reads, in bytes. Defaults to 1 MiB; zero merges only adjacent or overlapping reads.
      */
     public static final String COALESCE_DISTANCE_OPTION = "vortex.read.coalesce.distance";
 
@@ -163,8 +164,18 @@ public final class VortexIo implements Serializable {
      * @throws IllegalArgumentException if the path does not carry {@link VortexFile#EXTENSION}
      */
     public NativeReadable openReadable(VortexFile file) {
+        return openReadable(file, ignored -> {});
+    }
+
+    /** Opens a source that reports each successful read's byte count, on the thread performing the read. */
+    public NativeReadable openReadable(VortexFile file, LongConsumer bytesRead) {
         VortexFile.requireVortexExtension(file.path());
         return HadoopReadable.open(
-                hadoopConf(), file.path(), file.length(), settings.coalesceDistance(), settings.coalesceMaxSize());
+                hadoopConf(),
+                file.path(),
+                file.length(),
+                settings.coalesceDistance(),
+                settings.coalesceMaxSize(),
+                bytesRead);
     }
 }
