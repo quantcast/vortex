@@ -37,7 +37,7 @@ public final class VortexIo implements Serializable {
     private static final int DEFAULT_READ_CONCURRENCY = 0;
 
     /**
-     * Maximum gap between merged reads, in bytes. Defaults to 64 KiB; zero merges only adjacent or overlapping reads.
+     * Maximum gap between merged reads, in bytes. Defaults to 1 MiB; zero merges only adjacent or overlapping reads.
      */
     public static final String COALESCE_DISTANCE_OPTION = "vortex.read.coalesce.distance";
 
