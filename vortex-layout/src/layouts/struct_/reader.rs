@@ -802,6 +802,7 @@ mod tests {
     use crate::scan::split_by::SplitBy;
     use crate::scan::split_by::register_boundaries;
     use crate::segments::CountingSegmentSource;
+    use crate::segments::SegmentFuture;
     use crate::segments::SegmentId;
     use crate::segments::SegmentSource;
     use crate::segments::TestSegments;
