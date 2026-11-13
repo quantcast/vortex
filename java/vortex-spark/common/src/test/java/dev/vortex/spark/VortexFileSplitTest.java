@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -112,6 +113,45 @@ public final class VortexFileSplitTest {
         assertSameRows(
                 rows(ROWS).filter("amount > 400000 and name is not null"),
                 read.filter("amount > 400000 and name is not null"));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"v2", "v1", "v1-rows"})
+    @DisplayName("Ordered reads preserve row order within each file split, including with a pushed filter")
+    void orderedReadsPreserveRowOrder(String mode) {
+        Path output = write(rows(ROWS).coalesce(1), "ordered", null);
+        long fileSize = fileSizes(output).get(0);
+        for (long splitSize : new long[] {fileSize + 1, fileSize / 2 + 1}) {
+            Dataset<Row> read = read(output, mode, splitSize, Map.of("VORTEX.READ.ORDERED", "TrUe"));
+            for (boolean filtered : new boolean[] {false, true}) {
+                Dataset<Row> selected = filtered ? read.filter("id >= 1000") : read;
+                String context = "mode=" + mode + " splitSize=" + splitSize + " filtered=" + filtered;
+                if (filtered) {
+                    String plan = selected.queryExecution().executedPlan().toString();
+                    assertTrue(plan.contains("GreaterThanOrEqual(id,1000)"), plan);
+                }
+                List<Long> counts = selected.javaRDD()
+                        .mapPartitions(partition -> {
+                            long previous = -1;
+                            long count = 0;
+                            while (partition.hasNext()) {
+                                long id = partition.next().getLong(0);
+                                if (id <= previous) {
+                                    throw new IllegalStateException(context + ": " + id + " follows " + previous);
+                                }
+                                previous = id;
+                                count++;
+                            }
+                            return List.of(count).iterator();
+                        })
+                        .collect();
+                assertEquals(expectedPartitions(List.of(fileSize), splitSize), counts.size(), context);
+                assertEquals(
+                        filtered ? ROWS - 1000 : ROWS,
+                        counts.stream().mapToLong(Long::longValue).sum(),
+                        context);
+            }
+        }
     }
 
     @ParameterizedTest(name = "{0}")
@@ -301,6 +341,10 @@ public final class VortexFileSplitTest {
      * {@code splitSize} bytes.
      */
     private Dataset<Row> read(Path output, String mode, long splitSize) {
+        return read(output, mode, splitSize, Map.of());
+    }
+
+    private Dataset<Row> read(Path output, String mode, long splitSize, Map<String, String> options) {
         boolean v1 = !mode.equals("v2");
         spark.conf().set("spark.sql.sources.useV1SourceList", v1 ? "vortex" : "");
         // Whole-stage codegen off makes `FileSourceScanExec` ask the format for rows, not batches.
@@ -308,7 +352,7 @@ public final class VortexFileSplitTest {
         spark.conf().set("spark.sql.files.maxPartitionBytes", splitSize);
         spark.conf().set("spark.sql.files.openCostInBytes", 0);
         spark.conf().set("spark.sql.files.minPartitionNum", 1);
-        Dataset<Row> read = spark.read().format("vortex").load(output.toString());
+        Dataset<Row> read = spark.read().format("vortex").options(options).load(output.toString());
         String plan = read.queryExecution().executedPlan().toString();
         assertTrue(plan.contains(v1 ? "FileScan vortex" : "BatchScan"), plan);
         return read;
