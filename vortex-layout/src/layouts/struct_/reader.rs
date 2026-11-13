@@ -47,6 +47,7 @@ use vortex_utils::aliases::dash_map::DashMap;
 use vortex_utils::aliases::hash_map::HashMap;
 
 use crate::ArrayFuture;
+use crate::BoundaryMode;
 use crate::LayoutReader;
 use crate::LayoutReaderRef;
 use crate::LazyReaderChildren;
@@ -523,58 +524,90 @@ impl LayoutReader for StructReader {
         split_range: &SplitRange,
         splits: &mut RowSplits,
     ) -> VortexResult<()> {
-        // Validity boundaries must stay hard even when they overlap a soft data-field boundary.
-        let validity_boundaries = if let Some(validity_ref) = self.validity()? {
-            let mut validity_splits = RowSplits::new_capacity(16);
-            validity_ref.register_splits(field_mask, split_range, &mut validity_splits)?;
-            validity_splits.into_sorted_deduped()
-        } else {
-            Vec::new()
-        };
-        splits.extend_ascending(validity_boundaries.iter().copied());
+        if splits.mode() == BoundaryMode::PositionsOnly {
+            if let Some(validity_ref) = self.validity()? {
+                validity_ref.register_splits(field_mask, split_range, splits)?;
+            }
+            self.layout.matching_fields(field_mask, |mask, idx| {
+                self.field_reader_by_index(idx)?
+                    .register_splits(&[mask], split_range, splits)
+            })?;
+            // Pushed last so it extends the final field's ascending run.
+            splits.push(split_range.root_row_range().end);
+            return Ok(());
+        }
 
-        // Each field's boundaries, kept apart so the ones only some fields have can be marked soft.
-        let mut fields: Vec<RowSplits> = Vec::new();
+        let end = split_range.root_row_range().end;
+        let validity = self.validity()?;
+        let mut fields = Vec::new();
         self.layout.matching_fields(field_mask, |mask, idx| {
-            let mut field = RowSplits::new_capacity(16);
-            self.field_reader_by_index(idx)?
-                .register_splits(&[mask], split_range, &mut field)?;
-            fields.push(field);
+            fields.push((mask, idx));
             Ok(())
         })?;
-        let mut field_splits = RowSplits::new_capacity(0);
-        if let [field] = &mut fields[..] {
-            field_splits = std::mem::replace(field, RowSplits::new_capacity(0));
-        } else if !fields.is_empty() {
-            let fields: Vec<(Vec<u64>, Vec<u64>)> = fields
-                .into_iter()
-                .map(RowSplits::into_sorted_deduped_with_soft)
-                .collect();
-            // Intersect once; checking every field for every boundary is quadratic in field count.
-            let mut shared = fields[0].0.clone();
-            for (boundaries, _) in &fields[1..] {
-                shared.retain(|row| boundaries.binary_search(row).is_ok());
-                if shared.is_empty() {
-                    break;
+
+        if usize::from(validity.is_some()) + fields.len() <= 1 {
+            if let Some(validity_ref) = validity {
+                validity_ref.register_splits(field_mask, split_range, splits)?;
+            }
+            for (mask, idx) in fields {
+                self.field_reader_by_index(idx)?
+                    .register_splits(&[mask], split_range, splits)?;
+            }
+
+            splits.push(end);
+            return Ok(());
+        }
+
+        // Repeated boundary sets cannot change which positions every child shares. Keep their
+        // inherited soft marks even when their positions match the previous child.
+        let mut children = 0;
+        let mut previous_len = 0;
+        let mut all = Vec::new();
+        let mut soft = Vec::new();
+        let mut add = |child: RowSplits| {
+            let (boundaries, child_soft) = child.into_sorted_deduped_with_soft();
+            if boundaries.is_empty() {
+                return;
+            }
+            soft.extend(child_soft);
+            if children > 0 && all[all.len() - previous_len..] == boundaries[..] {
+                return;
+            }
+            children += 1;
+            previous_len = boundaries.len();
+            all.extend(boundaries);
+        };
+        if let Some(validity_ref) = validity {
+            let mut child = splits.new_like(16);
+            validity_ref.register_splits(field_mask, split_range, &mut child)?;
+            add(child);
+        }
+        for (mask, idx) in fields {
+            let mut child = splits.new_like(16);
+            self.field_reader_by_index(idx)?
+                .register_splits(&[mask], split_range, &mut child)?;
+            add(child);
+        }
+
+        // Each child contributes a position at most once, so its run length counts the children
+        // that share it. With one surviving child, `all` is already sorted.
+        if children > 1 {
+            all.sort_unstable();
+            for run in all.chunk_by(|a, b| a == b) {
+                if run.len() < children && run[0] != end {
+                    soft.push(run[0]);
                 }
             }
-            for (boundaries, soft) in fields.iter() {
-                field_splits.extend_ascending(boundaries.iter().copied());
-                field_splits.mark_soft(soft.iter().copied());
-                field_splits.mark_soft(
-                    boundaries
-                        .iter()
-                        .copied()
-                        .filter(|row| shared.binary_search(row).is_err()),
-                );
-            }
+            all.dedup();
         }
-        field_splits.remove_soft(&validity_boundaries);
-        splits.append(field_splits);
+        soft.sort_unstable();
+        soft.dedup();
+        splits.extend_ascending(all);
+        splits.mark_soft(soft);
 
-        // In the case of an empty struct, we need to register the end split. Pushed last so it
-        // extends the final field's ascending run rather than starting a run of its own.
-        splits.push(split_range.root_row_range().end);
+        // Append the struct's end even when its children contributed no boundaries, keeping the
+        // collected positions in one ascending run.
+        splits.push(end);
 
         Ok(())
     }
@@ -749,20 +782,25 @@ mod tests {
     use vortex_io::runtime::single::block_on;
     use vortex_io::session::RuntimeSessionExt;
     use vortex_mask::Mask;
+    use vortex_session::registry::ReadContext;
 
+    use crate::BoundaryMode;
     use crate::LayoutReaderRef;
     use crate::LayoutRef;
     use crate::LayoutStrategy;
-    use crate::RowSplits;
-    use crate::SplitRange;
+    use crate::children::OwnedLayoutChildren;
+    use crate::layouts::chunked::ChunkedLayout;
     use crate::layouts::chunked::writer::ChunkedLayoutStrategy;
+    use crate::layouts::flat::FlatLayout;
     use crate::layouts::flat::writer::FlatLayoutStrategy;
     use crate::layouts::repartition::RepartitionStrategy;
     use crate::layouts::repartition::RepartitionWriterOptions;
+    use crate::layouts::struct_::StructLayout;
     use crate::layouts::table::TableStrategy;
     use crate::layouts::zoned::writer::ZonedLayoutOptions;
     use crate::layouts::zoned::writer::ZonedStrategy;
     use crate::scan::split_by::SplitBy;
+    use crate::scan::split_by::register_boundaries;
     use crate::segments::CountingSegmentSource;
     use crate::segments::SegmentFuture;
     use crate::segments::SegmentId;
@@ -869,7 +907,7 @@ mod tests {
         pieces: usize,
         chunked: bool,
         nullable: bool,
-    ) -> (Arc<dyn SegmentSource>, LayoutRef) {
+    ) -> VortexResult<(Arc<dyn SegmentSource>, LayoutRef)> {
         let ctx = ArrayContext::empty();
         let segments = Arc::new(TestSegments::default());
         let (ptr, eof) = SequenceId::root().split();
@@ -881,11 +919,11 @@ mod tests {
             Arc::new(table)
         };
         let rows = 12_000 / pieces;
-        let chunks: Vec<ArrayRef> = (0..pieces)
+        let chunks = (0..pieces)
             .map(|piece| {
-                let start = i32::try_from(piece * rows).unwrap();
-                let end = start + i32::try_from(rows).unwrap();
-                StructArray::try_from_iter_with_validity(
+                let start = i32::try_from(piece * rows)?;
+                let end = start + i32::try_from(rows)?;
+                Ok(StructArray::try_from_iter_with_validity(
                     [
                         ("a", PrimitiveArray::from_iter(start..end).into_array()),
                         ("b", PrimitiveArray::from_iter(start..end).into_array()),
@@ -897,11 +935,10 @@ mod tests {
                     } else {
                         Validity::NonNullable
                     },
-                )
-                .unwrap()
-                .into_array()
+                )?
+                .into_array())
             })
-            .collect();
+            .collect::<VortexResult<Vec<ArrayRef>>>()?;
         let dtype = chunks[0].dtype().clone();
         let segments2 = Arc::<TestSegments>::clone(&segments);
         let layout = block_on(|handle| async move {
@@ -910,8 +947,7 @@ mod tests {
                 .write_stream(
                     ctx.into(),
                     segments2,
-                    ChunkedArray::try_new(chunks, dtype)
-                        .unwrap()
+                    ChunkedArray::try_new(chunks, dtype)?
                         .into_array()
                         .to_array_stream()
                         .sequenced(ptr),
@@ -919,35 +955,29 @@ mod tests {
                     &session,
                 )
                 .await
-        })
-        .unwrap();
-        (segments, layout)
+        })?;
+        Ok((segments, layout))
     }
 
     /// Registers `layout`'s boundaries over its rows, as a scan does.
     fn boundaries_and_soft(
         segments: Arc<dyn SegmentSource>,
         layout: &LayoutRef,
-    ) -> (Vec<u64>, Vec<u64>) {
-        let reader = layout
-            .new_reader("".into(), segments, &SESSION, &Default::default())
-            .unwrap();
-        let mut splits = RowSplits::new_capacity(16);
-        splits.push(0);
-        reader
-            .register_splits(
-                &[FieldMask::All],
-                &SplitRange::root(0..reader.row_count()).unwrap(),
-                &mut splits,
-            )
-            .unwrap();
-        splits.into_sorted_deduped_with_soft()
+    ) -> VortexResult<(Vec<u64>, Vec<u64>)> {
+        let reader = layout.new_reader("".into(), segments, &SESSION, &Default::default())?;
+        Ok(register_boundaries(
+            reader.as_ref(),
+            &(0..reader.row_count()),
+            &[FieldMask::All],
+            BoundaryMode::WithSoftMarks,
+        )?
+        .into_sorted_deduped_with_soft())
     }
 
     #[test]
-    fn boundaries_only_some_fields_have_are_soft() {
-        let (segments, layout) = misaligned_struct_layout(1, false, false);
-        let (boundaries, soft) = boundaries_and_soft(segments, &layout);
+    fn boundaries_only_some_fields_have_are_soft() -> VortexResult<()> {
+        let (segments, layout) = misaligned_struct_layout(1, false, false)?;
+        let (boundaries, soft) = boundaries_and_soft(segments, &layout)?;
         // `a` chunks every 1,000 rows and `b` every 3,000, so only `b`'s are shared.
         assert_eq!(boundaries, (0..=12).map(|k| k * 1000).collect::<Vec<u64>>());
         assert_eq!(
@@ -957,28 +987,31 @@ mod tests {
                 .map(|k| k * 1000)
                 .collect::<Vec<u64>>()
         );
+        Ok(())
     }
 
     #[test]
-    fn chunk_ends_above_the_struct_stay_hard() {
+    fn chunk_ends_above_the_struct_stay_hard() -> VortexResult<()> {
         // Two top-level chunks of 6,000 rows, each a struct whose `a` chunks every 1,000 rows and
         // `b` every 3,000: the top-level chunk end at 6,000 is every column's, so it stays hard.
-        let (segments, layout) = misaligned_struct_layout(2, true, false);
-        let (boundaries, soft) = boundaries_and_soft(segments, &layout);
+        let (segments, layout) = misaligned_struct_layout(2, true, false)?;
+        let (boundaries, soft) = boundaries_and_soft(segments, &layout)?;
         assert_eq!(boundaries, (0..=12).map(|k| k * 1000).collect::<Vec<u64>>());
         assert!(!soft.contains(&6000), "the chunk end is soft: {soft:?}");
         assert!(!soft.contains(&3000) && !soft.contains(&9000), "{soft:?}");
         assert!(soft.contains(&1000) && soft.contains(&7000), "{soft:?}");
+        Ok(())
     }
 
     #[rstest]
     #[case::non_nullable(false, vec![0, 3000, 6000, 9000, 12000])]
-    #[case::nullable(true, vec![0, 2000, 3000, 4000, 6000, 8000, 9000, 10000, 12000])]
-    fn scan_merges_soft_boundaries_and_keeps_validity_boundaries(
+    // Validity chunks every 2,000 rows, so only 6,000 is every child's boundary.
+    #[case::nullable(true, vec![0, 6000, 12000])]
+    fn scan_merges_soft_boundaries_including_validity_boundaries(
         #[case] nullable: bool,
         #[case] expected: Vec<u64>,
     ) -> VortexResult<()> {
-        let (segments, layout) = misaligned_struct_layout(1, false, nullable);
+        let (segments, layout) = misaligned_struct_layout(1, false, nullable)?;
         let reader = layout.new_reader("".into(), segments, &SESSION, &Default::default())?;
         assert_eq!(
             SplitBy::default().splits(
@@ -988,6 +1021,152 @@ mod tests {
             )?,
             expected,
         );
+        Ok(())
+    }
+
+    fn split_test_chunks(lengths: &[u64]) -> LayoutRef {
+        let dtype = DType::Primitive(PType::I32, Nullability::NonNullable);
+        let children = lengths
+            .iter()
+            .map(|&len| {
+                FlatLayout::new(len, dtype.clone(), SegmentId::from(0), ReadContext::new([]))
+                    .into_layout()
+            })
+            .collect();
+        ChunkedLayout::new(
+            lengths.iter().sum(),
+            dtype,
+            OwnedLayoutChildren::layout_children(children),
+        )
+        .into_layout()
+    }
+
+    fn split_test_struct(fields: Vec<(&str, LayoutRef)>) -> LayoutRef {
+        let dtype = DType::Struct(
+            StructFields::from_iter(
+                fields
+                    .iter()
+                    .map(|(name, layout)| (*name, layout.dtype().clone())),
+            ),
+            Nullability::NonNullable,
+        );
+        StructLayout::new(
+            6,
+            dtype,
+            fields.into_iter().map(|(_, layout)| layout).collect(),
+        )
+        .into_layout()
+    }
+
+    const FINE_CHUNKS: &[u64] = &[2, 2, 2];
+    const COARSE_CHUNKS: &[u64] = &[4, 2];
+
+    #[rstest]
+    #[case::consecutive_duplicates(&[FINE_CHUNKS, FINE_CHUNKS, COARSE_CHUNKS], &[2])]
+    #[case::separated_duplicates(&[FINE_CHUNKS, COARSE_CHUNKS, FINE_CHUNKS], &[2])]
+    #[case::all_identical(&[FINE_CHUNKS, FINE_CHUNKS, FINE_CHUNKS], &[])]
+    fn split_collection_repeated_child_boundaries(
+        #[case] chunk_lengths: &[&[u64]],
+        #[case] expected_soft: &[u64],
+        #[values(BoundaryMode::PositionsOnly, BoundaryMode::WithSoftMarks)] mode: BoundaryMode,
+    ) -> VortexResult<()> {
+        let fields = ["a", "b", "c"]
+            .into_iter()
+            .zip(
+                chunk_lengths
+                    .iter()
+                    .map(|lengths| split_test_chunks(lengths)),
+            )
+            .collect();
+        let layout = split_test_struct(fields);
+        let reader = layout.new_reader(
+            "".into(),
+            Arc::new(TestSegments::default()),
+            &SESSION,
+            &Default::default(),
+        )?;
+        let (boundaries, soft) =
+            register_boundaries(reader.as_ref(), &(0..6), &[FieldMask::All], mode)?
+                .into_sorted_deduped_with_soft();
+        assert_eq!(boundaries, vec![0, 2, 4, 6]);
+        assert_eq!(
+            soft,
+            if mode == BoundaryMode::WithSoftMarks {
+                expected_soft
+            } else {
+                &[]
+            }
+        );
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::single_child(true, false)]
+    #[case::nested_first(false, true)]
+    #[case::nested_last(false, false)]
+    fn split_collection_preserves_inherited_soft_marks(
+        #[case] single_child: bool,
+        #[case] nested_first: bool,
+        #[values(BoundaryMode::PositionsOnly, BoundaryMode::WithSoftMarks)] mode: BoundaryMode,
+        #[values(0..6, 0..0)] range: std::ops::Range<u64>,
+    ) -> VortexResult<()> {
+        let nested = split_test_struct(vec![
+            ("fine", split_test_chunks(&[2, 2, 2])),
+            ("coarse", split_test_chunks(&[6])),
+        ]);
+        let mut fields = vec![("nested", nested)];
+        if !single_child {
+            // Identical positions, but only the nested child's interior boundaries are soft.
+            fields.push(("aligned", split_test_chunks(&[2, 2, 2])));
+            if !nested_first {
+                fields.reverse();
+            }
+        }
+        let layout = split_test_struct(fields);
+        let reader = layout.new_reader(
+            "".into(),
+            Arc::new(TestSegments::default()),
+            &SESSION,
+            &Default::default(),
+        )?;
+        let (boundaries, soft) =
+            register_boundaries(reader.as_ref(), &range, &[FieldMask::All], mode)?
+                .into_sorted_deduped_with_soft();
+        assert_eq!(
+            boundaries,
+            if range.is_empty() {
+                vec![0]
+            } else {
+                vec![0, 2, 4, 6]
+            }
+        );
+        assert_eq!(
+            soft,
+            if !range.is_empty() && mode == BoundaryMode::WithSoftMarks {
+                vec![2, 4]
+            } else {
+                vec![]
+            }
+        );
+        Ok(())
+    }
+
+    #[rstest]
+    fn split_collection_empty_struct(
+        #[values(BoundaryMode::PositionsOnly, BoundaryMode::WithSoftMarks)] mode: BoundaryMode,
+    ) -> VortexResult<()> {
+        let layout = split_test_struct(vec![]);
+        let reader = layout.new_reader(
+            "".into(),
+            Arc::new(TestSegments::default()),
+            &SESSION,
+            &Default::default(),
+        )?;
+        let (boundaries, soft) =
+            register_boundaries(reader.as_ref(), &(0..6), &[FieldMask::All], mode)?
+                .into_sorted_deduped_with_soft();
+        assert_eq!(boundaries, vec![0, 6]);
+        assert!(soft.is_empty());
         Ok(())
     }
 

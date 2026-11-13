@@ -27,6 +27,9 @@ import org.apache.arrow.vector.types.pojo.Schema;
  * <p>Call {@link #close()} to release this handle and its cached file resources promptly. Scans and partitions already
  * created from it remain valid and retain the resources they still need. {@link VortexCleaner} releases an unclosed
  * handle when it becomes unreachable.
+ *
+ * <p>Native calls are synchronized with {@code close()} to prevent another thread from freeing the handle during an
+ * operation.
  */
 public final class DataSource implements AutoCloseable {
     private final Session session;

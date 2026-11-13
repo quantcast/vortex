@@ -124,6 +124,7 @@ public final class IndependentBuffersTest {
                         ffiSchema.memoryAddress(),
                         Map.of(),
                         Map.of(),
+                        false,
                         false);
             } finally {
                 Reference.reachabilityFence(session);

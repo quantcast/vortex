@@ -19,6 +19,7 @@ public final class NativeWriter {
      *
      * @param metadata user-defined metadata segments to store in the file footer (may be null)
      * @param listLayout whether to write lists in the unstable list layout, see {@code VortexWriter.Builder}
+     * @param compact write with the compact strategy, which prefers a smaller file over read throughput
      */
     public static native long create(
             long sessionPointer,
@@ -26,7 +27,8 @@ public final class NativeWriter {
             long arrowSchemaAddress,
             Map<String, String> options,
             Map<String, byte[]> metadata,
-            boolean listLayout);
+            boolean listLayout,
+            boolean compact);
 
     /**
      * Open a writer that streams the file into a caller-provided {@link dev.vortex.io.NativeWritable}. The native side
@@ -34,13 +36,15 @@ public final class NativeWriter {
      *
      * @param metadata user-defined metadata segments to store in the file footer (may be null)
      * @param listLayout whether to write lists in the unstable list layout, see {@code VortexWriter.Builder}
+     * @param compact write with the compact strategy, which prefers a smaller file over read throughput
      */
     public static native long createStream(
             long sessionPointer,
             Object writable,
             long arrowSchemaAddress,
             Map<String, byte[]> metadata,
-            boolean listLayout);
+            boolean listLayout,
+            boolean compact);
 
     /**
      * Write a batch directly from Arrow C Data Interface addresses.

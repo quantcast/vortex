@@ -57,6 +57,8 @@ public final class VortexFileSplitTest {
                 .config("spark.sql.shuffle.partitions", "2")
                 .config("spark.sql.adaptive.enabled", "false")
                 .config("spark.sql.optimizer.nestedSchemaPruning.enabled", "true")
+                // Spark 4.3 asks a scan for row counts only under CBO.
+                .config("spark.sql.cbo.enabled", "true")
                 .config("spark.ui.enabled", "false")
                 .getOrCreate();
     }

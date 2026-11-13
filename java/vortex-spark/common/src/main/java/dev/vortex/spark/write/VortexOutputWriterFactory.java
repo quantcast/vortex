@@ -41,6 +41,7 @@ public final class VortexOutputWriterFactory extends OutputWriterFactory {
         VortexOutputWriter.configuredBatchBytes(options);
         VortexOutputWriter.configuredCapacityReset(options);
         VortexOutputWriter.listLayout(options);
+        options.getBoolean(VortexOutputWriter.COMPACT_OPTION, false);
         VortexSparkSession.validate(options);
     }
 
