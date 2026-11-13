@@ -268,7 +268,7 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
                 closeCurrentReader();
             }
             if (!scan.hasNext()) {
-                close();
+                exhausted = true;
                 return false;
             }
             currentReader = scan.next().scanArrow(allocator);

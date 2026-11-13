@@ -94,6 +94,7 @@ public final class VortexWriter implements AutoCloseable {
         private final Map<String, String> options = new HashMap<>();
         private final Map<String, byte[]> metadata = new HashMap<>();
         private boolean listLayout;
+        private boolean compact;
 
         private Builder(
                 Session session, String uri, NativeWritable writable, Schema arrowSchema, BufferAllocator allocator) {
@@ -148,6 +149,16 @@ public final class VortexWriter implements AutoCloseable {
         }
 
         /**
+         * Write with the compact strategy, which prefers a smaller file over read throughput and latency. It is what
+         * {@code vortex.io.VortexWriteOptions.compact()} selects in Python, and is off by default. The file is read
+         * like any other.
+         */
+        public Builder compact(boolean compact) {
+            this.compact = compact;
+            return this;
+        }
+
+        /**
          * Whether to store each list column as separate offsets, validity and elements, with struct elements split
          * further into one column per field, so a read of some element fields skips the others. Off by default.
          *
@@ -173,9 +184,20 @@ public final class VortexWriter implements AutoCloseable {
                 try {
                     pointer = uri != null
                             ? NativeWriter.create(
-                                    session.nativePointer(), uri, ffi.memoryAddress(), options, metadata, listLayout)
+                                    session.nativePointer(),
+                                    uri,
+                                    ffi.memoryAddress(),
+                                    options,
+                                    metadata,
+                                    listLayout,
+                                    compact)
                             : NativeWriter.createStream(
-                                    session.nativePointer(), writable, ffi.memoryAddress(), metadata, listLayout);
+                                    session.nativePointer(),
+                                    writable,
+                                    ffi.memoryAddress(),
+                                    metadata,
+                                    listLayout,
+                                    compact);
                 } catch (RuntimeException e) {
                     // Native failures arrive as RuntimeException. Wrap them so callers can handle every
                     // failure to open a writer as an IOException, as writeBatch and finish already do.

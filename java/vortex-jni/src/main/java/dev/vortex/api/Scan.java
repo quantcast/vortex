@@ -23,6 +23,9 @@ import org.apache.arrow.vector.types.pojo.Schema;
  * <p>Call {@link #close()} to release the scan and any partition prefetched by {@link #hasNext()} but not yet returned
  * by {@link #next()}. Partitions already returned remain valid. {@link VortexCleaner} releases an unclosed scan when it
  * becomes unreachable.
+ *
+ * <p>Native calls are synchronized with {@code close()} to prevent another thread from freeing the handle during an
+ * operation.
  */
 public final class Scan implements Iterator<Partition>, AutoCloseable {
     private final Session session;
@@ -67,11 +70,14 @@ public final class Scan implements Iterator<Partition>, AutoCloseable {
         }
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * @throws IllegalStateException if this scan has been closed
+     */
     @Override
     public synchronized boolean hasNext() {
-        if (closed) {
-            return false;
-        }
+        Preconditions.checkState(!closed, "scan is closed");
         try {
             if (!primed) {
                 nextPartitionPointer.set(NativeScan.nextPartition(pointer));
@@ -83,6 +89,11 @@ public final class Scan implements Iterator<Partition>, AutoCloseable {
         }
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * @throws IllegalStateException if this scan has been closed
+     */
     @Override
     public synchronized Partition next() {
         if (!hasNext()) {

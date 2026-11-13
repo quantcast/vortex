@@ -36,6 +36,7 @@ use object_store::ObjectStore;
 use object_store::path::Path as ObjectStorePath;
 use vortex::array::ArrayRef;
 use vortex::array::stream::ArrayStreamAdapter;
+use vortex::compressor::BtrBlocksCompressorBuilder;
 use vortex::dtype::DType;
 use vortex::editions::Edition;
 use vortex::editions::EditionDeclaration;
@@ -48,7 +49,9 @@ use vortex::error::VortexError;
 use vortex::error::VortexResult;
 use vortex::error::vortex_err;
 use vortex::file::CountingVortexWrite;
+use vortex::file::VortexWriteOptions;
 use vortex::file::WriteOptionsSessionExt;
+use vortex::file::WriteStrategyBuilder;
 use vortex::file::WriteSummary;
 use vortex::file::multi::parse_uri_or_path;
 use vortex::io::VortexWrite;
@@ -99,6 +102,21 @@ fn resolve_store(
         let (store, path) = make_object_store(&url, properties)?;
         Ok(ResolvedStore::ObjectStore(store, path))
     }
+}
+
+/// Write options for `session`: its defaults, or the compact strategy, which trades read throughput
+/// for file size as Python's `VortexWriteOptions.compact()` does.
+fn session_write_options(session: &VortexSession, compact: bool) -> VortexWriteOptions {
+    let options = session.write_options();
+    if !compact {
+        return options;
+    }
+    let compressor = BtrBlocksCompressorBuilder::from_session(session).with_compact();
+    options.with_strategy(
+        WriteStrategyBuilder::from_session(session)
+            .with_btrblocks_builder(compressor)
+            .build(),
+    )
 }
 
 /// Native writer holding a write-task handle and a sender that Java pushes batches into.
@@ -260,6 +278,7 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_create(
     options: JObject,
     metadata: JObject,
     list_layout: jboolean,
+    compact: jboolean,
 ) -> jlong {
     try_or_throw(&mut env, |env| {
         if session_ptr == 0 {
@@ -282,7 +301,8 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_create(
         let resolved = resolve_store(&file_path, &properties)?;
         let (tx, rx) = mpsc::channel(WRITE_CHANNEL_CAPACITY);
         let stream = ArrayStreamAdapter::new(write_schema.clone(), rx);
-        let write_options = session.write_options().with_metadata_segments(metadata);
+        let write_options =
+            session_write_options(session, compact).with_metadata_segments(metadata);
         // The same check runs inside `write`, but only once the write task is under way, where
         // it would surface as an opaque send failure on the first batch.
         write_options.validate_metadata()?;
@@ -347,6 +367,7 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_createStream(
     arrow_schema_addr: jlong,
     metadata: JObject,
     list_layout: jboolean,
+    compact: jboolean,
 ) -> jlong {
     try_or_throw(&mut env, |env| {
         if session_ptr == 0 {
@@ -373,7 +394,8 @@ pub extern "system" fn Java_dev_vortex_jni_NativeWriter_createStream(
         let writable = Arc::new(env.new_global_ref(&writable)?);
         let (tx, rx) = mpsc::channel(WRITE_CHANNEL_CAPACITY);
         let stream = ArrayStreamAdapter::new(write_schema.clone(), rx);
-        let write_options = session.write_options().with_metadata_segments(metadata);
+        let write_options =
+            session_write_options(session, compact).with_metadata_segments(metadata);
         // See the note in `create`: validate before the write task can start.
         write_options.validate_metadata()?;
         let buffered_bytes = write_options.buffered_bytes_tracker();
