@@ -135,7 +135,7 @@ public final class VortexPartitionReader implements PartitionReader<ColumnarBatc
             ReadTypes.check(
                     projectedSchema, arrowFields, caseSensitive, file.toPath().toString());
 
-            var options = ScanOptions.builder();
+            var options = ScanOptions.builder().ordered(formatOptions.getBoolean("vortex.read.ordered", false));
             if (io.splitConcurrency() > 0) {
                 options.splitConcurrency(io.splitConcurrency());
             }

@@ -75,6 +75,15 @@ Catalog tables read and write through the V1 file format;
 `spark.sql.sources.useV1SourceList=vortex` puts every path on it, which is what the `_metadata`
 column and dynamic partition pruning need.
 
+## Read ordering
+
+Set `.option("vortex.read.ordered", true)` to preserve a file's row order within each
+Spark file split. The default is `false`, allowing batches to arrive as decoding finishes.
+This does not establish ordering across Spark partitions or files.
+
+The option is case-insensitive and works with both V1 and V2 reads. Session defaults use
+`vortex.read.ordered`; cluster defaults can use `spark.datasource.vortex.read.ordered`.
+
 ## Read coalescing
 
 Nearby storage reads can be merged to reduce requests. Set the maximum gap and merged span in bytes:
@@ -131,6 +140,25 @@ cd java
 ./gradlew :vortex-spark-4.0_2.13:jmh -PjmhArgs="SparkScanBenchmark -p fileCount=1,128"
 ./gradlew :vortex-spark-4.0_2.13:jmh -PjmhArgs="FooterReadBenchmark -f 1 -wi 2 -i 5"
 ```
+
+Compare ordered and unordered decoding on an existing Vortex file, running once for a
+current bid-hour event file and once for a current featoid bucket file:
+
+For performance measurements, first stage an optimized JNI library from the same revision
+under `vortex-jni/src/main/resources/native/<platform>/`. The environment setting below
+keeps Gradle from replacing it with its default debug build.
+
+```bash
+VORTEX_SKIP_MAKE_TEST_FILES=true ./gradlew :vortex-spark-4.0_2.13:jmh -PjmhArgs="OrderedScanBenchmark -p path=/data/events.vortex -p ordered=false,true -rf json -rff /tmp/events-ordering.json"
+VORTEX_SKIP_MAKE_TEST_FILES=true ./gradlew :vortex-spark-4.0_2.13:jmh -PjmhArgs="OrderedScanBenchmark -p path=/data/featoids.vortex -p ordered=false,true -rf json -rff /tmp/featoids-ordering.json"
+```
+
+Each invocation opens and fully decodes every column through `VortexPartitionReader`,
+without Spark planning, aggregation, filtering, or file splitting. Schema inference runs
+outside the measured region. Use the same files and machine for both modes; repeated scans
+can use warm storage caches. The setup prints the file size and column count alongside the
+JMH parameters. Ordered overhead is `(ordered / unordered - 1) * 100%`; compare the error
+intervals before deciding whether the cost is small enough for a caller to opt in.
 
 See the [Spark user guide](https://docs.vortex.dev/user-guide/spark.html) for supported types,
 options, partitioning, and remote storage details. The
