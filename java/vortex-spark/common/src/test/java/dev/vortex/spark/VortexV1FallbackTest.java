@@ -99,8 +99,12 @@ public final class VortexV1FallbackTest {
                 .mode(SaveMode.Append)
                 .save(output.toString());
 
-        Dataset<Row> data =
-                spark.read().format("vortex").load(output.toString()).orderBy("id");
+        // Only a merged schema has the second file's column.
+        Dataset<Row> data = spark.read()
+                .format("vortex")
+                .option("vortex.mergeSchema", "true")
+                .load(output.toString())
+                .orderBy("id");
         assertTrue(plan(data).contains("Batched: true"), plan(data));
         List<Row> rows = data.collectAsList();
         assertEquals(2, rows.size());
