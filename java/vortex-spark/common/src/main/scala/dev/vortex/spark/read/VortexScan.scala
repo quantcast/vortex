@@ -56,6 +56,9 @@ final class VortexScan(
     override val dataFilters: Seq[Expression]
 ) extends FileScan {
 
+  private lazy val nativePredicates: Array[NativePredicate] =
+    dataFilters.flatMap(VortexListFilter.from(_, dataSchema)).toArray
+
   private val caseSensitiveOptions = options.asCaseSensitiveMap.asScala.toMap
   private val hadoopConf =
     sparkSession.sessionState.newHadoopConfWithOptions(caseSensitiveOptions)
@@ -97,6 +100,7 @@ final class VortexScan(
           readDataSchema,
           readPartitionSchema,
           pushedFilters,
+          nativePredicates,
           caseSensitive
         )
     }
@@ -167,6 +171,7 @@ final class VortexScan(
       .getOrElse("[]")
     super.getMetaData() ++ Map(
       "PushedFilters" -> seqToString(pushedFilters.toSeq),
+      "PushedNativePredicates" -> seqToString(nativePredicates.toSeq),
       "PushedAggregation" -> aggregation,
       "PushedGroupBy" -> groupBy
     )

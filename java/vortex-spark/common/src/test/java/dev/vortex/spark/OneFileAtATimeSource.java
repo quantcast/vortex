@@ -4,6 +4,7 @@
 package dev.vortex.spark;
 
 import dev.vortex.spark.io.VortexIo;
+import dev.vortex.spark.read.NativePredicate;
 import dev.vortex.spark.read.VortexBytesReadMetric;
 import dev.vortex.spark.read.VortexPartitionReaderFactory;
 import java.io.IOException;
@@ -172,6 +173,7 @@ public final class OneFileAtATimeSource implements TableProvider {
                     SCHEMA,
                     new StructType(),
                     new Filter[0],
+                    new NativePredicate[0],
                     false);
             return factory.buildColumnarReader(partitioned);
         }
