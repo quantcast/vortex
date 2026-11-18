@@ -25,6 +25,7 @@ use vortex_array::assert_arrays_eq;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::DecimalDType;
 use vortex_array::dtype::Nullability;
+use vortex_array::dtype::PType;
 use vortex_array::dtype::extension::ExtDType;
 use vortex_array::dtype::extension::ExtId;
 use vortex_array::dtype::extension::ExtVTable;
@@ -386,6 +387,7 @@ struct FloatExtension;
 
 impl ExtVTable for FloatExtension {
     type Metadata = u8;
+    type StoredMetadata = Self::Metadata;
     type NativeValue<'a> = f64;
 
     #[expect(clippy::disallowed_methods, reason = "test-only id")]
@@ -397,14 +399,21 @@ impl ExtVTable for FloatExtension {
         Ok(vec![*metadata])
     }
 
-    fn deserialize_metadata(&self, metadata: &[u8]) -> VortexResult<u8> {
+    fn deserialize_metadata(&self, metadata: &[u8]) -> VortexResult<Self::StoredMetadata> {
         vortex_ensure!(metadata.len() == 1, "expected one metadata byte");
         Ok(metadata[0])
     }
 
-    fn validate_dtype(dtype: &ExtDType<Self>) -> VortexResult<()> {
-        vortex_ensure!(dtype.storage_dtype().is_float(), "expected float storage");
-        Ok(())
+    fn metadata_from_storage(
+        &self,
+        stored_metadata: Self::StoredMetadata,
+        _storage_dtype: &DType,
+    ) -> VortexResult<Self::Metadata> {
+        Ok(stored_metadata)
+    }
+
+    fn storage_dtype(_metadata: &u8) -> DType {
+        DType::Primitive(PType::F64, Nullability::NonNullable)
     }
 
     fn unpack_native<'a>(_dtype: &'a ExtDType<Self>, value: &'a ScalarValue) -> VortexResult<f64> {
@@ -467,7 +476,7 @@ fn nullable_float_bit_patterns(
     )
     .into_array();
     let array = if extension {
-        let dtype = ExtDType::<FloatExtension>::try_new(0, storage.dtype().clone())?;
+        let dtype = ExtDType::<FloatExtension>::try_new(0, storage.dtype().nullability())?;
         ExtensionArray::new(dtype.erased(), storage).into_array()
     } else {
         storage
@@ -490,7 +499,7 @@ fn nullable_float_bit_patterns(
 #[test]
 fn extension_with_constant_storage() -> VortexResult<()> {
     let storage = ConstantArray::new(Scalar::from(f64::NAN), 100).into_array();
-    let dtype = ExtDType::<FloatExtension>::try_new(0, storage.dtype().clone())?;
+    let dtype = ExtDType::<FloatExtension>::try_new(0, storage.dtype().nullability())?;
     let array = ExtensionArray::new(dtype.erased(), storage).into_array();
     let mut ctx = SESSION.create_execution_ctx();
 
@@ -522,7 +531,7 @@ fn encoded_storage_constant_detection(
     let codes = PrimitiveArray::from_iter((0..100u32).map(|i| i % 3)).into_array();
     let storage = DictArray::try_new(codes, values)?.into_array();
     let array = if storage.dtype().is_float() {
-        let dtype = ExtDType::<FloatExtension>::try_new(0, storage.dtype().clone())?;
+        let dtype = ExtDType::<FloatExtension>::try_new(0, storage.dtype().nullability())?;
         ExtensionArray::new(dtype.erased(), storage).into_array()
     } else {
         storage
