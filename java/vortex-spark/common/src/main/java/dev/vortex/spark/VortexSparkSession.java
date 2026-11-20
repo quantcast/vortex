@@ -10,7 +10,6 @@ import java.lang.reflect.Modifier;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * JVM-wide holder for one or more Vortex {@link Session}s used by Spark readers and writers. The Rust side multiplexes
@@ -48,7 +47,8 @@ public final class VortexSparkSession {
     private static final int DEFAULT_WORKER_THREADS = 4;
 
     private static final ConcurrentHashMap<String, Session> providerCache = new ConcurrentHashMap<>();
-    private static final AtomicBoolean runtimeConfigured = new AtomicBoolean();
+    private static final Object runtimeLock = new Object();
+    private static volatile boolean runtimeConfigured;
     private static volatile Session defaultSession;
 
     private VortexSparkSession() {}
@@ -82,13 +82,21 @@ public final class VortexSparkSession {
 
     /**
      * Checks {@value #WORKER_THREADS_OPTION} and {@value #PROVIDER_OPTION} without applying them, so the driver can
-     * reject a value before executors act on it. The provider class is loaded but not instantiated.
+     * reject a value before executors act on it. The provider class is loaded but not instantiated, and one the driver
+     * cannot load is left to the executors.
      *
      * @throws IllegalArgumentException if either option is unusable
      */
     public static void validate(VortexOptions options) {
         workerThreads(options);
-        providerClassName(options).ifPresent(VortexSparkSession::providerConstructor);
+        providerClassName(options).ifPresent(className -> {
+            try {
+                providerConstructor(
+                        Class.forName(className, false, Thread.currentThread().getContextClassLoader()));
+            } catch (ClassNotFoundException | LinkageError e) {
+                // Executors may still load it, for example from a jar added with SparkContext.addJar.
+            }
+        });
     }
 
     private static Optional<String> providerClassName(VortexOptions options) {
@@ -102,11 +110,21 @@ public final class VortexSparkSession {
      * session through here and the first caller wins. Repeating the call per file, or per task, would have concurrent
      * tasks resize the pool underneath each other. Every caller's value is still checked, so a bad one fails even after
      * the pool is sized.
+     *
+     * <p>Callers that arrive while the first one sizes the pool wait for it, so no task runs on the pool before it has
+     * its configured size.
      */
     private static void configureRuntime(VortexOptions options) {
         int workers = workerThreads(options);
-        if (runtimeConfigured.compareAndSet(false, true)) {
-            NativeRuntime.setWorkerThreads(workers);
+        if (runtimeConfigured) {
+            return;
+        }
+
+        synchronized (runtimeLock) {
+            if (!runtimeConfigured) {
+                NativeRuntime.setWorkerThreads(workers);
+                runtimeConfigured = true;
+            }
         }
     }
 
@@ -131,34 +149,34 @@ public final class VortexSparkSession {
 
     private static Session loadProvider(String className) {
         try {
-            VortexSessionProvider provider = providerConstructor(className).newInstance();
+            Class<?> cls = Class.forName(className, true, Thread.currentThread().getContextClassLoader());
+            VortexSessionProvider provider = providerConstructor(cls).newInstance();
             return Objects.requireNonNull(provider.get(), className + ".get() returned null");
         } catch (ReflectiveOperationException e) {
             throw new IllegalArgumentException("Failed to load Vortex session provider " + className, e);
         }
     }
 
-    private static Constructor<? extends VortexSessionProvider> providerConstructor(String className) {
-        Class<?> cls;
-        try {
-            cls = Class.forName(className, false, Thread.currentThread().getContextClassLoader());
-        } catch (ClassNotFoundException e) {
-            throw new IllegalArgumentException(
-                    PROVIDER_OPTION + " names a class that cannot be loaded: " + className, e);
-        }
+    private static Constructor<? extends VortexSessionProvider> providerConstructor(Class<?> cls) {
+        String className = cls.getName();
         if (!VortexSessionProvider.class.isAssignableFrom(cls)) {
             throw new IllegalArgumentException(PROVIDER_OPTION + " names " + className + ", which does not implement "
                     + VortexSessionProvider.class.getName());
         }
-        if (!Modifier.isPublic(cls.getModifiers()) || Modifier.isAbstract(cls.getModifiers())) {
-            throw new IllegalArgumentException(
-                    PROVIDER_OPTION + " names " + className + ", which is not a public concrete class");
+        if (Modifier.isAbstract(cls.getModifiers())) {
+            throw new IllegalArgumentException(PROVIDER_OPTION + " names " + className + ", which is abstract");
         }
+        Constructor<? extends VortexSessionProvider> constructor;
         try {
-            return cls.asSubclass(VortexSessionProvider.class).getConstructor();
+            constructor = cls.asSubclass(VortexSessionProvider.class).getDeclaredConstructor();
         } catch (NoSuchMethodException e) {
             throw new IllegalArgumentException(
-                    PROVIDER_OPTION + " names " + className + ", which has no public no-argument constructor", e);
+                    PROVIDER_OPTION + " names " + className + ", which has no no-argument constructor", e);
         }
+        if (!constructor.canAccess(null)) {
+            throw new IllegalArgumentException(
+                    PROVIDER_OPTION + " names " + className + ", whose no-argument constructor is not accessible");
+        }
+        return constructor;
     }
 }

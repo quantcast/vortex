@@ -11367,6 +11367,7 @@ dependencies = [
  "arrow-select 59.3.2",
  "base64 0.23.1",
  "codspeed-divan-compat",
+ "futures",
  "half",
  "hegeltest",
  "itertools 0.14.0",
@@ -11382,6 +11383,7 @@ dependencies = [
  "vortex-fsst",
  "vortex-mask",
  "vortex-onpair",
+ "vortex-scan",
  "vortex-session",
  "vortex-zstd",
 ]
@@ -12165,7 +12167,6 @@ dependencies = [
  "roaring",
  "rstest",
  "rustc-hash",
- "sketches-ddsketch",
  "smallvec",
  "temp-env",
  "termtree",
@@ -12358,15 +12359,25 @@ dependencies = [
 name = "vortex-scan"
 version = "0.1.0"
 dependencies = [
+ "async-lock",
  "async-trait",
+ "bit-vec 0.10.2",
  "futures",
+ "insta",
+ "itertools 0.14.0",
+ "once_cell",
  "parking_lot",
  "roaring",
  "rstest",
+ "rustc-hash",
+ "sketches-ddsketch",
+ "smallvec",
+ "tokio",
  "tracing",
  "vortex-array",
  "vortex-buffer",
  "vortex-error",
+ "vortex-expr",
  "vortex-io",
  "vortex-mask",
  "vortex-session",
@@ -12479,6 +12490,19 @@ dependencies = [
 [[package]]
 name = "vortex-table"
 version = "0.1.0"
+dependencies = [
+ "futures",
+ "tempfile",
+ "tokio",
+ "vortex",
+ "vortex-array",
+ "vortex-buffer",
+ "vortex-error",
+ "vortex-file",
+ "vortex-io",
+ "vortex-layout",
+ "vortex-session",
+]
 
 [[package]]
 name = "vortex-tensor"

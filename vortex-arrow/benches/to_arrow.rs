@@ -116,7 +116,7 @@ fn array() -> ArrayRef {
         ),
         (
             "decimal",
-            DecimalArray::from_iter(0i64..1024, DecimalDType::new(19, 2)).into_array(),
+            DecimalArray::from_iter(0i128..1024, DecimalDType::new(19, 2)).into_array(),
         ),
     ])
     .unwrap()
@@ -529,12 +529,14 @@ impl DecimalExportCase {
                 spread_values::<i64>(-MAX_P18, MAX_P18),
                 decimal_dtype,
                 Validity::NonNullable,
+                &mut SESSION.create_execution_ctx(),
             )
             .into_array(),
             Self::CanonicalI128P38 => DecimalArray::new(
                 spread_values::<i128>(-MAX_P18, MAX_P18),
                 decimal_dtype,
                 Validity::NonNullable,
+                &mut SESSION.create_execution_ctx(),
             )
             .into_array(),
             Self::MspI32P18 => decimal_byte_parts(
