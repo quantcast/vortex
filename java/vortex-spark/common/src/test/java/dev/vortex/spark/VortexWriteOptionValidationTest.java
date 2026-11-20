@@ -6,17 +6,23 @@ package dev.vortex.spark;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import dev.vortex.api.Session;
 import java.nio.file.Path;
 import java.util.Locale;
+import java.util.Map;
+import java.util.stream.Stream;
 import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.connector.write.LogicalWriteInfo;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /**
  * Write options the writers cannot use fail on the driver, before Spark launches a task.
@@ -26,6 +32,8 @@ import org.junit.jupiter.params.provider.CsvSource;
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public final class VortexWriteOptionValidationTest {
+    private static final StructType SCHEMA = new StructType().add("id", DataTypes.LongType);
+
     private SparkSession spark;
 
     @TempDir
@@ -48,49 +56,75 @@ public final class VortexWriteOptionValidationTest {
         }
     }
 
-    @ParameterizedTest
-    @CsvSource({
-        "batch.size, lots",
-        "batch.size, 0",
-        "vortex.write.batch.size, 65537",
-        "vortex.write.batch.bytes, lots",
-        "vortex.write.batch.bytes, 0",
-        "vortex.write.batch.bytes, -1",
-        "vortex.write.batch.bytes, 9223372036854775808",
-        "vortex.listLayout, yes",
-        "vortex.session.provider, dev.vortex.spark.NoSuchProvider",
-        "vortex.session.provider, java.lang.String",
-        "vortex.session.provider, dev.vortex.spark.VortexSessionProvider",
-        "vortex.session.provider, dev.vortex.spark.VortexWriteOptionValidationTest$AbstractProvider",
-        "vortex.session.provider, dev.vortex.spark.VortexWriteOptionValidationTest$PrivateConstructorProvider",
-        "vortex.workerThreads, many",
-        "vortex.workerThreads, -1"
-    })
-    void anUnusableWriteOptionFailsOnTheDriver(String option, String value) {
-        String output = tempDir.resolve(option + "-" + value).toString();
-        spark.range(10).write().format("vortex").save(output);
-        // A first write fixes the JVM's worker pool, after which a later value used to go unchecked.
-        spark.read().format("vortex").load(output).count();
+    static Stream<Arguments> unusableOptions() {
+        return Stream.of(
+                Arguments.of("batch.size", "lots"),
+                Arguments.of("batch.size", "0"),
+                Arguments.of("vortex.write.batch.size", "lots"),
+                Arguments.of("vortex.write.batch.size", "65537"),
+                Arguments.of("vortex.write.batch.bytes", "lots"),
+                Arguments.of("vortex.write.batch.bytes", "0"),
+                Arguments.of("vortex.write.batch.bytes", "-1"),
+                Arguments.of("vortex.write.batch.bytes", "9223372036854775808"),
+                Arguments.of("vortex.write.compact", "maybe"),
+                Arguments.of("vortex.listLayout", "yes"),
+                Arguments.of("vortex.session.provider", String.class.getName()),
+                Arguments.of("vortex.session.provider", VortexSessionProvider.class.getName()),
+                Arguments.of("vortex.workerThreads", "many"),
+                Arguments.of("vortex.workerThreads", "-1"));
+    }
 
-        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class, () -> spark.range(10)
+    @ParameterizedTest
+    @MethodSource("unusableOptions")
+    void anUnusableOptionFailsAV1WriteOnTheDriver(String option, String value) {
+        String output = tempDir.resolve("v1-" + option + "-" + value).toString();
+        // A first write fixes the JVM's worker pool, after which a later value used to go unchecked.
+        spark.range(10).write().format("vortex").save(output);
+
+        assertNamesOption(option, assertThrows(IllegalArgumentException.class, () -> spark.range(10)
                 .write()
                 .format("vortex")
                 .option(option, value)
                 .mode(SaveMode.Overwrite)
-                .save(output));
+                .save(output)));
+    }
+
+    @ParameterizedTest
+    @MethodSource("unusableOptions")
+    void anUnusableOptionFailsWhenAV2WriteIsPlanned(String option, String value) {
+        // DataFrameWriter sends file sources through the V1 format, so the V2 table is driven directly.
+        String output = tempDir.resolve("v2-" + option + "-" + value).toString();
+        CaseInsensitiveStringMap tableOptions = new CaseInsensitiveStringMap(Map.of("path", output));
+        VortexTable table = (VortexTable) new VortexDataSourceV2().getTable(tableOptions, SCHEMA);
+
+        assertNamesOption(option, assertThrows(IllegalArgumentException.class, () -> table.newWriteBuilder(
+                        writeInfo(option, value))
+                .build()
+                .toBatch()));
+    }
+
+    private static void assertNamesOption(String option, IllegalArgumentException failure) {
         assertTrue(
                 failure.getMessage().toLowerCase(Locale.ROOT).contains(option.toLowerCase(Locale.ROOT)),
                 failure::getMessage);
     }
 
-    public abstract static class AbstractProvider implements VortexSessionProvider {}
+    private static LogicalWriteInfo writeInfo(String option, String value) {
+        return new LogicalWriteInfo() {
+            @Override
+            public String queryId() {
+                return "query";
+            }
 
-    public static final class PrivateConstructorProvider implements VortexSessionProvider {
-        private PrivateConstructorProvider() {}
+            @Override
+            public StructType schema() {
+                return SCHEMA;
+            }
 
-        @Override
-        public Session get() {
-            return VortexSparkSession.get();
-        }
+            @Override
+            public CaseInsensitiveStringMap options() {
+                return new CaseInsensitiveStringMap(Map.of(option, value));
+            }
+        };
     }
 }

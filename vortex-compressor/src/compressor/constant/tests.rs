@@ -25,6 +25,7 @@ use vortex_array::assert_arrays_eq;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::DecimalDType;
 use vortex_array::dtype::Nullability;
+use vortex_array::dtype::PType;
 use vortex_array::dtype::extension::ExtDType;
 use vortex_array::dtype::extension::ExtId;
 use vortex_array::dtype::extension::ExtVTable;
@@ -247,13 +248,14 @@ fn constant_bool_compresses_without_schemes() -> VortexResult<()> {
 
 #[test]
 fn constant_decimal_compresses_without_schemes() -> VortexResult<()> {
+    let mut ctx = SESSION.create_execution_ctx();
     let array = DecimalArray::new(
         buffer![123_456i128; 100],
         DecimalDType::new(20, 2),
         Validity::NonNullable,
+        &mut ctx,
     )
     .into_array();
-    let mut ctx = SESSION.create_execution_ctx();
 
     let compressed = empty_compressor().compress(&array, &mut ctx)?;
     assert!(compressed.is::<Constant>());
@@ -281,7 +283,7 @@ fn constant_timestamp_compresses_without_schemes() -> VortexResult<()> {
 #[case::bool(BoolArray::from_iter(std::iter::repeat_n(false, 1000)).into_array())]
 #[case::utf8(VarBinViewArray::from_iter_str(std::iter::repeat_n("abc", 1000)).into_array())]
 #[case::decimal(
-    DecimalArray::new(buffer![5i64; 1000], DecimalDType::new(10, 2), Validity::NonNullable)
+    DecimalArray::new(buffer![5i64; 1000], DecimalDType::new(10, 2), Validity::NonNullable, &mut SESSION.create_execution_ctx())
         .into_array()
 )]
 fn constant_compresses_with_dict_schemes(#[case] array: ArrayRef) -> VortexResult<()> {
@@ -323,7 +325,7 @@ fn nulls_every_tenth() -> Validity {
         .into_array()
 )]
 #[case::decimal(
-    DecimalArray::new(buffer![5i64; 100], DecimalDType::new(10, 2), nulls_every_tenth())
+    DecimalArray::new(buffer![5i64; 100], DecimalDType::new(10, 2), nulls_every_tenth(), &mut SESSION.create_execution_ctx())
         .into_array()
 )]
 fn masked_constant_compresses_to_masked_constant(
@@ -386,6 +388,7 @@ struct FloatExtension;
 
 impl ExtVTable for FloatExtension {
     type Metadata = u8;
+    type StoredMetadata = Self::Metadata;
     type NativeValue<'a> = f64;
 
     #[expect(clippy::disallowed_methods, reason = "test-only id")]
@@ -397,14 +400,21 @@ impl ExtVTable for FloatExtension {
         Ok(vec![*metadata])
     }
 
-    fn deserialize_metadata(&self, metadata: &[u8]) -> VortexResult<u8> {
+    fn deserialize_metadata(&self, metadata: &[u8]) -> VortexResult<Self::StoredMetadata> {
         vortex_ensure!(metadata.len() == 1, "expected one metadata byte");
         Ok(metadata[0])
     }
 
-    fn validate_dtype(dtype: &ExtDType<Self>) -> VortexResult<()> {
-        vortex_ensure!(dtype.storage_dtype().is_float(), "expected float storage");
-        Ok(())
+    fn metadata_from_storage(
+        &self,
+        stored_metadata: Self::StoredMetadata,
+        _storage_dtype: &DType,
+    ) -> VortexResult<Self::Metadata> {
+        Ok(stored_metadata)
+    }
+
+    fn storage_dtype(_metadata: &u8) -> DType {
+        DType::Primitive(PType::F64, Nullability::NonNullable)
     }
 
     fn unpack_native<'a>(_dtype: &'a ExtDType<Self>, value: &'a ScalarValue) -> VortexResult<f64> {
@@ -467,7 +477,7 @@ fn nullable_float_bit_patterns(
     )
     .into_array();
     let array = if extension {
-        let dtype = ExtDType::<FloatExtension>::try_new(0, storage.dtype().clone())?;
+        let dtype = ExtDType::<FloatExtension>::try_new(0, storage.dtype().nullability())?;
         ExtensionArray::new(dtype.erased(), storage).into_array()
     } else {
         storage
@@ -490,7 +500,7 @@ fn nullable_float_bit_patterns(
 #[test]
 fn extension_with_constant_storage() -> VortexResult<()> {
     let storage = ConstantArray::new(Scalar::from(f64::NAN), 100).into_array();
-    let dtype = ExtDType::<FloatExtension>::try_new(0, storage.dtype().clone())?;
+    let dtype = ExtDType::<FloatExtension>::try_new(0, storage.dtype().nullability())?;
     let array = ExtensionArray::new(dtype.erased(), storage).into_array();
     let mut ctx = SESSION.create_execution_ctx();
 
@@ -522,7 +532,7 @@ fn encoded_storage_constant_detection(
     let codes = PrimitiveArray::from_iter((0..100u32).map(|i| i % 3)).into_array();
     let storage = DictArray::try_new(codes, values)?.into_array();
     let array = if storage.dtype().is_float() {
-        let dtype = ExtDType::<FloatExtension>::try_new(0, storage.dtype().clone())?;
+        let dtype = ExtDType::<FloatExtension>::try_new(0, storage.dtype().nullability())?;
         ExtensionArray::new(dtype.erased(), storage).into_array()
     } else {
         storage
@@ -643,6 +653,7 @@ fn binary_references(
     (0..100).map(|i| if i % 10 == 0 { 99i64 } else { 7 }).collect::<Buffer<_>>(),
     DecimalDType::new(10, 2),
     nulls_every_tenth(),
+    &mut SESSION.create_execution_ctx(),
 ).into_array())]
 fn values_under_nulls_are_ignored(
     #[case] array: ArrayRef,
