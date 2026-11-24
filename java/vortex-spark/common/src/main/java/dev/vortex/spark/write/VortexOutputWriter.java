@@ -235,7 +235,7 @@ public final class VortexOutputWriter extends OutputWriter {
                 fieldWriters[i].write(row, i);
             }
             batchRowCount++;
-            boolean reachedBytes = batchMemory != null && batchMemory.bytes(vectorSchemaRoot) >= batchBytes;
+            boolean reachedBytes = batchMemory != null && batchMemory.reached(vectorSchemaRoot, batchBytes);
             if (batchRowCount >= batchSize || reachedBytes) {
                 writeBatch(reachedBytes);
             }

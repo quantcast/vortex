@@ -40,8 +40,10 @@ public final class ExpressionReachabilityTest {
         List<String> command = new ArrayList<>();
         command.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
         command.addAll(List.of(
-                "-Xms32m",
-                "-Xmx32m",
+                // The GC thread below forces collections. The heap must still hold the cleanables an optimized
+                // native library lets the loop create faster than the Cleaner thread releases them.
+                "-Xms256m",
+                "-Xmx256m",
                 "-Xbatch",
                 "-XX:-TieredCompilation",
                 "-XX:CompileThreshold=100",
