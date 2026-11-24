@@ -20,6 +20,8 @@ import java.util.Arrays;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 final class ArrowBatchMemoryTest {
     @Test
@@ -83,6 +85,43 @@ final class ArrowBatchMemoryTest {
             assertEquals(0, memory.bytes(root));
             root.allocateNew();
             assertEquals(allocator.getAllocatedMemory(), memory.bytes(root));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {1, 64 << 10, 256 << 10, 1 << 20})
+    void reachedAgreesWithTheBatchsSizeAsItsBuffersGrow(long threshold) {
+        // One threshold a writer, so allocations build up between the measurements reached() skips.
+        ArrowBatchMemory memory = new ArrowBatchMemory();
+        StructType schema = new StructType().add("s", DataTypes.StringType).add("id", DataTypes.LongType, false);
+        try (RootAllocator allocator = new RootAllocator(memory, Long.MAX_VALUE);
+                VectorSchemaRoot root = VectorSchemaRoot.create(SparkToArrowSchema.convert(schema), allocator)) {
+            root.allocateNew();
+            VarCharVector strings = (VarCharVector) root.getVector("s");
+            BigIntVector ids = (BigIntVector) root.getVector("id");
+            for (int row = 0; row < 20_000; row++) {
+                strings.setSafe(row, ("value-" + row).getBytes(StandardCharsets.UTF_8));
+                ids.setSafe(row, row);
+                // Nothing else is allocated, so the allocator holds exactly the batch.
+                assertEquals(allocator.getAllocatedMemory() >= threshold, memory.reached(root, threshold), "row " + row);
+            }
+        }
+    }
+
+    @Test
+    void anotherRootIsMeasuredAfreshWithoutNewAllocations() {
+        ArrowBatchMemory memory = new ArrowBatchMemory();
+        StructType schema = new StructType().add("id", DataTypes.LongType, false);
+        try (RootAllocator allocator = new RootAllocator(memory, Long.MAX_VALUE);
+                VectorSchemaRoot first = VectorSchemaRoot.create(SparkToArrowSchema.convert(schema), allocator);
+                VectorSchemaRoot second = VectorSchemaRoot.create(SparkToArrowSchema.convert(schema), allocator)) {
+            second.allocateNew();
+            ((BigIntVector) second.getVector("id")).setSafe(100_000, 1L);
+            first.allocateNew();
+            long firstBytes = memory.bytes(first);
+            long secondBytes = allocator.getAllocatedMemory() - firstBytes;
+            assertTrue(secondBytes > firstBytes);
+            assertEquals(secondBytes, memory.bytes(second));
         }
     }
 }
