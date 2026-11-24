@@ -15,13 +15,13 @@ use vortex_array::expr::bound::pack;
 use vortex_array::expr::traversal::NodeExt;
 use vortex_array::expr::traversal::Transformed;
 use vortex_array::expr::traversal::TraversalOrder;
-use vortex_array::scalar_fn::fns::is_not_null::IsNotNull;
-use vortex_array::scalar_fn::fns::is_null::IsNull;
-use vortex_array::scalar_fn::fns::list_length::ListLength;
-use vortex_array::scalar_fn::fns::list_transform::ListTransform;
-use vortex_array::scalar_fn::fns::list_transform::ListTransformOptions;
+use vortex_array::scalar_fn::builtin::is_not_null::IsNotNull;
+use vortex_array::scalar_fn::builtin::is_null::IsNull;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
+use vortex_functions::list_length::ListLength;
+use vortex_functions::list_transform::ListTransform;
+use vortex_functions::list_transform::ListTransformOptions;
 
 use crate::layouts::struct_::Item;
 use crate::layouts::struct_::step_into_struct_field;

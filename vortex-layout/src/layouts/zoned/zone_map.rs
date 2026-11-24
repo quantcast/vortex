@@ -415,7 +415,6 @@ mod tests {
     use vortex_array::expr::BoundExpression;
     use vortex_array::expr::Expression;
     use vortex_array::expr::cast;
-    use vortex_array::expr::in_list;
     use vortex_array::expr::is_not_null;
     use vortex_array::expr::is_null;
     use vortex_array::expr::lit;
@@ -430,6 +429,7 @@ mod tests {
     use vortex_expr::stats::all_non_null;
     use vortex_expr::stats::all_null;
     use vortex_expr::stats::rewrite::BoundExpressionPruneExt;
+    use vortex_functions::expr::in_list;
     use vortex_mask::Mask;
 
     use crate::layouts::zoned::zone_map::ZoneMap;

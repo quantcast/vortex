@@ -26,6 +26,7 @@ use vortex_array::dtype::DType;
 use vortex_array::dtype::DecimalDType;
 use vortex_array::dtype::Nullability;
 use vortex_array::dtype::PType;
+use vortex_array::dtype::StructFields;
 use vortex_array::dtype::extension::ExtDType;
 use vortex_array::dtype::extension::ExtId;
 use vortex_array::dtype::extension::ExtVTable;
@@ -174,7 +175,7 @@ fn constant_nested_bytes_release_source_buffer() -> VortexResult<()> {
     );
     let backing = field.bytes_at(1);
     let storage = StructArray::from_fields(&[("name", field.into_array())])?.into_array();
-    let dtype = ExtDType::<StructExtension>::try_new(0, storage.dtype().clone())?;
+    let dtype = ExtDType::<StructExtension>::try_new(0, storage.dtype().nullability())?;
     let source = ExtensionArray::new(dtype.erased(), storage).into_array();
     let mut ctx = SESSION.create_execution_ctx();
     let compressed = empty_compressor().compress(&source, &mut ctx)?;
@@ -427,6 +428,7 @@ struct StructExtension;
 
 impl ExtVTable for StructExtension {
     type Metadata = u8;
+    type StoredMetadata = u8;
     type NativeValue<'a> = &'a ScalarValue;
 
     #[expect(clippy::disallowed_methods, reason = "test-only id")]
@@ -443,9 +445,19 @@ impl ExtVTable for StructExtension {
         Ok(metadata[0])
     }
 
-    fn validate_dtype(dtype: &ExtDType<Self>) -> VortexResult<()> {
-        vortex_ensure!(dtype.storage_dtype().is_struct(), "expected struct storage");
-        Ok(())
+    fn metadata_from_storage(
+        &self,
+        stored_metadata: u8,
+        _storage_dtype: &DType,
+    ) -> VortexResult<u8> {
+        Ok(stored_metadata)
+    }
+
+    fn storage_dtype(_metadata: &u8) -> DType {
+        DType::Struct(
+            StructFields::from_iter([("name", DType::Utf8(Nullability::NonNullable))]),
+            Nullability::NonNullable,
+        )
     }
 
     fn unpack_native<'a>(
