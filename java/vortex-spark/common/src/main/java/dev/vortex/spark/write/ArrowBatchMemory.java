@@ -37,7 +37,8 @@ final class ArrowBatchMemory implements AllocationListener {
      * manager holds more than it reports; it costs at most a measurement more a batch.
      */
     boolean reached(VectorSchemaRoot root, long threshold) {
-        if (bytes + 2 * (allocatedBytes.get() - allocatedBytesAtLastMeasure) < threshold) {
+        // The last measurement only bounds the root it was taken of.
+        if (root == this.root && bytes + 2 * (allocatedBytes.get() - allocatedBytesAtLastMeasure) < threshold) {
             return false;
         }
         return bytes(root) >= threshold;

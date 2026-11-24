@@ -99,12 +99,16 @@ final class ArrowBatchMemoryTest {
             root.allocateNew();
             VarCharVector strings = (VarCharVector) root.getVector("s");
             BigIntVector ids = (BigIntVector) root.getVector("id");
-            for (int row = 0; row < 20_000; row++) {
+            boolean reachedOnce = false;
+            for (int row = 0; row < 100_000; row++) {
                 strings.setSafe(row, ("value-" + row).getBytes(StandardCharsets.UTF_8));
                 ids.setSafe(row, row);
                 // Nothing else is allocated, so the allocator holds exactly the batch.
-                assertEquals(allocator.getAllocatedMemory() >= threshold, memory.reached(root, threshold), "row " + row);
+                boolean reached = memory.reached(root, threshold);
+                assertEquals(allocator.getAllocatedMemory() >= threshold, reached, "row " + row);
+                reachedOnce |= reached;
             }
+            assertTrue(reachedOnce);
         }
     }
 
@@ -122,6 +126,8 @@ final class ArrowBatchMemoryTest {
             long secondBytes = allocator.getAllocatedMemory() - firstBytes;
             assertTrue(secondBytes > firstBytes);
             assertEquals(secondBytes, memory.bytes(second));
+            assertEquals(firstBytes, memory.bytes(first));
+            assertTrue(memory.reached(second, secondBytes));
         }
     }
 }
