@@ -555,9 +555,7 @@ mod tests {
     use crate::scalar::Scalar;
     use crate::scalar::ScalarValue;
     use crate::scalar_fn::ScalarFnVTable;
-    use crate::scalar_fn::fns::list_contains::PreparedSet;
-    use crate::scalar_fn::fns::list_contains::PreparedSetData;
-    use crate::scalar_fn::fns::literal::Literal;
+    use crate::scalar_fn::builtin::literal::Literal;
 
     fn session() -> VortexSession {
         VortexSession::empty()
@@ -1205,6 +1203,7 @@ mod tests {
 
     impl ExtVTable for FailingMetadata {
         type Metadata = usize;
+        type StoredMetadata = Self::Metadata;
         type NativeValue<'a> = &'a str;
 
         #[expect(clippy::disallowed_methods, reason = "test-only id")]
@@ -1216,12 +1215,20 @@ mod tests {
             vortex_bail!("metadata serializer failed")
         }
 
-        fn deserialize_metadata(&self, _data: &[u8]) -> VortexResult<Self::Metadata> {
+        fn deserialize_metadata(&self, _data: &[u8]) -> VortexResult<Self::StoredMetadata> {
             Ok(0)
         }
 
-        fn validate_dtype(_ext_dtype: &ExtDType<Self>) -> VortexResult<()> {
-            Ok(())
+        fn metadata_from_storage(
+            &self,
+            stored_metadata: Self::StoredMetadata,
+            _storage_dtype: &DType,
+        ) -> VortexResult<Self::Metadata> {
+            Ok(stored_metadata)
+        }
+
+        fn storage_dtype(_metadata: &Self::Metadata) -> DType {
+            DType::Primitive(PType::I32, Nullability::NonNullable)
         }
 
         fn unpack_native<'a>(
@@ -1233,11 +1240,7 @@ mod tests {
     }
 
     fn failing_metadata_scalar() -> Scalar {
-        let ext_dtype = ExtDType::<FailingMetadata>::try_new(
-            0,
-            DType::Primitive(PType::I32, Nullability::NonNullable),
-        )
-        .unwrap();
+        let ext_dtype = ExtDType::<FailingMetadata>::try_new(0, Nullability::NonNullable).unwrap();
         Scalar::new(
             DType::Extension(ext_dtype.erased()),
             Some(ScalarValue::Primitive(PValue::I32(1))),
@@ -1254,21 +1257,8 @@ mod tests {
     }
 
     #[test]
-    fn scalar_fn_serializers_propagate_extension_metadata_error() {
-        let scalar = failing_metadata_scalar();
-        let err = Literal.serialize(&scalar).unwrap_err();
-        assert!(
-            err.to_string().contains("metadata serializer failed"),
-            "{err}"
-        );
-
-        let list = Scalar::list(
-            scalar.dtype().clone(),
-            vec![scalar],
-            Nullability::NonNullable,
-        );
-        let set = PreparedSetData::try_new(list).unwrap();
-        let err = PreparedSet.serialize(&set).unwrap_err();
+    fn literal_serializer_propagates_extension_metadata_error() {
+        let err = Literal.serialize(&failing_metadata_scalar()).unwrap_err();
         assert!(
             err.to_string().contains("metadata serializer failed"),
             "{err}"
